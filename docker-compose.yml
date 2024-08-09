@@ -1,0 +1,7 @@
+services:
+  edgar-gmr-etl:
+    build:
+      context: .
+    volumes:
+      - .:/app
+    command: sleep infinity
