@@ -1,5 +1,5 @@
 from edgar import *
-import financedatabase as findb
+from wallstreet import Stock
 
 company_name = 'MSFT'
 company_name = 'ASML'
@@ -35,7 +35,8 @@ def load_edgar_data():
         print(facts.query('fact == "%s"' % (facts_map[fact])).get(values))
         input()
 
-def get_historic_stock_data():
+def deprecated_get_historic_stock_data():
+    import financedatabase as findb
     equities = findb.Equities()
     # company = equities.search(name="ASML Holding N.V.", currency="EUR", exchange='GER')
     # company = equities.search(index='ASME.DE')
@@ -62,9 +63,11 @@ def get_historic_stock_data():
 
     return historical_data.get([(field,symbol) for field in fields])
 
-
+def get_historical_stock_data():
+    s = Stock(company_name)
+    return s.historical(days_back=365 * 50, frequency='d')
 
 if __name__ == '__main__':
 
-    print(get_historic_stock_data())
+    print(get_historical_stock_data())
 
