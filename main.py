@@ -1,34 +1,70 @@
 from edgar import *
-
-set_identity("Bernardo Marques bernardomarques5@gmail.com")
+import financedatabase as findb
 
 company_name = 'MSFT'
 company_name = 'ASML'
 
-facts = Company(company_name).get_facts().to_pandas()
+def load_edgar_data():
 
-facts_map = {
-    'revenue': 'SalesRevenueNet',
-    'income': 'NetIncomeLoss',
-    'assets': 'Assets',
-    'liabilities': 'Liabilities',
-    'equity': 'StockholdersEquity',
-    'shares': 'CommonStockSharesIssued',
-    'shares_outstanding': 'CommonStockSharesOutstanding',
-    'shares_issued': 'SharesIssued',
-    'dividends': 'PaymentsOfDividends',
-    'assets current': 'AssetsCurrent',
-    'inventory': 'InventoryNet',
-    'prepaid expenses': 'PrepaidExpenseCurrent',
-    'liabilities current': 'LiabilitiesCurrent',
-    'cash flow from operations': 'NetCashProvidedByUsedInContinuingOperations',
-    'ppe': 'PropertyPlantAndEquipmentNet'
-}
+    set_identity("Bernardo Marques bernardomarques5@gmail.com")
 
-values = ['val', 'start', 'end', 'form', 'filed']
+    facts = Company(company_name).get_facts().to_pandas()
 
-for fact in facts_map:
-    print(fact)
-    print(facts.query('fact == "%s"' % (facts_map[fact])).get(values))
-    input()
+    facts_map = {
+        'revenue': 'SalesRevenueNet',
+        'income': 'NetIncomeLoss',
+        'assets': 'Assets',
+        'liabilities': 'Liabilities',
+        'equity': 'StockholdersEquity',
+        'shares': 'CommonStockSharesIssued',
+        'shares_outstanding': 'CommonStockSharesOutstanding',
+        'shares_issued': 'SharesIssued',
+        'dividends': 'PaymentsOfDividends',
+        'assets current': 'AssetsCurrent',
+        'inventory': 'InventoryNet',
+        'prepaid expenses': 'PrepaidExpenseCurrent',
+        'liabilities current': 'LiabilitiesCurrent',
+        'cash flow from operations': 'NetCashProvidedByUsedInContinuingOperations',
+        'ppe': 'PropertyPlantAndEquipmentNet'
+    }
+
+    values = ['val', 'start', 'end', 'form', 'filed']
+
+    for fact in facts_map:
+        print(fact)
+        print(facts.query('fact == "%s"' % (facts_map[fact])).get(values))
+        input()
+
+def get_historic_stock_data():
+    equities = findb.Equities()
+    # company = equities.search(name="ASML Holding N.V.", currency="EUR", exchange='GER')
+    # company = equities.search(index='ASME.DE')
+    company = equities.search(index='^%s$' % (company_name))
+    company_tk = company.to_toolkit()
+    historical_data = company_tk.get_historical_data()
+
+    symbol = company.index[0]
+
+    fields = [
+        'Open',
+        'High',
+        'Low',
+        'Close',
+        'Adj Close',
+        'Volume',
+        'Dividends',
+        'Return',
+        'Volatility',
+        'Excess Return',
+        'Excess Volatility',
+        'Cumulative Return',
+    ]
+
+    return historical_data.get([(field,symbol) for field in fields])
+
+
+
+if __name__ == '__main__':
+
+    print(get_historic_stock_data())
 
