@@ -67,7 +67,16 @@ def get_historical_stock_data():
     s = Stock(company_name)
     return s.historical(days_back=365 * 50, frequency='d')
 
+def get_current_stock_price():
+    s = Stock(company_name)
+    return s.price
+
+def get_splits():
+    import yfinance as yf
+    company = yf.Ticker(company_name)
+    return company.actions.query('`Stock Splits` > 0').get('Stock Splits')
+
 if __name__ == '__main__':
 
-    print(get_historical_stock_data())
-
+    # print(get_historical_stock_data())
+    print(get_splits())

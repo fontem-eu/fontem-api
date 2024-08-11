@@ -1,3 +1,4 @@
 wallstreet
 financedatabase
 edgartools
+yfinance
