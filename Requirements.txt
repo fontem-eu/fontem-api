@@ -1,4 +1,6 @@
-wallstreet
-financedatabase
 edgartools
 yfinance
+pandas
+numpy
+matplotlib
+rich

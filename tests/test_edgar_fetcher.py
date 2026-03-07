@@ -1,0 +1,82 @@
+"""
+Integration tests for EdgarFetcher (edgartools).
+These hit the real SEC EDGAR API — run with network access.
+"""
+import pytest
+import pandas as pd
+from src.data.edgar_fetcher import EdgarFetcher
+
+TICKER = "AAPL"
+IDENTITY = "test@bemar-edgar.com"
+
+@pytest.fixture(scope="module")
+def fundamentals():
+    fetcher = EdgarFetcher(identity=IDENTITY)
+    return fetcher.fetch_fundamentals(TICKER, years=5)
+
+# ── top-level structure ────────────────────────────────────────────────────
+
+def test_returns_dict(fundamentals):
+    assert isinstance(fundamentals, dict)
+
+def test_ticker_key(fundamentals):
+    assert fundamentals["ticker"] == TICKER
+
+def test_all_expected_keys_present(fundamentals):
+    expected = ["revenue", "net_income", "total_assets", "total_liabilities",
+                "equity", "operating_cashflow", "current_assets",
+                "current_liabilities", "shares_outstanding", "eps"]
+    for key in expected:
+        assert key in fundamentals, f"Missing key: {key}"
+
+# ── revenue ────────────────────────────────────────────────────────────────
+
+def test_revenue_is_series(fundamentals):
+    assert isinstance(fundamentals["revenue"], pd.Series)
+
+def test_revenue_not_empty(fundamentals):
+    assert not fundamentals["revenue"].empty, "Revenue series is empty"
+
+def test_revenue_index_is_integers(fundamentals):
+    rev = fundamentals["revenue"]
+    assert rev.index.dtype == int or all(isinstance(i, (int,)) for i in rev.index), \
+        f"Expected int index, got {rev.index.dtype}"
+
+def test_revenue_values_positive(fundamentals):
+    rev = fundamentals["revenue"]
+    assert (rev > 0).all(), f"Some revenue values are not positive: {rev}"
+
+def test_revenue_sorted_descending(fundamentals):
+    rev = fundamentals["revenue"]
+    assert list(rev.index) == sorted(rev.index, reverse=True), \
+        "Revenue index should be sorted descending (most recent first)"
+
+# ── net income ─────────────────────────────────────────────────────────────
+
+def test_net_income_is_series(fundamentals):
+    assert isinstance(fundamentals["net_income"], pd.Series)
+
+def test_net_income_not_empty(fundamentals):
+    assert not fundamentals["net_income"].empty, "Net income series is empty"
+
+# ── equity ─────────────────────────────────────────────────────────────────
+
+def test_equity_not_empty(fundamentals):
+    assert not fundamentals["equity"].empty, "Equity series is empty"
+
+# ── raw dataframes available ───────────────────────────────────────────────
+
+def test_raw_balance_sheet_available(fundamentals):
+    bs = fundamentals["_balance_sheet"]
+    assert isinstance(bs, pd.DataFrame)
+    assert not bs.empty
+
+def test_raw_income_available(fundamentals):
+    inc = fundamentals["_income"]
+    assert isinstance(inc, pd.DataFrame)
+    assert not inc.empty
+
+def test_raw_cashflow_available(fundamentals):
+    cf = fundamentals["_cashflow"]
+    assert isinstance(cf, pd.DataFrame)
+    assert not cf.empty

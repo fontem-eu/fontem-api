@@ -1,0 +1,265 @@
+"""
+EDGAR Financial Data Fetcher
+=============================
+Fetches and parses annual 10-K filing data from the SEC EDGAR database using
+the `edgartools` library.  Returns clean, numeric pandas Series indexed by
+fiscal year (int) for each key financial concept.
+
+Concept matching uses a priority list approach: the XBRL filing labels used by
+different companies are inconsistent, so we try common names in order of
+preference and fall back to partial-string matching.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Dict, List, Optional
+
+import pandas as pd
+from edgar import Company, set_identity
+from edgar.xbrl import XBRLS
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Priority label lists for key financial concepts
+# (most common / most standard first)
+# ---------------------------------------------------------------------------
+
+_REVENUE = [
+    "Revenues", "Revenue", "Net revenues", "Total revenues",
+    "Net sales", "Total net revenues", "Sales",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "SalesRevenueNet", "Total Revenue",
+]
+_NET_INCOME = [
+    "Net income", "Net Income", "Net income (loss)",
+    "Net earnings", "NetIncomeLoss",
+    "Net Income (Loss) Attributable to Parent",
+    "Net income attributable to common stockholders",
+    "ProfitLoss",
+]
+_TOTAL_ASSETS = [
+    "Total assets", "Total Assets", "Assets",
+]
+_TOTAL_LIABILITIES = [
+    "Total liabilities", "Total Liabilities",
+    "Liabilities", "Total liabilities and stockholders' equity",
+]
+_EQUITY = [
+    "Total stockholders' equity",
+    "Total shareholders' equity",
+    "Total equity",
+    "Stockholders' equity",
+    "Total Stockholders' Equity",
+    "StockholdersEquity",
+    "Total shareholders equity",
+]
+_OPERATING_CF = [
+    "Net cash provided by operating activities",
+    "Net cash from operating activities",
+    "Cash flows from operating activities",
+    "NetCashProvidedByUsedInOperatingActivities",
+    "Net Cash Provided by Operating Activities",
+    "Cash provided by operating activities",
+]
+_CURRENT_ASSETS = [
+    "Total current assets", "Current assets", "AssetsCurrent",
+]
+_CURRENT_LIABILITIES = [
+    "Total current liabilities", "Current liabilities", "LiabilitiesCurrent",
+]
+_SHARES_OUTSTANDING = [
+    "Common shares outstanding", "Shares outstanding",
+    "CommonStockSharesOutstanding",
+    "WeightedAverageNumberOfSharesOutstandingBasic",
+    "Weighted average shares outstanding - basic",
+    "Weighted average common shares outstanding",
+]
+_EPS = [
+    "Earnings per share - basic", "Basic earnings per share",
+    "EarningsPerShareBasic", "Basic EPS",
+    "Net income per share - basic",
+    "Earnings per share - diluted", "EarningsPerShareDiluted",
+    "Diluted EPS",
+]
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Metadata columns produced by edgartools' to_dataframe()
+_META_COLS = {"label", "concept", "standard_concept"}
+
+
+def _date_cols(df: pd.DataFrame) -> List[str]:
+    """Return only the date-value columns (skip label / concept columns)."""
+    return [c for c in df.columns if c not in _META_COLS]
+
+
+def _find_concept(df: pd.DataFrame, labels: List[str]) -> Optional[pd.Series]:
+    """
+    Search a financial-statement DataFrame for a concept.
+
+    edgartools' ``to_dataframe()`` returns a DataFrame with integer RangeIndex
+    and columns:  label | concept | standard_concept | <date1> | <date2> …
+
+    We search the ``label`` column first (exact then substring, case-insensitive),
+    then fall back to ``standard_concept``.  Returns a Series of only the
+    date-value columns for the first matching row.
+    """
+    if df is None or df.empty or "label" not in df.columns:
+        return None
+
+    value_cols = _date_cols(df)
+    if not value_cols:
+        return None
+
+    lbl_lower = df["label"].astype(str).str.lower().str.strip()
+    std_lower = (
+        df["standard_concept"].astype(str).str.lower().str.strip()
+        if "standard_concept" in df.columns
+        else None
+    )
+
+    def _search(series, key: str) -> Optional[pd.Series]:
+        # exact
+        mask = series == key
+        if mask.any():
+            return df.loc[mask.idxmax(), value_cols]
+        # substring
+        mask = series.str.contains(key, regex=False, na=False)
+        if mask.any():
+            return df.loc[mask.idxmax(), value_cols]
+        return None
+
+    for candidate in labels:
+        key = candidate.lower().strip()
+        result = _search(lbl_lower, key)
+        if result is not None:
+            return result
+        if std_lower is not None:
+            result = _search(std_lower, key)
+            if result is not None:
+                return result
+
+    return None
+
+
+def _to_annual_series(row: Optional[pd.Series]) -> pd.Series:
+    """
+    Convert a row of date-keyed values (e.g. ``{"2025-09-27": 4.16e11, …}``)
+    into a numeric pandas Series indexed by integer fiscal year, sorted
+    most-recent first.  Non-numeric / zero / NaN values are dropped.
+    """
+    if row is None:
+        return pd.Series(dtype=float)
+
+    result: Dict[int, float] = {}
+    for col, val in row.items():
+        try:
+            if hasattr(col, "year"):
+                year = int(col.year)
+            else:
+                m = re.search(r"(\d{4})", str(col))
+                if not m:
+                    continue
+                year = int(m.group(1))
+
+            numeric = float(val)
+            if pd.notna(numeric) and numeric != 0.0:
+                if year not in result:          # keep most-recent if dupes
+                    result[year] = numeric
+        except (ValueError, TypeError):
+            continue
+
+    if not result:
+        return pd.Series(dtype=float)
+
+    return pd.Series(result).sort_index(ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+class EdgarFetcher:
+    """
+    Fetches and structures fundamental financial data from SEC EDGAR 10-K
+    filings using the `edgartools` library.
+    """
+
+    def __init__(self, identity: str = "bemar-edgar@research.com"):
+        """
+        Args:
+            identity: An e-mail address required by the SEC EDGAR API to
+                      identify the data consumer.  Use your own address.
+        """
+        set_identity(identity)
+
+    # ------------------------------------------------------------------
+    def fetch_fundamentals(self, ticker: str, years: int = 10) -> Dict:
+        """
+        Fetch and parse 10-K fundamental data for *ticker*.
+
+        Returns a dict with the following keys, each containing an annual
+        pd.Series indexed by integer fiscal year (descending):
+
+            ticker, revenue, net_income, total_assets, total_liabilities,
+            equity, operating_cashflow, current_assets, current_liabilities,
+            shares_outstanding, eps,
+            _balance_sheet, _income, _cashflow   ← raw DataFrames
+
+        Any concept that cannot be located in the filing returns an empty
+        Series so callers never need to handle None.
+        """
+        logger.info("Fetching EDGAR data for %s (%d years)…", ticker, years)
+
+        company = Company(ticker)
+        filings = company.get_filings(form="10-K").head(years)
+
+        if len(filings) == 0:
+            raise ValueError(f"No 10-K filings found for '{ticker}'")
+
+        xbrls = XBRLS.from_filings(filings)
+
+        bs_df = xbrls.statements.balance_sheet(max_periods=years).to_dataframe()
+        inc_df = xbrls.statements.income_statement(max_periods=years).to_dataframe()
+        cf_df = xbrls.statements.cashflow_statement(max_periods=years).to_dataframe()
+
+        revenue            = _to_annual_series(_find_concept(inc_df, _REVENUE))
+        net_income         = _to_annual_series(_find_concept(inc_df, _NET_INCOME))
+        total_assets       = _to_annual_series(_find_concept(bs_df,  _TOTAL_ASSETS))
+        total_liabilities  = _to_annual_series(_find_concept(bs_df,  _TOTAL_LIABILITIES))
+        equity             = _to_annual_series(_find_concept(bs_df,  _EQUITY))
+        operating_cf       = _to_annual_series(_find_concept(cf_df,  _OPERATING_CF))
+        current_assets     = _to_annual_series(_find_concept(bs_df,  _CURRENT_ASSETS))
+        current_liab       = _to_annual_series(_find_concept(bs_df,  _CURRENT_LIABILITIES))
+        shares             = _to_annual_series(_find_concept(bs_df,  _SHARES_OUTSTANDING))
+        eps                = _to_annual_series(_find_concept(inc_df, _EPS))
+
+        # Fallback: derive equity from assets − liabilities when not stated
+        if equity.empty and not total_assets.empty and not total_liabilities.empty:
+            common = total_assets.index.intersection(total_liabilities.index)
+            if len(common):
+                equity = (total_assets[common] - total_liabilities[common])
+
+        return {
+            "ticker":              ticker.upper(),
+            "revenue":             revenue,
+            "net_income":          net_income,
+            "total_assets":        total_assets,
+            "total_liabilities":   total_liabilities,
+            "equity":              equity,
+            "operating_cashflow":  operating_cf,
+            "current_assets":      current_assets,
+            "current_liabilities": current_liab,
+            "shares_outstanding":  shares,
+            "eps":                 eps,
+            # Raw DataFrames available for debugging / advanced queries
+            "_balance_sheet":      bs_df,
+            "_income":             inc_df,
+            "_cashflow":           cf_df,
+        }
