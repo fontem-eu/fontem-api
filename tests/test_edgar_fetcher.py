@@ -23,9 +23,13 @@ def test_ticker_key(fundamentals):
     assert fundamentals["ticker"] == TICKER
 
 def test_all_expected_keys_present(fundamentals):
-    expected = ["revenue", "net_income", "total_assets", "total_liabilities",
-                "equity", "operating_cashflow", "current_assets",
-                "current_liabilities", "shares_outstanding", "eps"]
+    expected = [
+        "revenue", "net_income", "total_assets", "total_liabilities",
+        "equity", "operating_cashflow", "capex", "free_cashflow",
+        "current_assets", "current_liabilities",
+        "inventory", "prepaid_expenses",
+        "shares_outstanding", "eps",
+    ]
     for key in expected:
         assert key in fundamentals, f"Missing key: {key}"
 
@@ -80,3 +84,52 @@ def test_raw_cashflow_available(fundamentals):
     cf = fundamentals["_cashflow"]
     assert isinstance(cf, pd.DataFrame)
     assert not cf.empty
+
+# ── capex ──────────────────────────────────────────────────────────────────
+
+def test_capex_is_series(fundamentals):
+    assert isinstance(fundamentals["capex"], pd.Series)
+
+def test_capex_not_empty(fundamentals):
+    assert not fundamentals["capex"].empty, "CapEx series is empty (check _CAPEX labels)"
+
+def test_capex_values_positive(fundamentals):
+    """CapEx is stored as positive magnitude (we flipped the sign from CF statement)."""
+    capex = fundamentals["capex"]
+    if not capex.empty:
+        assert (capex > 0).all(), f"CapEx should be positive after sign flip: {capex}"
+
+# ── free cash flow ─────────────────────────────────────────────────────────
+
+def test_free_cashflow_is_series(fundamentals):
+    assert isinstance(fundamentals["free_cashflow"], pd.Series)
+
+def test_free_cashflow_not_empty(fundamentals):
+    assert not fundamentals["free_cashflow"].empty, "FCF series is empty"
+
+def test_free_cashflow_is_positive_for_aapl(fundamentals):
+    """AAPL generates substantial FCF every year."""
+    fcf = fundamentals["free_cashflow"]
+    if not fcf.empty:
+        assert (fcf > 0).all(), f"AAPL FCF should always be positive: {fcf}"
+
+# ── inventory ──────────────────────────────────────────────────────────────
+
+def test_inventory_is_series(fundamentals):
+    assert isinstance(fundamentals["inventory"], pd.Series)
+
+def test_inventory_not_empty(fundamentals):
+    """AAPL is a hardware company and reports inventory."""
+    assert not fundamentals["inventory"].empty, "Inventory series is empty"
+
+def test_inventory_values_positive(fundamentals):
+    inv = fundamentals["inventory"]
+    if not inv.empty:
+        assert (inv > 0).all(), f"Inventory should be positive: {inv}"
+
+# ── prepaid expenses ───────────────────────────────────────────────────────
+
+def test_prepaid_expenses_is_series(fundamentals):
+    assert isinstance(fundamentals["prepaid_expenses"], pd.Series)
+
+# (prepaid may be empty for some companies — we only assert type here)

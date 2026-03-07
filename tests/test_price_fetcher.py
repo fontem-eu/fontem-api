@@ -60,3 +60,116 @@ def test_get_dividend_yield_returns_float(fetcher):
     dy = fetcher.get_dividend_yield(TICKER)
     assert isinstance(dy, float), f"Expected float, got {type(dy)}"
     assert dy >= 0, f"Dividend yield should be >= 0, got {dy}"
+
+# ── get_avg_volume ─────────────────────────────────────────────────────────
+
+def test_get_avg_volume_returns_positive(fetcher):
+    vol = fetcher.get_avg_volume(TICKER)
+    if vol is not None:
+        assert vol > 0, f"Average volume should be positive, got {vol}"
+
+# ── get_annual_avg_prices ──────────────────────────────────────────────────
+
+def test_annual_avg_prices_is_series(fetcher):
+    s = fetcher.get_annual_avg_prices(TICKER, period="5y")
+    assert isinstance(s, pd.Series), f"Expected pd.Series, got {type(s)}"
+
+def test_annual_avg_prices_not_empty(fetcher):
+    s = fetcher.get_annual_avg_prices(TICKER, period="5y")
+    assert not s.empty, "Annual avg prices series is empty"
+
+def test_annual_avg_prices_index_is_integers(fetcher):
+    s = fetcher.get_annual_avg_prices(TICKER, period="5y")
+    assert s.index.dtype == int or all(isinstance(i, int) for i in s.index)
+
+def test_annual_avg_prices_sorted_descending(fetcher):
+    s = fetcher.get_annual_avg_prices(TICKER, period="5y")
+    assert list(s.index) == sorted(s.index, reverse=True)
+
+def test_annual_avg_prices_values_positive(fetcher):
+    s = fetcher.get_annual_avg_prices(TICKER, period="5y")
+    assert (s > 0).all(), "All annual average prices should be positive"
+
+# ── get_annual_dividends ───────────────────────────────────────────────────
+
+def test_annual_dividends_is_series(fetcher):
+    s = fetcher.get_annual_dividends(TICKER)
+    assert isinstance(s, pd.Series)
+
+def test_annual_dividends_not_empty_for_aapl(fetcher):
+    """AAPL has paid dividends since 2012."""
+    s = fetcher.get_annual_dividends(TICKER)
+    assert not s.empty, "AAPL annual dividends should not be empty"
+
+def test_annual_dividends_values_positive(fetcher):
+    s = fetcher.get_annual_dividends(TICKER)
+    if not s.empty:
+        assert (s > 0).all(), "Dividend amounts should be positive"
+
+def test_annual_dividends_index_is_integers(fetcher):
+    s = fetcher.get_annual_dividends(TICKER)
+    if not s.empty:
+        assert s.index.dtype == int or all(isinstance(i, int) for i in s.index)
+
+# ── get_last_dividend ──────────────────────────────────────────────────────
+
+def test_last_dividend_returns_dict(fetcher):
+    d = fetcher.get_last_dividend(TICKER)
+    assert isinstance(d, dict)
+
+def test_last_dividend_has_expected_keys(fetcher):
+    d = fetcher.get_last_dividend(TICKER)
+    assert "date" in d and "amount" in d
+
+def test_last_dividend_amount_positive_for_aapl(fetcher):
+    d = fetcher.get_last_dividend(TICKER)
+    assert d["amount"] > 0, f"AAPL last dividend amount should be positive: {d}"
+
+def test_last_dividend_date_is_string(fetcher):
+    d = fetcher.get_last_dividend(TICKER)
+    if d["date"] is not None:
+        assert isinstance(d["date"], str)
+
+# ── get_splits ─────────────────────────────────────────────────────────────
+
+def test_get_splits_returns_series(fetcher):
+    s = fetcher.get_splits(TICKER)
+    assert isinstance(s, pd.Series)
+
+def test_get_splits_not_empty_for_aapl(fetcher):
+    """AAPL has had multiple splits (most recently 4:1 in 2020)."""
+    s = fetcher.get_splits(TICKER)
+    assert not s.empty, "AAPL should have split history"
+
+def test_get_splits_values_positive(fetcher):
+    s = fetcher.get_splits(TICKER)
+    if not s.empty:
+        assert (s > 0).all(), "Split ratios should be positive"
+
+def test_get_splits_index_is_integers(fetcher):
+    s = fetcher.get_splits(TICKER)
+    if not s.empty:
+        assert s.index.dtype == int or all(isinstance(i, int) for i in s.index)
+
+# ── get_latest_quarter ─────────────────────────────────────────────────────
+
+def test_latest_quarter_returns_dict(fetcher):
+    q = fetcher.get_latest_quarter(TICKER)
+    assert isinstance(q, dict)
+
+def test_latest_quarter_has_expected_keys(fetcher):
+    q = fetcher.get_latest_quarter(TICKER)
+    if q:  # may be empty if yfinance returns nothing
+        for key in ["as_of", "current_assets", "current_liabilities",
+                    "total_liabilities", "equity"]:
+            assert key in q, f"Missing key '{key}' in latest_quarter"
+
+def test_latest_quarter_as_of_is_string(fetcher):
+    q = fetcher.get_latest_quarter(TICKER)
+    if q and q.get("as_of"):
+        assert isinstance(q["as_of"], str)
+
+def test_latest_quarter_current_assets_positive(fetcher):
+    q = fetcher.get_latest_quarter(TICKER)
+    if q and q.get("current_assets") is not None:
+        assert q["current_assets"] > 0

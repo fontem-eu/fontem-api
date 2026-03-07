@@ -105,3 +105,146 @@ class PriceFetcher:
         """Return trailing 12-month dividends per share."""
         info = self.get_info(ticker)
         return float(info.get("trailingAnnualDividendRate") or 0.0)
+
+    # ------------------------------------------------------------------
+    def get_avg_volume(self, ticker: str) -> Optional[float]:
+        """Return the 3-month average daily trading volume, or None."""
+        info = self.get_info(ticker)
+        val = info.get("averageVolume") or info.get("averageDailyVolume3Month")
+        return float(val) if val else None
+
+    # ------------------------------------------------------------------
+    def get_annual_avg_prices(self, ticker: str, period: str = "10y") -> pd.Series:
+        """
+        Return the average closing price for each calendar year as a
+        pd.Series indexed by integer year (descending).
+
+        Computed by taking the mean of all daily closes within each year
+        from the OHLCV history.
+        """
+        hist = self.get_history(ticker, period=period)
+        if hist.empty:
+            return pd.Series(dtype=float)
+        annual = (
+            hist["Close"]
+            .groupby(hist.index.year)
+            .mean()
+            .sort_index(ascending=False)
+        )
+        annual.index = annual.index.astype(int)
+        return annual
+
+    # ------------------------------------------------------------------
+    def get_annual_dividends(self, ticker: str) -> pd.Series:
+        """
+        Return total dividends paid per calendar year as a pd.Series
+        indexed by integer year (descending).
+
+        Aggregates individual dividend events from yfinance, which is
+        typically quarterly for US stocks.
+        """
+        try:
+            divs = yf.Ticker(ticker).dividends
+            if divs is None or divs.empty:
+                return pd.Series(dtype=float)
+            if divs.index.tz is not None:
+                divs.index = divs.index.tz_localize(None)
+            annual = divs.groupby(divs.index.year).sum().sort_index(ascending=False)
+            annual.index = annual.index.astype(int)
+            return annual
+        except Exception as exc:
+            logger.debug("get_annual_dividends failed for %s: %s", ticker, exc)
+            return pd.Series(dtype=float)
+
+    # ------------------------------------------------------------------
+    def get_last_dividend(self, ticker: str) -> dict:
+        """
+        Return the most recent dividend event as ``{"date": str, "amount": float}``.
+        Returns ``{"date": None, "amount": 0.0}`` if none found.
+        """
+        try:
+            divs = yf.Ticker(ticker).dividends
+            if divs is None or divs.empty:
+                return {"date": None, "amount": 0.0}
+            if divs.index.tz is not None:
+                divs.index = divs.index.tz_localize(None)
+            last = divs.iloc[-1]
+            last_date = divs.index[-1]
+            return {
+                "date": str(last_date.date()) if hasattr(last_date, "date") else str(last_date),
+                "amount": float(last),
+            }
+        except Exception as exc:
+            logger.debug("get_last_dividend failed for %s: %s", ticker, exc)
+            return {"date": None, "amount": 0.0}
+
+    # ------------------------------------------------------------------
+    def get_splits(self, ticker: str) -> pd.Series:
+        """
+        Return stock split history as a pd.Series of split ratios indexed
+        by integer year (descending).  Consolidates multiple splits in the
+        same year by multiplying them together.
+
+        A ratio > 1 means forward split (e.g. 4.0 = 4-for-1).
+        Returns an empty Series if no splits exist.
+        """
+        try:
+            splits = yf.Ticker(ticker).splits
+            if splits is None or splits.empty:
+                return pd.Series(dtype=float)
+            if splits.index.tz is not None:
+                splits.index = splits.index.tz_localize(None)
+            # Combine multiple splits in the same year by multiplying
+            annual = splits.groupby(splits.index.year).prod().sort_index(ascending=False)
+            annual.index = annual.index.astype(int)
+            return annual
+        except Exception as exc:
+            logger.debug("get_splits failed for %s: %s", ticker, exc)
+            return pd.Series(dtype=float)
+
+    # ------------------------------------------------------------------
+    def get_latest_quarter(self, ticker: str) -> dict:
+        """
+        Return a snapshot of the most recent quarterly balance sheet values.
+
+        Keys returned:
+            current_assets, inventory, prepaid_expenses, current_liabilities,
+            total_liabilities, equity, shares_outstanding
+
+        Values are floats (or None if not reported).  Data is sourced from
+        yfinance's quarterly balance sheet which lags 10-Q filings by ~45 days.
+        """
+        try:
+            t = yf.Ticker(ticker)
+            qbs = t.quarterly_balance_sheet
+            if qbs is None or qbs.empty:
+                return {}
+            # Most recent quarter is the first column
+            col = qbs.columns[0]
+            row = qbs[col]
+
+            def _get(*keys) -> Optional[float]:
+                for k in keys:
+                    if k in row.index:
+                        val = row[k]
+                        if pd.notna(val):
+                            return float(val)
+                return None
+
+            return {
+                "as_of":              str(col.date()) if hasattr(col, "date") else str(col),
+                "current_assets":     _get("Current Assets", "Total Current Assets"),
+                "inventory":          _get("Inventory"),
+                "prepaid_expenses":   _get("Prepaid Expenses", "Other Current Assets",
+                                           "Prepaid And Other Current Assets"),
+                "current_liabilities":_get("Current Liabilities", "Total Current Liabilities"),
+                "total_liabilities":  _get("Total Liabilities Net Minority Interest",
+                                           "Total Liabilities"),
+                "equity":             _get("Stockholders Equity", "Total Equity Gross Minority Interest",
+                                           "Common Stock Equity"),
+                "shares_outstanding": _get("Ordinary Shares Number", "Share Issued",
+                                           "Common Stock"),
+            }
+        except Exception as exc:
+            logger.debug("get_latest_quarter failed for %s: %s", ticker, exc)
+            return {}
