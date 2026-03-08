@@ -14,3 +14,7 @@ rich
 fastapi
 uvicorn[standard]
 httpx
+
+# Caching
+redis
+fakeredis

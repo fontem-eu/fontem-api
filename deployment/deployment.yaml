@@ -2,22 +2,24 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   namespace: gmr
-  name: edgar-gmr-etl
+  name: gmr-api
   labels:
-    app: edgar-gmr-etl
+    app: gmr-api
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: edgar-gmr-etl
+      app: gmr-api
   template:
     metadata:
       labels:
-        app: edgar-gmr-etl
+        app: gmr-api
     spec:
+      imagePullSecrets:
+        - name: regcred
       containers:
-        - name: edgar-gmr-etl
-          image: ghcr.io/bemar/edgar-gmr-etl:latest
+        - name: gmr-api
+          image: contribute.void42.internal/golden/gmr-api:e6e822c
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
