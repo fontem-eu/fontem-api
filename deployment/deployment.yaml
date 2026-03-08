@@ -49,3 +49,25 @@ spec:
             # Override to send your own identity to the SEC EDGAR API.
             - name: EDGAR_IDENTITY
               value: "bemar-edgar@research.com"
+
+            # Cache Configuration
+            - name: CACHE_PROVIDER
+              value: "redis"
+            - name: REDIS_HOST
+              value: "gmr-redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB
+              value: "0"
+
+            # Cache TTL Configuration (in seconds)
+            - name: CACHE_TTL_FUNDAMENTALS
+              value: "86400"  # 24 hours
+            - name: CACHE_TTL_PRICES
+              value: "3600"   # 1 hour
+            - name: CACHE_TTL_MARKET_SNAPSHOT
+              value: "300"    # 5 minutes
+
+            # Cache Key Configuration
+            - name: CACHE_KEY_PREFIX
+              value: "gmretl:"
