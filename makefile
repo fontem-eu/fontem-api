@@ -1,13 +1,11 @@
 
-all: build start attach
+all: build release deploy
 
 build:
-	docker compose build
+	docker build -t contribute.void42.internal/golden/gmr-api:$(shell git rev-parse --short HEAD) .
 
-start:
-	docker compose down -t 0
-	docker compose up -d
+release:
+	docker push contribute.void42.internal/golden/gmr-api:$(shell git rev-parse --short HEAD)
 
-attach:
-	docker exec -it edgar-gmr-etl-edgar-gmr-etl-1 bash
-
+deploy:
+	kubectl apply -f deployment

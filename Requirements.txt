@@ -1,6 +1,16 @@
+# Data sources
 edgartools
 yfinance
+
+# Data & analysis
 pandas
 numpy
 matplotlib
+
+# CLI presentation
 rich
+
+# REST API
+fastapi
+uvicorn[standard]
+httpx
