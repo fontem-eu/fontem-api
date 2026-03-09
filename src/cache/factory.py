@@ -34,26 +34,19 @@ def create_cache(config: Optional[CacheConfig] = None) -> CacheInterface:
     provider = config.provider.lower()
     logger.debug("Creating cache provider: %s", provider)
 
-    if provider == "redis":
-        if config.is_real_redis():
-            logger.info("Using real Redis cache at %s:%s", config.redis_host, config.redis_port)
-            return RedisCache(
-                host=config.redis_host,
-                port=config.redis_port,
-                db=config.redis_db
-            )
-        else:
-            logger.info("Using fake Redis cache (real Redis disabled)")
-            return FakeRedisCache()
-
-    elif provider == "fakeredis":
+    # Handle fake Redis providers (fakeredis, memory, or redis with fake mode)
+    if provider in ("fakeredis", "memory") or (provider == "redis" and not config.is_real_redis()):
         logger.info("Using fake Redis cache")
         return FakeRedisCache()
 
-    elif provider == "memory":
-        # For backward compatibility
-        logger.info("Using fake Redis cache (memory mode)")
-        return FakeRedisCache()
+    # Handle real Redis provider
+    elif provider == "redis" and config.is_real_redis():
+        logger.info("Using real Redis cache at %s:%s", config.redis_host, config.redis_port)
+        return RedisCache(
+            host=config.redis_host,
+            port=config.redis_port,
+            db=config.redis_db
+        )
 
     else:
         raise ValueError(f"Unknown cache provider: {provider}. Available: redis, fakeredis")

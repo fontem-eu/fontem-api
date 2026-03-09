@@ -50,89 +50,90 @@ class LiveDataSource(GMRDataSource):
         logger.info("LiveDataSource initialized with %s cache",
                    type(self._cache).__name__)
 
+    def _get_cached_data(self, cache_key: str, fetch_func, ttl_key: str, *args, **kwargs) -> Any:
+        """
+        Helper method to handle caching logic with a fetch function.
+
+        Args:
+            cache_key: The cache key to use
+            fetch_func: Function to call if cache miss occurs
+            ttl_key: Configuration key for TTL
+            *args, **kwargs: Arguments to pass to fetch_func
+
+        Returns:
+            The cached or fetched data
+        """
+        # Try cache first
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.debug("Cache hit for %s", cache_key)
+            return cached
+
+        # Cache miss - fetch and cache
+        logger.debug("Cache miss for %s", cache_key)
+
+        # Get TTL from config
+        ttl = getattr(self._cache_config, ttl_key, self._cache_config.ttl_default)
+
+        # Fetch data
+        result = fetch_func(*args, **kwargs)
+
+        # Store in cache
+        self._cache.set(cache_key, result, ttl)
+        return result
+
     # ------------------------------------------------------------------
     def get_annual_fundamentals(self, ticker: str, years: int = 10) -> dict:
         cache_key = self._cache_config.get_full_key("fundamentals", ticker)
-
-        # Try cache first
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache hit for fundamentals: %s", ticker)
-            return cached
-
-        # Cache miss - fetch and cache
-        logger.debug("Cache miss for fundamentals: %s", ticker)
-        result = self._edgar.fetch_fundamentals(ticker, years=years)
-        self._cache.set(cache_key, result, self._cache_config.ttl_fundamentals)
-        return result
+        return self._get_cached_data(
+            cache_key,
+            lambda: self._edgar.fetch_fundamentals(ticker, years=years),
+            "ttl_fundamentals"
+        )
 
     def get_annual_avg_prices(self, ticker: str, years: int = 10) -> pd.Series:
         cache_key = self._cache_config.get_full_key("prices", ticker)
-
-        # Try cache first
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache hit for prices: %s", ticker)
-            return cached
-
-        # Cache miss - fetch and cache
-        logger.debug("Cache miss for prices: %s", ticker)
         period = f"{min(years, 10)}y"
-        result = self._price.get_annual_avg_prices(ticker, period=period)
-        self._cache.set(cache_key, result, self._cache_config.ttl_prices)
-        return result
+        return self._get_cached_data(
+            cache_key,
+            lambda: self._price.get_annual_avg_prices(ticker, period=period),
+            "ttl_prices"
+        )
 
     def get_annual_dividends(self, ticker: str) -> pd.Series:
         cache_key = self._cache_config.get_full_key("dividends", ticker)
-
-        # Try cache first
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache hit for dividends: %s", ticker)
-            return cached
-
-        # Cache miss - fetch and cache
-        logger.debug("Cache miss for dividends: %s", ticker)
-        result = self._price.get_annual_dividends(ticker)
-        self._cache.set(cache_key, result, self._cache_config.ttl_prices)
-        return result
+        return self._get_cached_data(
+            cache_key,
+            lambda: self._price.get_annual_dividends(ticker),
+            "ttl_prices"
+        )
 
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         cache_key = self._cache_config.get_full_key(f"history_{period}", ticker)
-
-        # Try cache first
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache hit for price history: %s", ticker)
-            return cached
-
-        # Cache miss - fetch and cache
-        logger.debug("Cache miss for price history: %s", ticker)
-        result = self._price.get_history(ticker, period=period)
-        self._cache.set(cache_key, result, self._cache_config.ttl_prices)
-        return result
+        return self._get_cached_data(
+            cache_key,
+            lambda: self._price.get_history(ticker, period=period),
+            "ttl_prices"
+        )
 
     def get_market_snapshot(self, ticker: str) -> dict:
         cache_key = self._cache_config.get_full_key("snapshot", ticker)
 
-        # Try cache first
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache hit for market snapshot: %s", ticker)
-            return cached
+        def fetch_snapshot():
+            return {
+                "current_price":      self._price.get_current_price(ticker),
+                "avg_volume":         self._price.get_avg_volume(ticker),
+                "shares_outstanding": self._price.get_shares_outstanding(ticker),
+                "last_dividend":      self._price.get_last_dividend(ticker),
+                "splits":             self._price.get_splits(ticker),
+                "latest_quarter":     self._price.get_latest_quarter(ticker),
+            }
 
-        # Cache miss - fetch and cache
-        logger.debug("Cache miss for market snapshot: %s", ticker)
-        result = {
-            "current_price":      self._price.get_current_price(ticker),
-            "avg_volume":         self._price.get_avg_volume(ticker),
-            "shares_outstanding": self._price.get_shares_outstanding(ticker),
-            "last_dividend":      self._price.get_last_dividend(ticker),
-            "splits":             self._price.get_splits(ticker),
-            "latest_quarter":     self._price.get_latest_quarter(ticker),
-        }
-        self._cache.set(cache_key, result, self._cache_config.ttl_market_snapshot)
-        return result
+        return self._get_cached_data(
+            cache_key,
+            fetch_snapshot,
+            "ttl_market_snapshot"
+        )
 
     # ------------------------------------------------------------------
     def get_cache_stats(self) -> dict:
@@ -175,18 +176,11 @@ class LiveDataSource(GMRDataSource):
         Uses caching to avoid repeated calls to SEC API.
         """
         cache_key = self._cache_config.get_full_key("ticker_list", "all")
-
-        # Try cache first
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache hit for ticker list")
-            return cached
-
-        # Cache miss - fetch and cache
-        logger.debug("Cache miss for ticker list, fetching from EDGAR")
-        result = self._edgar.get_edgar_ticker_list()
-        self._cache.set(cache_key, result, self._cache_config.ttl_ticker_list)
-        return result
+        return self._get_cached_data(
+            cache_key,
+            lambda: self._edgar.get_edgar_ticker_list(),
+            "ttl_ticker_list"
+        )
 
     def search_tickers(self, query: str, limit: int = 10) -> List[Dict]:
         """
