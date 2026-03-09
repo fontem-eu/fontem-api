@@ -10,7 +10,7 @@ Inject a MockDataSource in unit tests to avoid any network traffic.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, List, Dict
 
 import pandas as pd
 
@@ -149,3 +149,72 @@ class LiveDataSource(GMRDataSource):
     def close(self) -> None:
         """Close cache connections."""
         self._cache.close()
+
+    def list_sectors(self) -> List[str]:
+        """Get list of unique sectors for filtering."""
+        all_tickers = self.get_available_tickers()
+        sectors = {ticker['sector'] for ticker in all_tickers if ticker.get('sector')}
+        return sorted(list(sectors))
+
+    def list_exchanges(self) -> List[str]:
+        """Get list of unique exchanges for filtering."""
+        all_tickers = self.get_available_tickers()
+        exchanges = {ticker['exchange'] for ticker in all_tickers if ticker.get('exchange')}
+        return sorted(list(exchanges))
+
+    # ------------------------------------------------------------------
+    def get_available_tickers(self) -> List[Dict]:
+        """
+        Get list of tickers available in EDGAR with rich metadata.
+
+        Returns comprehensive company information including:
+        - symbol, name, cik, sic codes
+        - exchange, sector, industry classifications
+        - search-friendly fields for UI filtering
+
+        Uses caching to avoid repeated calls to SEC API.
+        """
+        cache_key = self._cache_config.get_full_key("ticker_list", "all")
+
+        # Try cache first
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.debug("Cache hit for ticker list")
+            return cached
+
+        # Cache miss - fetch and cache
+        logger.debug("Cache miss for ticker list, fetching from EDGAR")
+        result = self._edgar.get_edgar_ticker_list()
+        self._cache.set(cache_key, result, self._cache_config.ttl_ticker_list)
+        return result
+
+    def search_tickers(self, query: str, limit: int = 10) -> List[Dict]:
+        """
+        Search tickers by name, symbol, or keywords.
+
+        Args:
+            query: Search term (case-insensitive)
+            limit: Maximum number of results to return
+
+        Returns:
+            List of matching ticker dictionaries
+        """
+        all_tickers = self.get_available_tickers()
+
+        if not query:
+            return all_tickers[:limit]
+
+        query_lower = query.lower()
+
+        # Search in name, symbol, and keywords
+        matches = []
+        for ticker in all_tickers:
+            # Check if query matches in name, symbol, or keywords
+            if (query_lower in ticker.get('search_name', '') or
+                query_lower in ticker.get('symbol', '').lower() or
+                query_lower in ticker.get('search_keywords', '')):
+                matches.append(ticker)
+                if len(matches) >= limit:
+                    break
+
+        return matches

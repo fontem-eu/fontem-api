@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from src.api.routers.gmr import router
+from src.api.routers.tickers import router as tickers_router
 
 app = FastAPI(
     title="GMR Stock Analysis API",
@@ -32,3 +33,4 @@ app = FastAPI(
 )
 
 app.include_router(router)
+app.include_router(tickers_router)

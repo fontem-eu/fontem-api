@@ -29,6 +29,7 @@ class CacheConfig:
     ttl_fundamentals: int = 86400  # 24 hours (fundamentals change infrequently)
     ttl_prices: int = 300  # 5 minutes (prices change more frequently)
     ttl_market_snapshot: int = 60  # 1 minute (market data is volatile)
+    ttl_ticker_list: int = 86400  # 24 hours (SEC updates company list daily)
 
     # Cache key prefixes
     key_prefix: str = "gmretl_"
@@ -52,6 +53,7 @@ class CacheConfig:
             ttl_fundamentals=int(os.environ.get("CACHE_TTL_FUNDAMENTALS", "86400")),
             ttl_prices=int(os.environ.get("CACHE_TTL_PRICES", "300")),
             ttl_market_snapshot=int(os.environ.get("CACHE_TTL_SNAPSHOT", "60")),
+            ttl_ticker_list=int(os.environ.get("CACHE_TTL_TICKER_LIST", "86400")),
             key_prefix=os.environ.get("CACHE_KEY_PREFIX", "gmretl_"),
             key_fundamentals=os.environ.get("CACHE_KEY_FUNDAMENTALS", "fund_"),
             key_prices=os.environ.get("CACHE_KEY_PRICES", "price_"),

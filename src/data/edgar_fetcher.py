@@ -308,3 +308,165 @@ class EdgarFetcher:
             "_income":             inc_df,
             "_cashflow":           cf_df,
         }
+
+    # ------------------------------------------------------------------
+    def get_edgar_ticker_list(self) -> List[Dict]:
+        """
+        Fetch comprehensive list of companies from SEC's bulk company data.
+
+        Uses the official SEC company_tickers.json endpoint which provides
+        a complete listing of all companies that file with EDGAR.
+
+        Returns a list of dictionaries with rich company metadata including:
+        - symbol, cik, name, sic, sic_description
+        - exchange, sector, industry, location
+        - Additional fields for search and filtering
+
+        This is a single API call that returns ~10,000+ companies.
+        """
+        import requests
+        from typing import Dict, List
+
+        url = "https://www.sec.gov/files/company_tickers.json"
+
+        try:
+            logger.info("Fetching EDGAR ticker list from SEC bulk endpoint...")
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            # Process the data into a rich format for UI
+            tickers = []
+            for cik, company_info in data.items():
+                if isinstance(company_info, dict):
+                    ticker = company_info.get('ticker')
+                    if not ticker:
+                        continue
+
+                    # Map SIC codes to more readable descriptions
+                    sic_description = self._get_sic_description(company_info.get('sic'))
+
+                    ticker_info = {
+                        'symbol': ticker.upper(),
+                        'cik': cik.zfill(10),  # Pad CIK to 10 digits with leading zeros
+                        'name': company_info.get('title', '').strip(),
+                        'sic': company_info.get('sic', ''),
+                        'sic_description': sic_description,
+                        'exchange': self._infer_exchange(ticker),
+                        'sector': self._infer_sector_from_sic(company_info.get('sic')),
+                        'industry': self._infer_industry_from_sic(company_info.get('sic')),
+                        'country': 'US',  # All SEC filers are US-based
+                        'currency': 'USD',
+                        'is_active': True,  # Assume active unless we know otherwise
+                        'last_updated': company_info.get('updated', '')
+                    }
+
+                    # Add search-friendly fields
+                    ticker_info['search_name'] = f"{ticker_info['name']} {ticker_info['symbol']}".lower()
+                    ticker_info['search_keywords'] = self._generate_search_keywords(ticker_info)
+
+                    tickers.append(ticker_info)
+
+            logger.info(f"Successfully fetched {len(tickers)} tickers from EDGAR")
+            return tickers
+
+        except Exception as e:
+            logger.error(f"Failed to fetch EDGAR ticker list: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Helper methods for ticker list enrichment
+    # ------------------------------------------------------------------
+
+    def _get_sic_description(self, sic_code: Optional[str]) -> str:
+        """Map SIC codes to human-readable descriptions."""
+        # Common SIC code mappings (can be expanded)
+        sic_mappings = {
+            '1311': 'Crude Petroleum and Natural Gas',
+            '2834': 'Pharmaceutical Preparations',
+            '3571': 'Electronic Computers',
+            '3661': 'Telephone and Telegraph Apparatus',
+            '3674': 'Semiconductors and Related Devices',
+            '3711': 'Motor Vehicles and Passenger Car Bodies',
+            '4813': 'Telephone Communications',
+            '5812': 'Eating Places',
+            '7372': 'Prepackaged Software',
+            '7373': 'Computer Integrated Systems Design',
+        }
+
+        if not sic_code or not isinstance(sic_code, str):
+            return "Unknown"
+
+        # Return mapped description or generic based on first digit
+        return sic_mappings.get(sic_code, f"Industry (SIC {sic_code})")
+
+    def _infer_exchange(self, ticker: str) -> str:
+        """Infer exchange based on ticker conventions."""
+        if not ticker:
+            return "Unknown"
+
+        # Common exchange patterns
+        if ticker.endswith('.O') or ticker.endswith('.OB'):
+            return "NASDAQ"
+        elif ticker.endswith('.N') or ticker.endswith('.NY'):
+            return "NYSE"
+        elif ticker.endswith('.A'):
+            return "AMEX"
+        elif len(ticker) == 1 or len(ticker) == 2:
+            return "NYSE"  # Single/double letter tickers are usually NYSE
+        else:
+            return "NASDAQ"  # Default assumption
+
+    def _infer_sector_from_sic(self, sic_code: Optional[str]) -> str:
+        """Infer sector from SIC code."""
+        if not sic_code or not isinstance(sic_code, str):
+            return "Unknown"
+
+        first_digit = sic_code[0] if sic_code else '0'
+
+        sector_map = {
+            '0': 'Agriculture, Forestry, and Fishing',
+            '1': 'Mining',
+            '2': 'Construction',
+            '3': 'Manufacturing',
+            '4': 'Transportation and Public Utilities',
+            '5': 'Wholesale Trade',
+            '6': 'Retail Trade',
+            '7': 'Finance, Insurance, and Real Estate',
+            '8': 'Services',
+            '9': 'Public Administration',
+        }
+
+        return sector_map.get(first_digit, "Unknown")
+
+    def _infer_industry_from_sic(self, sic_code: Optional[str]) -> str:
+        """Infer more specific industry from SIC code."""
+        if not sic_code or not isinstance(sic_code, str):
+            return "Unknown"
+
+        # Return the SIC description as industry for now
+        return self._get_sic_description(sic_code)
+
+    def _generate_search_keywords(self, ticker_info: Dict) -> str:
+        """Generate search keywords for better matching."""
+        keywords = []
+
+        # Add name variations
+        if ticker_info.get('name'):
+            keywords.extend(ticker_info['name'].lower().split())
+
+        # Add ticker and common variations
+        if ticker_info.get('symbol'):
+            ticker = ticker_info['symbol']
+            keywords.append(ticker.lower())
+            # Remove common suffixes for better matching
+            if ticker.endswith('.O') or ticker.endswith('.N') or ticker.endswith('.A'):
+                keywords.append(ticker[:-2].lower())
+
+        # Add sector/industry keywords
+        if ticker_info.get('sector'):
+            keywords.extend(ticker_info['sector'].lower().split())
+        if ticker_info.get('industry'):
+            keywords.extend(ticker_info['industry'].lower().split())
+
+        return ' '.join(keywords)
