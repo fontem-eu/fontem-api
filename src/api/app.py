@@ -30,6 +30,7 @@ app = FastAPI(
     version="0.1.0",
     contact={"name": "bemar-edgar", "email": "bemar-edgar@research.com"},
     license_info={"name": "MIT"},
+    root_path="/api"
 )
 
 app.include_router(router)
