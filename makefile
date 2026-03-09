@@ -8,4 +8,4 @@ release:
 	docker push contribute.void42.internal/golden/gmr-api:$(shell git rev-parse --short HEAD)
 
 deploy:
-	kubectl apply -f deployment
+	helm upgrade --install gmr ./deployment --set-string version=$(shell git rev-parse --short HEAD)
