@@ -98,8 +98,19 @@ class GMRShort:
         if hist.empty:
             return self._empty_result(ticker, current_price, avg_volume)
 
+        # ── Normalise index to a tz-naive DatetimeIndex ──────────────────
+        # Newer yfinance builds may return a tz-aware index or an index
+        # whose .max() resolves to numpy.int64 instead of pd.Timestamp,
+        # which breaks arithmetic with pd.DateOffset.  Mirror the same
+        # defensive normalisation used in technical.py.
+        if not isinstance(hist.index, pd.DatetimeIndex):
+            hist.index = pd.to_datetime(hist.index)
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+
         # ── 6-month window: discard the older half of the 12-month pull ──
-        max_date   = hist.index.max()
+        max_date   = pd.Timestamp(hist.index.max())   # always a Timestamp
+
         limit_date = max_date - pd.DateOffset(months=6)
         window = hist[(hist.index > limit_date) & (hist.index <= max_date)].copy()
 

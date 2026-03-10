@@ -50,7 +50,6 @@ class PriceFetcher:
                 ticker,
                 period=period,
                 interval=interval,
-                auto_adjust=True,
                 progress=False,
                 multi_level_index=False,
             )
@@ -67,6 +66,10 @@ class PriceFetcher:
         # Strip timezone so comparisons with naive datetimes are straightforward
         if hist.index.tz is not None:
             hist.index = hist.index.tz_localize(None)
+
+        # yfinance ≥1.x returns lowercase column names; normalise to Title Case
+        # so downstream code can always use "Open", "High", "Low", "Close", "Volume".
+        hist.columns = [c.title() if isinstance(c, str) else c for c in hist.columns]
 
         return hist[["Open", "High", "Low", "Close", "Volume"]]
 

@@ -78,7 +78,10 @@ class CacheConfig:
         elif key_type == "snapshot":
             prefix = self.key_snapshot
         else:
-            prefix = ""
+            # Use the key_type itself so every logical bucket gets a unique key.
+            # Without this, "dividends", "history_1y", "ticker_list", etc. all
+            # collapse to the same cache key and overwrite each other.
+            prefix = f"{key_type}_"
 
         return f"{self.key_prefix}{prefix}{ticker.upper()}"
 
