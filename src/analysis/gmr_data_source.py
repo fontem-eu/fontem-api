@@ -38,9 +38,10 @@ class GMRSettings:
     max_price: float = 2.50        # current share price upper bound
 
 
-class GMRDataSource(ABC):
+class FinancialDataSource(ABC):
     """
-    Port / interface that GMRLong and GMRShort depend on.
+    Port / interface for all financial data needed by the GMR screens
+    and any other analysis built on top of this project.
     Inject a concrete implementation (LiveDataSource or a test mock).
     """
 
@@ -80,3 +81,7 @@ class GMRDataSource(ABC):
             splits         (pd.Series)
             latest_quarter (dict)
         """
+
+
+# Backward-compatible alias — will be removed once all call sites are updated.
+GMRDataSource = FinancialDataSource

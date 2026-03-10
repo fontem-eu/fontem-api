@@ -133,3 +133,53 @@ def test_prepaid_expenses_is_series(fundamentals):
     assert isinstance(fundamentals["prepaid_expenses"], pd.Series)
 
 # (prepaid may be empty for some companies — we only assert type here)
+
+# ── total_assets ───────────────────────────────────────────────────────────
+
+def test_total_assets_is_series(fundamentals):
+    assert isinstance(fundamentals["total_assets"], pd.Series)
+
+def test_total_assets_not_empty(fundamentals):
+    assert not fundamentals["total_assets"].empty, "Total assets series is empty"
+
+def test_total_assets_values_positive(fundamentals):
+    ta = fundamentals["total_assets"]
+    if not ta.empty:
+        assert (ta > 0).all(), f"Total assets should be positive: {ta}"
+
+def test_total_assets_sorted_descending(fundamentals):
+    ta = fundamentals["total_assets"]
+    if not ta.empty:
+        assert list(ta.index) == sorted(ta.index, reverse=True)
+
+def test_total_assets_greater_than_current_assets(fundamentals):
+    """Total assets ≥ current assets by balance-sheet identity."""
+    ta = fundamentals["total_assets"]
+    ca = fundamentals["current_assets"]
+    if not ta.empty and not ca.empty:
+        common = ta.index.intersection(ca.index)
+        assert (ta[common] >= ca[common]).all(), \
+            "Total assets should always be >= current assets"
+
+# ── operating_cashflow ─────────────────────────────────────────────────────
+
+def test_operating_cashflow_is_series(fundamentals):
+    assert isinstance(fundamentals["operating_cashflow"], pd.Series)
+
+def test_operating_cashflow_not_empty(fundamentals):
+    assert not fundamentals["operating_cashflow"].empty, "Operating cash flow series is empty"
+
+def test_operating_cashflow_positive_for_aapl(fundamentals):
+    """AAPL generates positive operating cash flow every year."""
+    ocf = fundamentals["operating_cashflow"]
+    if not ocf.empty:
+        assert (ocf > 0).all(), f"AAPL operating CF should always be positive: {ocf}"
+
+def test_operating_cashflow_greater_than_free_cashflow(fundamentals):
+    """OCF ≥ FCF (since FCF = OCF − CapEx and CapEx > 0)."""
+    ocf = fundamentals["operating_cashflow"]
+    fcf = fundamentals["free_cashflow"]
+    if not ocf.empty and not fcf.empty:
+        common = ocf.index.intersection(fcf.index)
+        assert (ocf[common] >= fcf[common]).all(), \
+            "Operating CF should be >= free cash flow (FCF = OCF - CapEx)"

@@ -27,7 +27,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from .gmr_data_source import GMRDataSource, GMRSettings
+from .gmr_data_source import FinancialDataSource, GMRSettings
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class GMRLong:
 
     def __init__(
         self,
-        data_source: GMRDataSource,
+        data_source: FinancialDataSource,
         settings: Optional[GMRSettings] = None,
     ) -> None:
         self._ds = data_source

@@ -173,3 +173,15 @@ def test_latest_quarter_current_assets_positive(fetcher):
     q = fetcher.get_latest_quarter(TICKER)
     if q and q.get("current_assets") is not None:
         assert q["current_assets"] > 0
+
+def test_latest_quarter_has_total_debt_key(fetcher):
+    """total_debt must be present in the quarterly snapshot (may be None for debt-free companies)."""
+    q = fetcher.get_latest_quarter(TICKER)
+    if q:
+        assert "total_debt" in q, "latest_quarter should include 'total_debt' key"
+
+def test_latest_quarter_total_debt_positive_for_aapl(fetcher):
+    """AAPL carries long-term debt — total_debt should be a large positive number."""
+    q = fetcher.get_latest_quarter(TICKER)
+    if q and q.get("total_debt") is not None:
+        assert q["total_debt"] > 0, f"AAPL total_debt should be positive: {q['total_debt']}"

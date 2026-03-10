@@ -20,7 +20,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from src.analysis.gmr_data_source import GMRDataSource
+from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.gmr_long import GMRLong
 from src.analysis.gmr_short import GMRShort
 from src.api.dependencies import get_data_source
@@ -36,6 +36,11 @@ from src.api.schemas.gmr_short import (
     GMRShortRatioSchema,
     MarketSnapshotShortSchema,
     MonthlyBreakdownSchema,
+)
+from src.api.schemas.gmr_data import (
+    GMRDataResponse,
+    CurrentSnapshotSchema,
+    AnnualRowSchema,
 )
 
 router = APIRouter(tags=["GMR Analysis"])
@@ -74,7 +79,7 @@ def _f(value: float) -> Optional[float]:
 def gmr_long(
     ticker: str,
     summarize: bool = Query(default=False, description="Return only the gmr_ratio object"),
-    data_source: GMRDataSource = Depends(get_data_source),
+    data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRLongResponse:
     ticker = ticker.upper()
 
@@ -171,7 +176,7 @@ def gmr_long(
 def gmr_short(
     ticker: str,
     summarize: bool = Query(default=False, description="Return only the gmr_ratio object"),
-    data_source: GMRDataSource = Depends(get_data_source),
+    data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRShortResponse:
     ticker = ticker.upper()
 
@@ -223,4 +228,137 @@ def gmr_short(
         gmr_ratio=ratio,
         market_snapshot=snapshot,
         monthly_breakdown=monthly,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GMR Data (spreadsheet feed)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{ticker}/gmr_data",
+    response_model=GMRDataResponse,
+    response_model_exclude_none=True,
+    summary="GMR Raw Spreadsheet Data",
+    description=(
+        "Returns all raw financial data needed to populate the GMR spreadsheet: "
+        "a current snapshot (price, volume, balance-sheet header figures, last dividend, "
+        "last split) plus a per-year table with revenue, earnings, assets, liabilities, "
+        "equity, shares, dividends, current assets, inventory, prepaid expenses, "
+        "current liabilities, operating cash flow, capital expenditure, and splits. "
+        "Use `?years=N` (default 10) to control how many historical years are returned."
+    ),
+)
+def gmr_data(
+    ticker: str,
+    years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
+    data_source: FinancialDataSource = Depends(get_data_source),
+) -> GMRDataResponse:
+    ticker = ticker.upper()
+
+    try:
+        fundamentals  = data_source.get_annual_fundamentals(ticker, years)
+        annual_prices = data_source.get_annual_avg_prices(ticker, years)
+        dividends     = data_source.get_annual_dividends(ticker)
+        snapshot      = data_source.get_market_snapshot(ticker)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data found for ticker '{ticker}': {exc}",
+        )
+
+    # ── Unpack fundamentals ──────────────────────────────────────────
+    revenue       = fundamentals.get("revenue",            {})
+    net_income    = fundamentals.get("net_income",         {})
+    total_assets  = fundamentals.get("total_assets",       {})
+    liabilities   = fundamentals.get("total_liabilities",  {})
+    equity_s      = fundamentals.get("equity",             {})
+    shares_s      = fundamentals.get("shares_outstanding", {})
+    cur_assets    = fundamentals.get("current_assets",     {})
+    cur_liabs     = fundamentals.get("current_liabilities",{})
+    inventory     = fundamentals.get("inventory",          {})
+    prepaid       = fundamentals.get("prepaid_expenses",   {})
+    operating_cf  = fundamentals.get("operating_cashflow", {})
+    capex         = fundamentals.get("capex",              {})
+
+    def _sv(series, yr, default=None):
+        """Safe value lookup in a Series or dict."""
+        try:
+            import pandas as pd
+            if hasattr(series, 'at') and yr in series.index:
+                v = float(series.at[yr])
+                return None if (v != v or abs(v) == float('inf')) else v
+        except Exception:
+            pass
+        return default
+
+    # ── Build current snapshot ───────────────────────────────────────
+    lq = snapshot.get("latest_quarter") or {}
+    last_div = snapshot.get("last_dividend") or {}
+    splits_series = snapshot.get("splits")
+
+    last_split_year: Optional[int] = None
+    last_split_ratio: Optional[float] = None
+    if splits_series is not None and not splits_series.empty:
+        last_split_year = int(splits_series.index[0])
+        last_split_ratio = _f(float(splits_series.iloc[0]))
+
+    current_snapshot = CurrentSnapshotSchema(
+        price=_f(float(snapshot.get("current_price", float("nan")))),
+        avg_volume=_f(float(snapshot.get("avg_volume") or 0) or None),
+        current_assets=_f(lq.get("current_assets")),
+        inventory=_f(lq.get("inventory")),
+        prepaid_expenses=_f(lq.get("prepaid_expenses")),
+        current_liabilities=_f(lq.get("current_liabilities")),
+        total_debt=_f(lq.get("total_debt")),
+        equity=_f(lq.get("equity")),
+        shares=_f(float(snapshot.get("shares_outstanding") or 0) or None),
+        last_dividend_date=last_div.get("date"),
+        last_dividend_amount=_f(float(last_div.get("amount") or 0) or None),
+        last_split_year=last_split_year,
+        last_split_ratio=last_split_ratio,
+    )
+
+    # ── Determine years to include ────────────────────────────────────
+    # Union of all available years across price + fundamentals
+    all_years: set = set()
+    for s in (annual_prices, revenue, net_income, total_assets, liabilities,
+              equity_s, shares_s, cur_assets, cur_liabs, inventory, prepaid,
+              operating_cf, capex, dividends):
+        if hasattr(s, 'index'):
+            all_years.update(int(y) for y in s.index)
+    sorted_years = sorted(all_years, reverse=True)[:years]
+
+    # ── Build per-year rows ───────────────────────────────────────────
+    annual_data = []
+    for yr in sorted_years:
+        capex_v = _sv(capex, yr)
+        annual_data.append(AnnualRowSchema(
+            year=yr,
+            avg_price=_sv(annual_prices, yr),
+            revenue=_sv(revenue, yr),
+            earnings=_sv(net_income, yr),
+            total_assets=_sv(total_assets, yr),
+            liabilities=_sv(liabilities, yr),
+            equity=_sv(equity_s, yr),
+            shares=_sv(shares_s, yr),
+            dividend=_sv(dividends, yr),
+            current_assets=_sv(cur_assets, yr),
+            inventory=_sv(inventory, yr),
+            prepaid_expenses=_sv(prepaid, yr),
+            current_liabilities=_sv(cur_liabs, yr),
+            cfo=_sv(operating_cf, yr),
+            # CapEx is stored as positive magnitude; negate for Delta PP&E convention
+            delta_ppe=(-capex_v if capex_v is not None else None),
+            splits=_f(float(splits_series.at[yr])) if (
+                splits_series is not None and yr in splits_series.index
+            ) else 0.0,
+        ))
+
+    return GMRDataResponse(
+        ticker=ticker,
+        current_snapshot=current_snapshot,
+        annual_data=annual_data,
     )

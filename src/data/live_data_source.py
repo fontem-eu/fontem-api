@@ -17,12 +17,12 @@ import pandas as pd
 
 from .edgar_fetcher import EdgarFetcher
 from .price_fetcher import PriceFetcher
-from ..analysis.gmr_data_source import GMRDataSource
+from ..analysis.gmr_data_source import FinancialDataSource
 from ..cache import CacheInterface, CacheConfig, create_cache, cached_method
 
 logger = logging.getLogger(__name__)
 
-class LiveDataSource(GMRDataSource):
+class LiveDataSource(FinancialDataSource):
     """
     Production adapter that satisfies the GMRDataSource port using the two
     fetcher classes already implemented in this project.
