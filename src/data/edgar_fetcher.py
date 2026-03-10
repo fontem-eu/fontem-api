@@ -325,54 +325,69 @@ class EdgarFetcher:
         This is a single API call that returns ~10,000+ companies.
         """
         import requests
-        from typing import Dict, List
 
+        # SEC requires a descriptive User-Agent header identifying the app and
+        # a contact email. Without it, requests return 403 Forbidden.
         url = "https://www.sec.gov/files/company_tickers.json"
+        headers = {
+            "User-Agent": "edgar-gmr-etl/1.0 bemar-edgar@research.com",
+            "Accept-Encoding": "gzip, deflate",
+        }
 
         try:
             logger.info("Fetching EDGAR ticker list from SEC bulk endpoint...")
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
 
-            # Process the data into a rich format for UI
+            # Process the data into a rich format for UI.
+            # The SEC JSON format is:
+            #   {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
+            # Keys are row indices (0, 1, 2 ...), NOT the CIK.
+            # The actual CIK lives in company_info["cik_str"].
             tickers = []
-            for cik, company_info in data.items():
-                if isinstance(company_info, dict):
-                    ticker = company_info.get('ticker')
-                    if not ticker:
-                        continue
+            for _idx, company_info in data.items():
+                if not isinstance(company_info, dict):
+                    continue
 
-                    # Map SIC codes to more readable descriptions
-                    sic_description = self._get_sic_description(company_info.get('sic'))
+                ticker = company_info.get('ticker')
+                if not ticker:
+                    continue
 
-                    ticker_info = {
-                        'symbol': ticker.upper(),
-                        'cik': cik.zfill(10),  # Pad CIK to 10 digits with leading zeros
-                        'name': company_info.get('title', '').strip(),
-                        'sic': company_info.get('sic', ''),
-                        'sic_description': sic_description,
-                        'exchange': self._infer_exchange(ticker),
-                        'sector': self._infer_sector_from_sic(company_info.get('sic')),
-                        'industry': self._infer_industry_from_sic(company_info.get('sic')),
-                        'country': 'US',  # All SEC filers are US-based
-                        'currency': 'USD',
-                        'is_active': True,  # Assume active unless we know otherwise
-                        'last_updated': company_info.get('updated', '')
-                    }
+                # cik_str is an integer in the SEC payload — convert to zero-padded string
+                raw_cik = company_info.get('cik_str', '')
+                cik_padded = str(raw_cik).zfill(10)
 
-                    # Add search-friendly fields
-                    ticker_info['search_name'] = f"{ticker_info['name']} {ticker_info['symbol']}".lower()
-                    ticker_info['search_keywords'] = self._generate_search_keywords(ticker_info)
+                ticker_info = {
+                    'symbol': ticker.upper(),
+                    'cik': cik_padded,
+                    'name': company_info.get('title', '').strip(),
+                    'sic': '',          # not provided by this SEC endpoint
+                    'sic_description': 'Unknown',
+                    'exchange': self._infer_exchange(ticker),
+                    'sector': 'Unknown',
+                    'industry': 'Unknown',
+                    'country': 'US',
+                    'currency': 'USD',
+                    'is_active': True,
+                    'last_updated': '',
+                }
 
-                    tickers.append(ticker_info)
+                # Add search-friendly fields
+                ticker_info['search_name'] = (
+                    f"{ticker_info['name']} {ticker_info['symbol']}".lower()
+                )
+                ticker_info['search_keywords'] = self._generate_search_keywords(ticker_info)
 
-            logger.info(f"Successfully fetched {len(tickers)} tickers from EDGAR")
+                tickers.append(ticker_info)
+
+            logger.info("Successfully fetched %d tickers from EDGAR", len(tickers))
             return tickers
 
         except Exception as e:
-            logger.error(f"Failed to fetch EDGAR ticker list: {e}")
-            return []
+            logger.error("Failed to fetch EDGAR ticker list: %s", e)
+            raise  # re-raise so the caller (and cache layer) can handle it properly
+
 
     # ------------------------------------------------------------------
     # Helper methods for ticker list enrichment

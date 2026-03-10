@@ -10,7 +10,8 @@ Inject a MockDataSource in unit tests to avoid any network traffic.
 from __future__ import annotations
 
 import logging
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
+
 
 import pandas as pd
 
