@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.gmr_long import GMRLong
@@ -69,6 +69,19 @@ def _sv(series, yr, default=None):
     except Exception:  # pylint: disable=broad-exception-caught
         pass
     return default
+
+
+def _fmt(val) -> str:
+    """Format a value for CSV: integer if whole, 2-dp float otherwise; empty if absent/NaN."""
+    if val is None:
+        return ""
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+    if math.isnan(f) or math.isinf(f):
+        return ""
+    return str(int(f)) if f == int(f) else str(round(f, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -245,31 +258,15 @@ def gmr_short(
 
 
 # ---------------------------------------------------------------------------
-# GMR Data (spreadsheet feed)
+# GMR Data (spreadsheet feed) — shared helpers
 # ---------------------------------------------------------------------------
 
-@router.get(
-    "/{ticker}/gmr_data",
-    response_model=GMRDataResponse,
-    response_model_exclude_none=True,
-    summary="GMR Raw Spreadsheet Data",
-    description=(
-        "Returns all raw financial data needed to populate the GMR spreadsheet: "
-        "a current snapshot (price, volume, balance-sheet header figures, last dividend, "
-        "last split) plus a per-year table with revenue, earnings, assets, liabilities, "
-        "equity, shares, dividends, current assets, inventory, prepaid expenses, "
-        "current liabilities, operating cash flow, capital expenditure, and splits. "
-        "Use `?years=N` (default 10) to control how many historical years are returned."
-    ),
-)
-def gmr_data(  # pylint: disable=too-many-locals
+def _build_gmr_data(  # pylint: disable=too-many-locals
     ticker: str,
-    years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    years: int,
+    data_source: FinancialDataSource,
 ) -> GMRDataResponse:
-    """Return raw annual financial data for a given ticker."""
-    ticker = ticker.upper()
-
+    """Fetch and assemble the GMR spreadsheet data for a ticker."""
     try:
         fundamentals  = data_source.get_annual_fundamentals(ticker, years)
         annual_prices = data_source.get_annual_avg_prices(ticker, years)
@@ -325,7 +322,6 @@ def gmr_data(  # pylint: disable=too-many-locals
     )
 
     # ── Determine years to include ────────────────────────────────────
-    # Union of all available years across price + fundamentals
     all_years: set = set()
     for s in (annual_prices, revenue, net_income, total_assets, liabilities,
               equity_s, shares_s, cur_assets, cur_liabs, inventory, prepaid,
@@ -364,4 +360,114 @@ def gmr_data(  # pylint: disable=too-many-locals
         ticker=ticker,
         current_snapshot=current_snapshot,
         annual_data=annual_data,
+    )
+
+
+def _gmr_data_to_csv(resp: GMRDataResponse) -> str:
+    """Serialise a GMRDataResponse to the GMR spreadsheet CSV format.
+
+    Output structure:
+      Row 1  — Ticker / Price / Avg. Volume
+      Row 2  — Latest-quarter balance-sheet header values
+      Row 3  — Last dividend / last split info
+      Row 4  — Per-year column headers
+      Row 5+ — One data row per historical year (descending)
+    """
+    s = resp.current_snapshot
+    split_ratio = _fmt(s.last_split_ratio) if s.last_split_ratio is not None else "No"
+
+    lines = [
+        # Row 1 — market snapshot header
+        f"Ticker,{resp.ticker},Price,{_fmt(s.price)},Avg. Volume,{_fmt(s.avg_volume)}",
+        # Row 2 — latest-quarter balance sheet
+        (
+            f"Cur Assets,{_fmt(s.current_assets)},"
+            f"Inv.,{_fmt(s.inventory)},"
+            f"PrePaidEx.,{_fmt(s.prepaid_expenses)},"
+            f"Cur Liabi.,{_fmt(s.current_liabilities)},"
+            f"debt,{_fmt(s.total_debt)},"
+            f"equity,{_fmt(s.equity)},"
+            f"shares,{_fmt(s.shares)}"
+        ),
+        # Row 3 — dividend / split metadata
+        (
+            f"Last Div,{s.last_dividend_date or ''},"
+            f"Amount,{_fmt(s.last_dividend_amount)},"
+            f"Last Split,{s.last_split_year or ''},"
+            f"Split Ratio,{split_ratio}"
+        ),
+        # Row 4 — per-year column headers
+        "Year,Avg. Price,Revenue,Earnings,Assets,Liabilities,Equity,Shares,"
+        "Dividend,Cur. Assets,Inventory,Prepaid Ex.,Cur. Liabi.,CFO,Delta PP&E,Splits",
+    ]
+
+    for row in resp.annual_data:
+        lines.append(",".join([
+            str(row.year),
+            _fmt(row.avg_price),
+            _fmt(row.revenue),
+            _fmt(row.earnings),
+            _fmt(row.total_assets),
+            _fmt(row.liabilities),
+            _fmt(row.equity),
+            _fmt(row.shares),
+            _fmt(row.dividend),
+            _fmt(row.current_assets),
+            _fmt(row.inventory),
+            _fmt(row.prepaid_expenses),
+            _fmt(row.current_liabilities),
+            _fmt(row.cfo),
+            _fmt(row.delta_ppe),
+            _fmt(row.splits),
+        ]))
+
+    return "\n".join(lines) + "\n"
+
+
+@router.get(
+    "/{ticker}/gmr_data",
+    response_model=GMRDataResponse,
+    response_model_exclude_none=True,
+    summary="GMR Raw Spreadsheet Data",
+    description=(
+        "Returns all raw financial data needed to populate the GMR spreadsheet: "
+        "a current snapshot (price, volume, balance-sheet header figures, last dividend, "
+        "last split) plus a per-year table with revenue, earnings, assets, liabilities, "
+        "equity, shares, dividends, current assets, inventory, prepaid expenses, "
+        "current liabilities, operating cash flow, capital expenditure, and splits. "
+        "Use `?years=N` (default 10) to control how many historical years are returned."
+    ),
+)
+def gmr_data(
+    ticker: str,
+    years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
+    data_source: FinancialDataSource = Depends(get_data_source),
+) -> GMRDataResponse:
+    """Return raw annual financial data for a given ticker."""
+    return _build_gmr_data(ticker.upper(), years, data_source)
+
+
+@router.get(
+    "/{ticker}/gmr_data_csv",
+    summary="GMR Raw Spreadsheet Data (CSV download)",
+    description=(
+        "Returns the same data as `/gmr_data` formatted as a CSV file ready to import "
+        "into the GMR spreadsheet. The file has three metadata header rows followed by "
+        "a column-header row and one data row per historical year (descending). "
+        "Use `?years=N` (default 10) to control how many historical years are included."
+    ),
+    response_class=Response,
+)
+def gmr_data_csv(
+    ticker: str,
+    years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
+    data_source: FinancialDataSource = Depends(get_data_source),
+) -> Response:
+    """Return GMR spreadsheet data as a downloadable CSV file."""
+    ticker = ticker.upper()
+    data = _build_gmr_data(ticker, years, data_source)
+    return Response(
+        content=_gmr_data_to_csv(data),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{ticker}_gmr_data.csv"'},
     )
