@@ -65,7 +65,7 @@ WEIGHTS: Dict[str, float] = {
 # ---------------------------------------------------------------------------
 
 @dataclass
-class FundamentalScore:
+class FundamentalScore:  # pylint: disable=too-many-instance-attributes
     """All fundamental analysis outputs for one stock at one point in time."""
 
     ticker: str
@@ -126,7 +126,7 @@ def _consecutive_positive(series: pd.Series) -> int:
 # Analyser
 # ---------------------------------------------------------------------------
 
-class FundamentalAnalyzer:
+class FundamentalAnalyzer:  # pylint: disable=too-few-public-methods
     """
     Scores a stock's financial health from EDGAR data and a current price.
 
@@ -141,7 +141,7 @@ class FundamentalAnalyzer:
         self.thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
 
     # ------------------------------------------------------------------
-    def analyze(
+    def analyze(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         fundamentals: Dict,
         current_price: float,

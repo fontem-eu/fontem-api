@@ -14,7 +14,7 @@ import pandas as pd
 
 
 @dataclass
-class GMRSettings:
+class GMRSettings:  # pylint: disable=too-many-instance-attributes
     """
     Thresholds that drive pass/fail decisions in both GMR screens.
     Mirrors the defaults in gmrtool/GMRTool/Settings.cs.

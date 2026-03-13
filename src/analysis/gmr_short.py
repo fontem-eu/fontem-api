@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class GMRShortResult:
+class GMRShortResult:  # pylint: disable=too-many-instance-attributes
     """Structured output of the GMR short-term screen."""
     ticker: str
     current_price: float
@@ -68,7 +68,7 @@ class GMRShortResult:
 # Main class
 # ---------------------------------------------------------------------------
 
-class GMRShort:
+class GMRShort:  # pylint: disable=too-few-public-methods
     """
     GMR Short-term screen.
 
@@ -88,7 +88,9 @@ class GMRShort:
         self._s = settings or GMRSettings()
 
     # ------------------------------------------------------------------
-    def compute(self, ticker: str) -> GMRShortResult:
+    def compute(  # pylint: disable=too-many-locals,too-many-statements
+        self, ticker: str
+    ) -> GMRShortResult:
         """Run the short-term GMR screen and return a :class:`GMRShortResult`."""
         snapshot      = self._ds.get_market_snapshot(ticker)
         current_price = float(snapshot.get("current_price", float("nan")))

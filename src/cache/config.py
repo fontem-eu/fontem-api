@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 
 @dataclass
-class CacheConfig:
+class CacheConfig:  # pylint: disable=too-many-instance-attributes
     """
     Configuration for cache providers and settings.
 

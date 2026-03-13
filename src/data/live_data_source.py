@@ -33,7 +33,7 @@ class LiveDataSource(FinancialDataSource):
         result = GMRLong(ds).compute("KO")
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         edgar_fetcher: Optional[EdgarFetcher] = None,
         price_fetcher: Optional[PriceFetcher] = None,

@@ -86,7 +86,7 @@ class PriceFetcher:
         """Return the yfinance ``info`` dictionary (best-effort)."""
         try:
             return yf.Ticker(ticker).info or {}
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug("yfinance.info failed for %s: %s", ticker, exc)
             return {}
 
@@ -155,7 +155,7 @@ class PriceFetcher:
             annual = divs.groupby(divs.index.year).sum().sort_index(ascending=False)
             annual.index = annual.index.astype(int)
             return annual
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug("get_annual_dividends failed for %s: %s", ticker, exc)
             return pd.Series(dtype=float)
 
@@ -177,7 +177,7 @@ class PriceFetcher:
                 "date": str(last_date.date()) if hasattr(last_date, "date") else str(last_date),
                 "amount": float(last),
             }
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug("get_last_dividend failed for %s: %s", ticker, exc)
             return {"date": None, "amount": 0.0}
 
@@ -201,7 +201,7 @@ class PriceFetcher:
             annual = splits.groupby(splits.index.year).prod().sort_index(ascending=False)
             annual.index = annual.index.astype(int)
             return annual
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug("get_splits failed for %s: %s", ticker, exc)
             return pd.Series(dtype=float)
 
@@ -247,11 +247,12 @@ class PriceFetcher:
                                            "Long Term Debt And Capital Lease Obligation",
                                            "Long Term Debt",
                                            "Net Debt"),
-                "equity":             _get("Stockholders Equity", "Total Equity Gross Minority Interest",
+                "equity":             _get("Stockholders Equity",
+                                           "Total Equity Gross Minority Interest",
                                            "Common Stock Equity"),
                 "shares_outstanding": _get("Ordinary Shares Number", "Share Issued",
                                            "Common Stock"),
             }
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug("get_latest_quarter failed for %s: %s", ticker, exc)
             return {}

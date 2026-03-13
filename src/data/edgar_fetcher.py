@@ -230,7 +230,9 @@ class EdgarFetcher:
         set_identity(identity)
 
     # ------------------------------------------------------------------
-    def fetch_fundamentals(self, ticker: str, years: int = 10) -> Dict:
+    def fetch_fundamentals(  # pylint: disable=too-many-locals
+        self, ticker: str, years: int = 10
+    ) -> Dict:
         """
         Fetch and parse 10-K fundamental data for *ticker*.
 

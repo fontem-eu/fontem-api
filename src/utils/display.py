@@ -68,18 +68,38 @@ def print_fundamental_score(score: FundamentalScore) -> None:
     tbl.add_column("Threshold",      justify="right", style="dim", min_width=10)
     tbl.add_column("Pass?",          justify="center", min_width=6)
 
+    chk = score.checks.get
     rows = [
-        ("Current price",       f"${score.current_price:.2f}",                   "—",     None),
-        ("P/E ratio",           f"{score.pe_ratio:.1f}"           if score.pe_ratio           else "N/A", "≤ 20",  score.checks.get("pe")),
-        ("P/B ratio",           f"{score.pb_ratio:.2f}"           if score.pb_ratio           else "N/A", "≤ 1.5", score.checks.get("pb")),
-        ("Debt / Equity",       f"{score.debt_equity:.2f}"        if score.debt_equity        else "N/A", "≤ 1.5", score.checks.get("de")),
-        ("ROE",                 f"{score.roe * 100:.1f} %"        if score.roe                else "N/A", "≥ 15%", score.checks.get("roe")),
-        ("Net profit margin",   f"{score.net_profit_margin*100:.1f} %" if score.net_profit_margin else "N/A", "≥ 10%", score.checks.get("npm")),
-        ("Revenue CAGR (5y)",   f"{score.revenue_cagr_5y*100:.1f} %"  if score.revenue_cagr_5y   else "N/A", "> 0%",  score.checks.get("revenue_cagr")),
-        ("Net income CAGR (5y)",f"{score.net_income_cagr_5y*100:.1f} %" if score.net_income_cagr_5y else "N/A", "—",    None),
-        ("Current ratio",       f"{score.current_ratio:.2f}"      if score.current_ratio      else "N/A", "≥ 1.0", score.checks.get("current_ratio")),
-        ("Dividend yield",      f"{score.dividend_yield * 100:.2f} %",                        "≥ 2%",  score.checks.get("div_yield")),
-        ("Consec. profit yrs",  str(score.consecutive_profit_yrs),                            "≥ 3",   None),
+        ("Current price",
+         f"${score.current_price:.2f}", "—", None),
+        ("P/E ratio",
+         f"{score.pe_ratio:.1f}" if score.pe_ratio else "N/A",
+         "≤ 20", chk("pe")),
+        ("P/B ratio",
+         f"{score.pb_ratio:.2f}" if score.pb_ratio else "N/A",
+         "≤ 1.5", chk("pb")),
+        ("Debt / Equity",
+         f"{score.debt_equity:.2f}" if score.debt_equity else "N/A",
+         "≤ 1.5", chk("de")),
+        ("ROE",
+         f"{score.roe * 100:.1f} %" if score.roe else "N/A",
+         "≥ 15%", chk("roe")),
+        ("Net profit margin",
+         f"{score.net_profit_margin*100:.1f} %" if score.net_profit_margin else "N/A",
+         "≥ 10%", chk("npm")),
+        ("Revenue CAGR (5y)",
+         f"{score.revenue_cagr_5y*100:.1f} %" if score.revenue_cagr_5y else "N/A",
+         "> 0%", chk("revenue_cagr")),
+        ("Net income CAGR (5y)",
+         f"{score.net_income_cagr_5y*100:.1f} %" if score.net_income_cagr_5y else "N/A",
+         "—", None),
+        ("Current ratio",
+         f"{score.current_ratio:.2f}" if score.current_ratio else "N/A",
+         "≥ 1.0", chk("current_ratio")),
+        ("Dividend yield",
+         f"{score.dividend_yield * 100:.2f} %", "≥ 2%", chk("div_yield")),
+        ("Consec. profit yrs",
+         str(score.consecutive_profit_yrs), "≥ 3", None),
     ]
 
     for metric, value, threshold, passed in rows:
@@ -108,14 +128,27 @@ def print_technical_score(score: TechnicalScore) -> None:
     tbl.add_column("Threshold",  justify="right", style="dim", min_width=10)
     tbl.add_column("Pass?",      justify="center", min_width=6)
 
+    chk = score.checks.get
     rows = [
-        ("Current price",      f"${score.current_price:.2f}",                               "—",        None),
-        ("Win probability",    f"{score.win_probability * 100:.1f} %" if score.win_probability is not None else "N/A", "> 50%",   score.checks.get("win_prob")),
-        ("Avg monthly VUp",    f"{score.avg_vup * 100:.1f} %"        if score.avg_vup        is not None else "N/A", "> 30%",   score.checks.get("avg_vup")),
-        ("Avg monthly VDown",  f"{score.avg_vdown * 100:.1f} %"      if score.avg_vdown      is not None else "N/A", "< −30%",  score.checks.get("avg_vdown")),
-        ("43-day MA (MAT)",    f"${score.mat:.2f}"                    if score.mat            is not None else "N/A", "—",        None),
-        ("Price vs MAT",       f"{score.mat_diff_pct * 100:+.2f} %"  if score.mat_diff_pct   is not None else "N/A", "> −2.5%", score.checks.get("mat_diff")),
-        ("Daily volume",       f"{score.current_volume:,.0f}",                               "> 1 M",    score.checks.get("volume")),
+        ("Current price",
+         f"${score.current_price:.2f}", "—", None),
+        ("Win probability",
+         f"{score.win_probability * 100:.1f} %" if score.win_probability is not None else "N/A",
+         "> 50%", chk("win_prob")),
+        ("Avg monthly VUp",
+         f"{score.avg_vup * 100:.1f} %" if score.avg_vup is not None else "N/A",
+         "> 30%", chk("avg_vup")),
+        ("Avg monthly VDown",
+         f"{score.avg_vdown * 100:.1f} %" if score.avg_vdown is not None else "N/A",
+         "< −30%", chk("avg_vdown")),
+        ("43-day MA (MAT)",
+         f"${score.mat:.2f}" if score.mat is not None else "N/A",
+         "—", None),
+        ("Price vs MAT",
+         f"{score.mat_diff_pct * 100:+.2f} %" if score.mat_diff_pct is not None else "N/A",
+         "> −2.5%", chk("mat_diff")),
+        ("Daily volume",
+         f"{score.current_volume:,.0f}", "> 1 M", chk("volume")),
     ]
 
     for metric, value, threshold, passed in rows:

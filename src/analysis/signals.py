@@ -34,7 +34,7 @@ _SIGNAL_LABELS = {
 
 
 @dataclass
-class CompositeSignal:
+class CompositeSignal:  # pylint: disable=too-many-instance-attributes
     """Combined fundamental + technical recommendation."""
 
     ticker:        str
@@ -57,7 +57,7 @@ class CompositeSignal:
         return _SIGNAL_LABELS.get(self.final_signal, self.final_signal)
 
 
-class SignalGenerator:
+class SignalGenerator:  # pylint: disable=too-few-public-methods
     """
     Merges fundamental and technical scores into one actionable signal.
 
@@ -81,6 +81,95 @@ class SignalGenerator:
         self.tw = technical_weight
 
     # ------------------------------------------------------------------
+    def _fundamental_reasons(self, fundamental: FundamentalScore) -> List[str]:
+        """Build human-readable reasoning strings for fundamental analysis."""
+        reasons: List[str] = []
+        c = fundamental.checks
+
+        if fundamental.pe_ratio is not None:
+            ok = c.get("pe")
+            reasons.append(
+                f"{'✓' if ok else '✗'} P/E {fundamental.pe_ratio:.1f} "
+                f"({'attractive' if ok else 'expensive'})"
+            )
+        if fundamental.pb_ratio is not None:
+            ok = c.get("pb")
+            reasons.append(
+                f"{'✓' if ok else '✗'} P/B {fundamental.pb_ratio:.2f} "
+                f"({'near book value' if ok else 'premium to book'})"
+            )
+        if fundamental.debt_equity is not None:
+            ok = c.get("de")
+            reasons.append(
+                f"{'✓' if ok else '✗'} D/E {fundamental.debt_equity:.2f} "
+                f"({'manageable debt' if ok else 'high leverage'})"
+            )
+        if fundamental.roe is not None:
+            ok = c.get("roe")
+            reasons.append(
+                f"{'✓' if ok else '✗'} ROE {fundamental.roe * 100:.1f}% "
+                f"({'strong' if ok else 'weak'} capital returns)"
+            )
+        if fundamental.net_profit_margin is not None:
+            ok = c.get("npm")
+            reasons.append(
+                f"{'✓' if ok else '✗'} Net margin {fundamental.net_profit_margin * 100:.1f}%"
+            )
+        if fundamental.revenue_cagr_5y is not None:
+            ok = c.get("revenue_cagr")
+            reasons.append(
+                f"{'✓' if ok else '✗'} Revenue CAGR "
+                f"{fundamental.revenue_cagr_5y * 100:.1f}% (5y)"
+            )
+        if fundamental.net_income_cagr_5y is not None:
+            g = fundamental.net_income_cagr_5y
+            reasons.append(f"  ↳ Net income CAGR {g * 100:.1f}% (5y)")
+        if fundamental.consecutive_profit_yrs >= 3:
+            reasons.append(
+                f"✓ {fundamental.consecutive_profit_yrs} consecutive profitable years"
+            )
+        if fundamental.dividend_yield > 0:
+            ok = c.get("div_yield")
+            reasons.append(
+                f"{'✓' if ok else '✗'} Dividend yield "
+                f"{fundamental.dividend_yield * 100:.2f}%"
+            )
+        return reasons
+
+    def _technical_reasons(self, technical: TechnicalScore) -> List[str]:
+        """Build human-readable reasoning strings for technical analysis."""
+        reasons: List[str] = []
+        c = technical.checks
+
+        if technical.win_probability is not None:
+            ok = c.get("win_prob")
+            reasons.append(
+                f"{'✓' if ok else '✗'} Win probability "
+                f"{technical.win_probability * 100:.1f}% "
+                f"({'favours buyers' if ok else 'favours sellers'})"
+            )
+        if technical.mat_diff_pct is not None:
+            ok   = c.get("mat_diff")
+            sign = "above" if technical.mat_diff_pct >= 0 else "below"
+            reasons.append(
+                f"{'✓' if ok else '✗'} Price {abs(technical.mat_diff_pct) * 100:.1f}% "
+                f"{sign} 43-day MA — MAT ${technical.mat:.2f}"
+            )
+        if technical.avg_vup is not None and technical.avg_vdown is not None:
+            ok_up   = c.get("avg_vup")
+            ok_down = c.get("avg_vdown")
+            reasons.append(
+                f"{'✓' if (ok_up and ok_down) else '✗'} "
+                f"Monthly volatility  VUp {technical.avg_vup * 100:.1f}% / "
+                f"VDown {technical.avg_vdown * 100:.1f}%"
+            )
+        if technical.current_volume > 0:
+            ok = c.get("volume")
+            reasons.append(
+                f"{'✓' if ok else '✗'} Volume {technical.current_volume:,.0f}"
+            )
+        return reasons
+
     def generate(
         self,
         fundamental: Optional[FundamentalScore] = None,
@@ -100,109 +189,15 @@ class SignalGenerator:
         )
         reasons: List[str] = []
 
-        # ── Fundamental reasoning ─────────────────────────────────────
         if fundamental:
             signal.fundamental_score  = fundamental.score
             signal.fundamental_signal = fundamental.signal_strength
+            reasons.extend(self._fundamental_reasons(fundamental))
 
-            c = fundamental.checks   # shorthand
-
-            if fundamental.pe_ratio is not None:
-                ok = c.get("pe")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} P/E {fundamental.pe_ratio:.1f} "
-                    f"({'attractive' if ok else 'expensive'})"
-                )
-
-            if fundamental.pb_ratio is not None:
-                ok = c.get("pb")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} P/B {fundamental.pb_ratio:.2f} "
-                    f"({'near book value' if ok else 'premium to book'})"
-                )
-
-            if fundamental.debt_equity is not None:
-                ok = c.get("de")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} D/E {fundamental.debt_equity:.2f} "
-                    f"({'manageable debt' if ok else 'high leverage'})"
-                )
-
-            if fundamental.roe is not None:
-                ok = c.get("roe")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} ROE {fundamental.roe * 100:.1f}% "
-                    f"({'strong' if ok else 'weak'} capital returns)"
-                )
-
-            if fundamental.net_profit_margin is not None:
-                ok = c.get("npm")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} Net margin {fundamental.net_profit_margin * 100:.1f}%"
-                )
-
-            if fundamental.revenue_cagr_5y is not None:
-                ok = c.get("revenue_cagr")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} Revenue CAGR "
-                    f"{fundamental.revenue_cagr_5y * 100:.1f}% (5y)"
-                )
-
-            if fundamental.net_income_cagr_5y is not None:
-                g = fundamental.net_income_cagr_5y
-                reasons.append(
-                    f"  ↳ Net income CAGR {g * 100:.1f}% (5y)"
-                )
-
-            if fundamental.consecutive_profit_yrs >= 3:
-                reasons.append(
-                    f"✓ {fundamental.consecutive_profit_yrs} consecutive profitable years"
-                )
-
-            if fundamental.dividend_yield > 0:
-                ok = c.get("div_yield")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} Dividend yield "
-                    f"{fundamental.dividend_yield * 100:.2f}%"
-                )
-
-        # ── Technical / GMR reasoning ─────────────────────────────────
         if technical:
             signal.technical_score  = technical.score
             signal.technical_signal = technical.signal_strength
-
-            c = technical.checks
-
-            if technical.win_probability is not None:
-                ok = c.get("win_prob")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} Win probability "
-                    f"{technical.win_probability * 100:.1f}% "
-                    f"({'favours buyers' if ok else 'favours sellers'})"
-                )
-
-            if technical.mat_diff_pct is not None:
-                ok   = c.get("mat_diff")
-                sign = "above" if technical.mat_diff_pct >= 0 else "below"
-                reasons.append(
-                    f"{'✓' if ok else '✗'} Price {abs(technical.mat_diff_pct) * 100:.1f}% "
-                    f"{sign} 43-day MA — MAT ${technical.mat:.2f}"
-                )
-
-            if technical.avg_vup is not None and technical.avg_vdown is not None:
-                ok_up   = c.get("avg_vup")
-                ok_down = c.get("avg_vdown")
-                reasons.append(
-                    f"{'✓' if (ok_up and ok_down) else '✗'} "
-                    f"Monthly volatility  VUp {technical.avg_vup * 100:.1f}% / "
-                    f"VDown {technical.avg_vdown * 100:.1f}%"
-                )
-
-            if technical.current_volume > 0:
-                ok = c.get("volume")
-                reasons.append(
-                    f"{'✓' if ok else '✗'} Volume {technical.current_volume:,.0f}"
-                )
+            reasons.extend(self._technical_reasons(technical))
 
         # ── Weighted composite score ───────────────────────────────────
         if fundamental and technical:

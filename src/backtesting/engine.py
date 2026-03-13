@@ -52,7 +52,7 @@ class Trade:
 
 
 @dataclass
-class BacktestResults:
+class BacktestResults:  # pylint: disable=too-many-instance-attributes
     """All outputs from one backtest run."""
 
     ticker:          str
@@ -85,7 +85,8 @@ class BacktestResults:
             "=" * 62,
             f"  BACKTEST  |  {self.ticker}  |  Strategy: {self.strategy}",
             "=" * 62,
-            f"  Period          {self.start_date.date()} → {self.end_date.date()}  ({years:.1f} yrs)",
+            f"  Period          {self.start_date.date()} → "
+            f"{self.end_date.date()}  ({years:.1f} yrs)",
             f"  Initial capital ${self.initial_capital:>12,.2f}",
             f"  Final capital   ${final:>12,.2f}",
             "─" * 62,
@@ -130,7 +131,7 @@ def _ann_return(total: float, days: float) -> float:
 # GMR Technical backtester
 # ---------------------------------------------------------------------------
 
-class TechnicalBacktester:
+class TechnicalBacktester:  # pylint: disable=too-few-public-methods
     """
     Walks forward through *price_history* one month at a time, running the
     GMR Short-Term indicator at each step and executing trades accordingly.
@@ -154,7 +155,7 @@ class TechnicalBacktester:
         self._analyzer       = TechnicalAnalyzer()
 
     # ------------------------------------------------------------------
-    def run(
+    def run(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         ticker:        str,
         price_history: pd.DataFrame,
@@ -235,7 +236,7 @@ class TechnicalBacktester:
                     ticker=ticker,
                     analysis_date=eval_ts.to_pydatetime(),
                 )
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug("GMR analysis failed at %s: %s", eval_ts.date(), exc)
                 continue
 
@@ -298,7 +299,10 @@ class TechnicalBacktester:
         ann_ret   = _ann_return(total_ret, days)
 
         if not benchmark_series.empty:
-            bh_total = (benchmark_series.iloc[-1] - benchmark_series.iloc[0]) / benchmark_series.iloc[0]
+            bh_total = (
+                (benchmark_series.iloc[-1] - benchmark_series.iloc[0])
+                / benchmark_series.iloc[0]
+            )
             bh_ann   = _ann_return(bh_total, days)
         else:
             bh_ann = 0.0

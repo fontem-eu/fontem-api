@@ -60,6 +60,17 @@ def _f(value: float) -> Optional[float]:
         return None
 
 
+def _sv(series, yr, default=None):
+    """Safe value lookup in a pandas Series by year index."""
+    try:
+        if hasattr(series, 'at') and yr in series.index:
+            v = float(series.at[yr])
+            return None if (math.isnan(v) or math.isinf(v)) else v
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    return default
+
+
 # ---------------------------------------------------------------------------
 # GMR Long
 # ---------------------------------------------------------------------------
@@ -251,7 +262,7 @@ def gmr_short(
         "Use `?years=N` (default 10) to control how many historical years are returned."
     ),
 )
-def gmr_data(
+def gmr_data(  # pylint: disable=too-many-locals
     ticker: str,
     years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
     data_source: FinancialDataSource = Depends(get_data_source),
@@ -285,16 +296,6 @@ def gmr_data(
     prepaid       = fundamentals.get("prepaid_expenses",   {})
     operating_cf  = fundamentals.get("operating_cashflow", {})
     capex         = fundamentals.get("capex",              {})
-
-    def _sv(series, yr, default=None):
-        """Safe value lookup in a Series or dict."""
-        try:
-            if hasattr(series, 'at') and yr in series.index:
-                v = float(series.at[yr])
-                return None if (math.isnan(v) or math.isinf(v)) else v
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
-        return default
 
     # ── Build current snapshot ───────────────────────────────────────
     lq = snapshot.get("latest_quarter") or {}

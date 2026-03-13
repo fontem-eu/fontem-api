@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class GMRLongResult:
+class GMRLongResult:  # pylint: disable=too-many-instance-attributes
     """Structured output of the GMR long-term screen."""
     ticker: str
 
@@ -69,7 +69,7 @@ class GMRLongResult:
 # Main class
 # ---------------------------------------------------------------------------
 
-class GMRLong:
+class GMRLong:  # pylint: disable=too-few-public-methods
     """
     GMR Long-term screen.
 
@@ -89,7 +89,9 @@ class GMRLong:
         self._s = settings or GMRSettings()
 
     # ------------------------------------------------------------------
-    def compute(self, ticker: str, years: Optional[int] = None) -> GMRLongResult:
+    def compute(  # pylint: disable=too-many-locals,too-many-statements
+        self, ticker: str, years: Optional[int] = None
+    ) -> GMRLongResult:
         """Run the long-term GMR screen and return a :class:`GMRLongResult`."""
         n = years if years is not None else self._s.years_for_avg
 

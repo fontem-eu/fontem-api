@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code  # redis_cache and fake_redis_cache share identical method bodies by design
 """
 Redis Cache Implementation
 ===========================
@@ -51,7 +52,7 @@ class RedisCache(CacheInterface):
             self._client.ping()
             logger.debug("Connected to Redis at %s:%s (db=%s)",
                         self.host, self.port, self.db)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("Failed to connect to Redis: %s", exc)
             raise
 
@@ -59,7 +60,7 @@ class RedisCache(CacheInterface):
         """Serialize value for Redis storage."""
         try:
             return pickle.dumps(value)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("Failed to serialize value: %s", exc)
             raise ValueError(f"Cannot serialize value: {exc}") from exc
 
@@ -67,7 +68,7 @@ class RedisCache(CacheInterface):
         """Deserialize value from Redis storage."""
         try:
             return pickle.loads(data)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("Failed to deserialize data: %s", exc)
             raise ValueError(f"Cannot deserialize data: {exc}") from exc
 
@@ -81,7 +82,7 @@ class RedisCache(CacheInterface):
 
             self._stats.hits += 1
             return self._deserialize(data)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("Cache get failed for key %s: %s", key, exc)
             self._stats.misses += 1
             return None
@@ -96,7 +97,7 @@ class RedisCache(CacheInterface):
                 result = self._client.set(key, serialized)
             self._stats.sets += 1
             return result
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("Cache set failed for key %s: %s", key, exc)
             return False
 
@@ -107,7 +108,7 @@ class RedisCache(CacheInterface):
             if deleted:
                 self._stats.deletes += 1
             return deleted
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("Cache delete failed for key %s: %s", key, exc)
             return False
 
@@ -117,7 +118,7 @@ class RedisCache(CacheInterface):
             self._client.flushdb()
             self._stats = CacheStats()  # Reset stats
             return True
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error("Cache clear failed: %s", exc)
             return False
 
@@ -137,7 +138,7 @@ class RedisCache(CacheInterface):
         if self._client:
             try:
                 self._client.close()
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.error("Failed to close Redis connection: %s", exc)
             finally:
                 self._client = None

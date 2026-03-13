@@ -66,7 +66,7 @@ DEFAULT_THRESHOLDS: Dict[str, float] = {
 # ---------------------------------------------------------------------------
 
 @dataclass
-class TechnicalScore:
+class TechnicalScore:  # pylint: disable=too-many-instance-attributes
     """All GMR technical-analysis outputs for one stock at one point in time."""
 
     ticker:         str
@@ -97,7 +97,7 @@ class TechnicalScore:
 # Analyser
 # ---------------------------------------------------------------------------
 
-class TechnicalAnalyzer:
+class TechnicalAnalyzer:  # pylint: disable=too-few-public-methods
     """
     Runs the GMR Short-Term indicator on a DataFrame of daily OHLCV data.
 
@@ -111,7 +111,7 @@ class TechnicalAnalyzer:
         self.thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
 
     # ------------------------------------------------------------------
-    def analyze(
+    def analyze(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         price_history: pd.DataFrame,
         ticker: str = "UNKNOWN",
