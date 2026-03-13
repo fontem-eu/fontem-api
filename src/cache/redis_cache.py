@@ -5,7 +5,6 @@ Concrete implementation of CacheInterface using Redis.
 """
 from __future__ import annotations
 
-import json
 import pickle
 import logging
 from typing import Any, Optional
@@ -62,7 +61,7 @@ class RedisCache(CacheInterface):
             return pickle.dumps(value)
         except Exception as exc:
             logger.error("Failed to serialize value: %s", exc)
-            raise ValueError(f"Cannot serialize value: {exc}")
+            raise ValueError(f"Cannot serialize value: {exc}") from exc
 
     def _deserialize(self, data: bytes) -> Any:
         """Deserialize value from Redis storage."""
@@ -70,7 +69,7 @@ class RedisCache(CacheInterface):
             return pickle.loads(data)
         except Exception as exc:
             logger.error("Failed to deserialize data: %s", exc)
-            raise ValueError(f"Cannot deserialize data: {exc}")
+            raise ValueError(f"Cannot deserialize data: {exc}") from exc
 
     def get(self, key: str) -> Optional[Any]:
         """Retrieve a value from the cache."""

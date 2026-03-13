@@ -19,6 +19,7 @@ class GMRShortRatioSchema(BaseModel):
 
 
 class MarketSnapshotShortSchema(BaseModel):
+    """Current market snapshot for the short-term endpoint."""
     current_price: Optional[float] = None
     avg_volume: Optional[float] = None
 

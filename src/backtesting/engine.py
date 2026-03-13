@@ -77,6 +77,7 @@ class BacktestResults:
 
     # ------------------------------------------------------------------
     def summary(self) -> str:
+        """Return a human-readable summary of backtest results."""
         years = max((self.end_date - self.start_date).days / 365.25, 0.01)
         final = self.initial_capital * (1.0 + self.total_return)
         lines = [

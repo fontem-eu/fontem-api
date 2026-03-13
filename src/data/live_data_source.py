@@ -18,7 +18,7 @@ import pandas as pd
 from .edgar_fetcher import EdgarFetcher
 from .price_fetcher import PriceFetcher
 from ..analysis.gmr_data_source import FinancialDataSource
-from ..cache import CacheInterface, CacheConfig, create_cache, cached_method
+from ..cache import CacheInterface, CacheConfig, create_cache
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +179,7 @@ class LiveDataSource(FinancialDataSource):
         cache_key = self._cache_config.get_full_key("ticker_list", "all")
         return self._get_cached_data(
             cache_key,
-            lambda: self._edgar.get_edgar_ticker_list(),
+            self._edgar.get_edgar_ticker_list,
             "ttl_ticker_list"
         )
 

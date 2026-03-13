@@ -53,6 +53,7 @@ class CompositeSignal:
 
     @property
     def final_signal_label(self) -> str:
+        """Human-readable label for the final signal."""
         return _SIGNAL_LABELS.get(self.final_signal, self.final_signal)
 
 
@@ -215,10 +216,15 @@ class SignalGenerator:
         signal.reasoning       = reasons
 
         # ── Final signal ──────────────────────────────────────────────
-        if   composite >= 75: signal.final_signal = "STRONG_BUY"
-        elif composite >= 60: signal.final_signal = "BUY"
-        elif composite >= 40: signal.final_signal = "HOLD"
-        elif composite >= 25: signal.final_signal = "SELL"
-        else:                 signal.final_signal = "STRONG_SELL"
+        if composite >= 75:
+            signal.final_signal = "STRONG_BUY"
+        elif composite >= 60:
+            signal.final_signal = "BUY"
+        elif composite >= 40:
+            signal.final_signal = "HOLD"
+        elif composite >= 25:
+            signal.final_signal = "SELL"
+        else:
+            signal.final_signal = "STRONG_SELL"
 
         return signal

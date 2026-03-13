@@ -42,14 +42,14 @@ def _check(passed: Optional[bool]) -> str:
 def _score_bar(score: float, width: int = 36) -> str:
     """Unicode progress-bar representation of a 0–100 score."""
     filled = int(round(score / 100 * width))
-    bar    = "█" * filled + "░" * (width - filled)
+    progress = "█" * filled + "░" * (width - filled)
     if score >= 60:
         colour = "green"
     elif score >= 40:
         colour = "yellow"
     else:
         colour = "red"
-    return f"[{colour}]{bar}[/{colour}]  [{colour}]{score:.0f}/100[/{colour}]"
+    return f"[{colour}]{progress}[/{colour}]  [{colour}]{score:.0f}/100[/{colour}]"
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +238,14 @@ def _print_equity_chart(results: BacktestResults) -> None:
     prev = 100.0
     for val in eq_m:
         delta = val - prev
-        if   delta >  5:  bars.append("[green]▲[/green]")
-        elif delta >  0:  bars.append("[green]△[/green]")
-        elif delta > -5:  bars.append("[red]▽[/red]")
-        else:             bars.append("[red]▼[/red]")
+        if delta > 5:
+            bars.append("[green]▲[/green]")
+        elif delta > 0:
+            bars.append("[green]△[/green]")
+        elif delta > -5:
+            bars.append("[red]▽[/red]")
+        else:
+            bars.append("[red]▼[/red]")
         prev = val
 
     console.print("  " + " ".join(bars))

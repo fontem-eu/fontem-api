@@ -81,17 +81,18 @@ def gmr_long(
     summarize: bool = Query(default=False, description="Return only the gmr_ratio object"),
     data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRLongResponse:
+    """Run the GMR long-term value-investing screen for a given ticker."""
     ticker = ticker.upper()
 
     try:
         result = GMRLong(data_source).compute(ticker)
     except (ValueError, LookupError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=404,
             detail=f"No data found for ticker '{ticker}': {exc}",
-        )
+        ) from exc
 
     if result.per_year.empty:
         raise HTTPException(
@@ -178,17 +179,18 @@ def gmr_short(
     summarize: bool = Query(default=False, description="Return only the gmr_ratio object"),
     data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRShortResponse:
+    """Run the GMR short-term swing-trading screen for a given ticker."""
     ticker = ticker.upper()
 
     try:
         result = GMRShort(data_source).compute(ticker)
     except (ValueError, LookupError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=404,
             detail=f"No data found for ticker '{ticker}': {exc}",
-        )
+        ) from exc
 
     # If the data source returns an empty result (unknown ticker / no history)
     if math.isnan(result.current_price) and result.monthly_breakdown.empty:
@@ -254,6 +256,7 @@ def gmr_data(
     years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
     data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRDataResponse:
+    """Return raw annual financial data for a given ticker."""
     ticker = ticker.upper()
 
     try:
@@ -262,12 +265,12 @@ def gmr_data(
         dividends     = data_source.get_annual_dividends(ticker)
         snapshot      = data_source.get_market_snapshot(ticker)
     except (ValueError, LookupError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=404,
             detail=f"No data found for ticker '{ticker}': {exc}",
-        )
+        ) from exc
 
     # ── Unpack fundamentals ──────────────────────────────────────────
     revenue       = fundamentals.get("revenue",            {})
@@ -286,11 +289,10 @@ def gmr_data(
     def _sv(series, yr, default=None):
         """Safe value lookup in a Series or dict."""
         try:
-            import pandas as pd
             if hasattr(series, 'at') and yr in series.index:
                 v = float(series.at[yr])
-                return None if (v != v or abs(v) == float('inf')) else v
-        except Exception:
+                return None if (math.isnan(v) or math.isinf(v)) else v
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
         return default
 

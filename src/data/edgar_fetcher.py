@@ -17,6 +17,7 @@ import re
 from typing import Dict, List, Optional
 
 import pandas as pd
+import requests
 from edgar import Company, set_identity
 from edgar.xbrl import XBRLS
 
@@ -278,7 +279,7 @@ class EdgarFetcher:
         if equity.empty and not total_assets.empty and not total_liabilities.empty:
             common = total_assets.index.intersection(total_liabilities.index)
             if len(common):
-                equity = (total_assets[common] - total_liabilities[common])
+                equity = total_assets[common] - total_liabilities[common]
 
         # Free Cash Flow = Operating CF − CapEx (both now positive magnitudes)
         fcf = pd.Series(dtype=float)
@@ -324,8 +325,6 @@ class EdgarFetcher:
 
         This is a single API call that returns ~10,000+ companies.
         """
-        import requests
-
         # SEC requires a descriptive User-Agent header identifying the app and
         # a contact email. Without it, requests return 403 Forbidden.
         url = "https://www.sec.gov/files/company_tickers.json"
@@ -423,14 +422,13 @@ class EdgarFetcher:
         # Common exchange patterns
         if ticker.endswith('.O') or ticker.endswith('.OB'):
             return "NASDAQ"
-        elif ticker.endswith('.N') or ticker.endswith('.NY'):
+        if ticker.endswith('.N') or ticker.endswith('.NY'):
             return "NYSE"
-        elif ticker.endswith('.A'):
+        if ticker.endswith('.A'):
             return "AMEX"
-        elif len(ticker) == 1 or len(ticker) == 2:
+        if len(ticker) == 1 or len(ticker) == 2:
             return "NYSE"  # Single/double letter tickers are usually NYSE
-        else:
-            return "NASDAQ"  # Default assumption
+        return "NASDAQ"  # Default assumption
 
     def _infer_sector_from_sic(self, sic_code: Optional[str]) -> str:
         """Infer sector from SIC code."""

@@ -29,7 +29,7 @@ Key metrics
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -209,7 +209,7 @@ class GMRShort:
             "price_range": s.min_price   <= current_price <= s.max_price,
             "win_prob":    win_probability > s.win_probability,
             "volatility":  avg_v_up > s.trigger_v_up and avg_v_down < s.trigger_v_down,
-            "mat":         diff_mat  > s.diff_mat if diff_mat == diff_mat else False,
+            "mat":         diff_mat  > s.diff_mat if not np.isnan(diff_mat) else False,
         }
         passes_all = all(flags.values())
 

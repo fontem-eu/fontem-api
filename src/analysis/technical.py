@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional
 
 import numpy as np
@@ -224,11 +224,16 @@ class TechnicalAnalyzer:
         raw_score = (passed / len(checks)) * 100.0
 
         # ── Signal label ──────────────────────────────────────────────
-        if   raw_score >= 80: strength = "STRONG_BUY"
-        elif raw_score >= 60: strength = "BUY"
-        elif raw_score >= 40: strength = "HOLD"
-        elif raw_score >= 20: strength = "SELL"
-        else:                 strength = "STRONG_SELL"
+        if raw_score >= 80:
+            strength = "STRONG_BUY"
+        elif raw_score >= 60:
+            strength = "BUY"
+        elif raw_score >= 40:
+            strength = "HOLD"
+        elif raw_score >= 20:
+            strength = "SELL"
+        else:
+            strength = "STRONG_SELL"
 
         score.win_probability = win_prob
         score.avg_vup         = avg_vup

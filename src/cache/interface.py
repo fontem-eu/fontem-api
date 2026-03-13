@@ -7,7 +7,7 @@ This enables easy switching between different caching providers.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 from dataclasses import dataclass
 
 @dataclass
@@ -38,7 +38,6 @@ class CacheInterface(ABC):
         Returns:
             The cached value, or None if not found
         """
-        pass
 
     @abstractmethod
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
@@ -53,7 +52,6 @@ class CacheInterface(ABC):
         Returns:
             True if successful, False otherwise
         """
-        pass
 
     @abstractmethod
     def delete(self, key: str) -> bool:
@@ -66,7 +64,6 @@ class CacheInterface(ABC):
         Returns:
             True if deleted, False if key didn't exist
         """
-        pass
 
     @abstractmethod
     def clear(self) -> bool:
@@ -76,7 +73,6 @@ class CacheInterface(ABC):
         Returns:
             True if successful, False otherwise
         """
-        pass
 
     @abstractmethod
     def get_stats(self) -> CacheStats:
@@ -86,11 +82,9 @@ class CacheInterface(ABC):
         Returns:
             CacheStats object with hit/miss counts
         """
-        pass
 
     @abstractmethod
     def close(self) -> None:
         """
         Close any connections and clean up resources.
         """
-        pass

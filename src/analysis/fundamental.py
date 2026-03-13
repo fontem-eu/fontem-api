@@ -267,10 +267,15 @@ class FundamentalAnalyzer:
 
         # ── Signal label ──────────────────────────────────────────────
         s = score.score
-        if   s >= 75: score.signal_strength = "STRONG_BUY"
-        elif s >= 60: score.signal_strength = "BUY"
-        elif s >= 40: score.signal_strength = "HOLD"
-        elif s >= 25: score.signal_strength = "SELL"
-        else:         score.signal_strength = "STRONG_SELL"
+        if s >= 75:
+            score.signal_strength = "STRONG_BUY"
+        elif s >= 60:
+            score.signal_strength = "BUY"
+        elif s >= 40:
+            score.signal_strength = "HOLD"
+        elif s >= 25:
+            score.signal_strength = "SELL"
+        else:
+            score.signal_strength = "STRONG_SELL"
 
         return score

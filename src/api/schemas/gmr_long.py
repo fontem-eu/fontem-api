@@ -22,11 +22,13 @@ class GMRLongRatioSchema(BaseModel):
 
 
 class LastDividendSchema(BaseModel):
+    """Last dividend date and amount."""
     date: Optional[str] = None
     amount: Optional[float] = None
 
 
 class MarketSnapshotLongSchema(BaseModel):
+    """Current market snapshot for the long-term endpoint."""
     current_price: Optional[float] = None
     avg_volume: Optional[float] = None
     last_dividend: Optional[LastDividendSchema] = None

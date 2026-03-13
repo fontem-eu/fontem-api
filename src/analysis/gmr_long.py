@@ -146,8 +146,8 @@ class GMRLong:
 
             eps_v = ni / sh   if (sh  and sh  > 0) else nan
             bvps  = eq / sh   if (sh  and sh  > 0) else nan
-            pe    = price / eps_v if (eps_v and eps_v > 0 and price == price) else nan
-            pb    = price / bvps  if (bvps  and bvps  > 0 and price == price) else nan
+            pe    = price / eps_v if (eps_v and eps_v > 0 and not np.isnan(price)) else nan
+            pb    = price / bvps  if (bvps  and bvps  > 0 and not np.isnan(price)) else nan
             roe   = ni / eq * 100 if (eq    and eq    > 0) else nan
             npm   = ni / rev * 100 if (rev   and rev   > 0) else nan
             de    = liab / eq      if (eq    and eq    > 0) else nan

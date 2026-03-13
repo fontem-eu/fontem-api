@@ -7,16 +7,15 @@ requiring a Redis server.
 """
 from __future__ import annotations
 
-import json
 import pickle
 import logging
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 
 try:
     import fakeredis
-    fake_redis_available = True
+    FAKE_REDIS_AVAILABLE = True
 except ImportError:
-    fake_redis_available = False
+    FAKE_REDIS_AVAILABLE = False
 
 from .interface import CacheInterface, CacheStats
 
@@ -34,8 +33,10 @@ class FakeRedisCache(CacheInterface):
         """
         Initialize in-memory fake Redis cache.
         """
-        if not fake_redis_available:
-            raise ImportError("fakeredis is not installed. Please install it with: pip install fakeredis")
+        if not FAKE_REDIS_AVAILABLE:
+            raise ImportError(
+                "fakeredis is not installed. Please install it with: pip install fakeredis"
+            )
 
         self._client = fakeredis.FakeStrictRedis(decode_responses=False)
         self._stats = CacheStats()
@@ -47,7 +48,7 @@ class FakeRedisCache(CacheInterface):
             return pickle.dumps(value)
         except Exception as exc:
             logger.error("Failed to serialize value: %s", exc)
-            raise ValueError(f"Cannot serialize value: {exc}")
+            raise ValueError(f"Cannot serialize value: {exc}") from exc
 
     def _deserialize(self, data: bytes) -> Any:
         """Deserialize value from storage."""
@@ -55,7 +56,7 @@ class FakeRedisCache(CacheInterface):
             return pickle.loads(data)
         except Exception as exc:
             logger.error("Failed to deserialize data: %s", exc)
-            raise ValueError(f"Cannot deserialize data: {exc}")
+            raise ValueError(f"Cannot deserialize data: {exc}") from exc
 
     def get(self, key: str) -> Optional[Any]:
         """Retrieve a value from the cache."""
@@ -120,8 +121,6 @@ class FakeRedisCache(CacheInterface):
 
     def close(self) -> None:
         """Close any resources (no-op for fake Redis)."""
-        # No actual connections to close
-        pass
 
     def __getstate__(self):
         """Get state for pickling (exclude client)."""
