@@ -13,6 +13,9 @@ A 404 is returned when:
   • the ticker is unknown / has no price history (GMR Short), or
   • the underlying data source raises a ValueError / LookupError.
 """
+# The try/except 404 pattern is intentionally identical across all analysis
+# routers — it is standard FastAPI error handling, not a shared abstraction.
+# pylint: disable=duplicate-code
 from __future__ import annotations
 
 import math
@@ -37,6 +40,7 @@ from src.api.schemas.gmr_short import (
     MarketSnapshotShortSchema,
     MonthlyBreakdownSchema,
 )
+from src.api.helpers import _f
 from src.api.schemas.gmr_data import (
     GMRDataResponse,
     CurrentSnapshotSchema,
@@ -44,20 +48,6 @@ from src.api.schemas.gmr_data import (
 )
 
 router = APIRouter(tags=["GMR Analysis"])
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _f(value: float) -> Optional[float]:
-    """Convert NaN / Inf to None for JSON serialisation."""
-    if value is None:
-        return None
-    try:
-        return None if (math.isnan(value) or math.isinf(value)) else value
-    except (TypeError, ValueError):
-        return None
 
 
 def _sv(series, yr, default=None):

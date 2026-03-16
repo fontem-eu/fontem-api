@@ -114,6 +114,21 @@ _CAPEX = [
     "Capital expenditures, net",
     "CapitalExpenses",
 ]
+_GROSS_PROFIT = [
+    "Gross profit", "Gross Profit", "GrossProfit",
+    "Total gross profit", "Gross margin",
+]
+_OPERATING_INCOME = [
+    "Operating income", "Operating Income", "Income from operations",
+    "Operating income (loss)", "OperatingIncomeLoss",
+    "Operating earnings", "Operating profit",
+]
+_LONG_TERM_DEBT = [
+    "Long-term debt", "Long-term debt, net of current portion",
+    "Long-term debt, net", "LongTermDebt",
+    "LongTermDebtNoncurrent", "Long-term borrowings",
+    "Long term debt", "Notes payable, long-term",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +278,12 @@ class EdgarFetcher:
 
         revenue            = _to_annual_series(_find_concept(inc_df, _REVENUE))
         net_income         = _to_annual_series(_find_concept(inc_df, _NET_INCOME))
+        gross_profit       = _to_annual_series(_find_concept(inc_df, _GROSS_PROFIT))
+        operating_income   = _to_annual_series(_find_concept(inc_df, _OPERATING_INCOME))
         total_assets       = _to_annual_series(_find_concept(bs_df,  _TOTAL_ASSETS))
         total_liabilities  = _to_annual_series(_find_concept(bs_df,  _TOTAL_LIABILITIES))
         equity             = _to_annual_series(_find_concept(bs_df,  _EQUITY))
+        long_term_debt     = _to_annual_series(_find_concept(bs_df,  _LONG_TERM_DEBT))
         operating_cf       = _to_annual_series(_find_concept(cf_df,  _OPERATING_CF))
         current_assets     = _to_annual_series(_find_concept(bs_df,  _CURRENT_ASSETS))
         current_liab       = _to_annual_series(_find_concept(bs_df,  _CURRENT_LIABILITIES))
@@ -293,10 +311,13 @@ class EdgarFetcher:
         return {
             "ticker":              ticker.upper(),
             "revenue":             revenue,
+            "gross_profit":        gross_profit,
+            "operating_income":    operating_income,
             "net_income":          net_income,
             "total_assets":        total_assets,
             "total_liabilities":   total_liabilities,
             "equity":              equity,
+            "long_term_debt":      long_term_debt,
             "operating_cashflow":  operating_cf,
             "capex":               capex,
             "free_cashflow":       fcf,

@@ -189,3 +189,117 @@ def test_e2e_invalid_ticker_gmr_long_returns_404(client):
 def test_e2e_invalid_ticker_gmr_short_returns_404(client):
     resp = client.get("/ZZZZNOTASTOCK9999/gmr_short")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# E2E 5 — AAPL /fundamentals (full response)
+# ---------------------------------------------------------------------------
+
+FUNDAMENTALS_SUMMARY_KEYS = [
+    "avg_pe", "avg_pb", "avg_ps",
+    "avg_roe", "avg_roa", "avg_npm", "avg_gross_margin", "avg_operating_margin",
+    "avg_current_ratio", "avg_quick_ratio", "avg_debt_to_equity", "avg_debt_to_assets",
+    "avg_fcf_yield", "avg_dividend_yield",
+    "avg_revenue_growth", "avg_earnings_growth",
+]
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_returns_200(client):
+    resp = client.get("/AAPL/fundamentals")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_ticker(client):
+    body = client.get("/AAPL/fundamentals").json()
+    assert body["ticker"] == "AAPL"
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_top_level_keys(client):
+    body = client.get("/AAPL/fundamentals").json()
+    assert "ticker" in body
+    assert "ratios_summary" in body
+    assert "market_snapshot" in body
+    assert "per_year" in body
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_summary_keys_present(client):
+    summary = client.get("/AAPL/fundamentals").json()["ratios_summary"]
+    for key in FUNDAMENTALS_SUMMARY_KEYS:
+        assert key in summary, f"Missing key in ratios_summary: {key}"
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_per_year_non_empty(client):
+    per_year = client.get("/AAPL/fundamentals").json()["per_year"]
+    assert isinstance(per_year, list)
+    assert len(per_year) > 0
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_per_year_descending(client):
+    per_year = client.get("/AAPL/fundamentals").json()["per_year"]
+    years = [e["year"] for e in per_year]
+    assert years == sorted(years, reverse=True)
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_revenue_positive(client):
+    per_year = client.get("/AAPL/fundamentals").json()["per_year"]
+    for row in per_year:
+        if row.get("revenue") is not None:
+            assert row["revenue"] > 0
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_market_cap_positive(client):
+    snap = client.get("/AAPL/fundamentals").json()["market_snapshot"]
+    assert snap.get("market_cap") is not None
+    assert snap["market_cap"] > 0
+
+
+@pytest.mark.slow
+def test_e2e_aapl_fundamentals_years_param(client):
+    body = client.get("/AAPL/fundamentals?years=3").json()
+    assert body["status_code"] if "status_code" in body else True  # 200 checked below
+    resp = client.get("/AAPL/fundamentals?years=3")
+    assert resp.status_code == 200
+    assert len(resp.json()["per_year"]) <= 3
+
+
+# ---------------------------------------------------------------------------
+# E2E 6 — MSFT /fundamentals summarized
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_e2e_msft_fundamentals_summarize_returns_200(client):
+    resp = client.get("/MSFT/fundamentals?summarize=true")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.slow
+def test_e2e_msft_fundamentals_summarize_shape(client):
+    body = client.get("/MSFT/fundamentals?summarize=true").json()
+    assert "ticker" in body
+    assert "ratios_summary" in body
+    assert "per_year" not in body
+    assert "market_snapshot" not in body
+
+
+@pytest.mark.slow
+def test_e2e_msft_fundamentals_summarize_ticker(client):
+    body = client.get("/MSFT/fundamentals?summarize=true").json()
+    assert body["ticker"] == "MSFT"
+
+
+# ---------------------------------------------------------------------------
+# E2E 7 — Invalid ticker → 404
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_e2e_invalid_ticker_fundamentals_returns_404(client):
+    resp = client.get("/ZZZZNOTASTOCK9999/fundamentals")
+    assert resp.status_code == 404
