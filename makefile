@@ -9,3 +9,4 @@ release:
 
 deploy:
 	helm upgrade --install gmr ./deployment --set-string version=$(shell git rev-parse --short HEAD)
+	kubectl -n gmr rollout restart deployment gmr-api
