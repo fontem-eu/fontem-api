@@ -32,4 +32,4 @@ EXPOSE 8000
 
 # Workers=1 keeps memory predictable per pod; scale horizontally via replicas.
 # --verbosity 3 = INFO (default). Pass --verbosity 4 for DEBUG during debugging.
-CMD ["python", "-m", "src.api.run", "--verbosity", "4"]
+CMD ["python", "-m", "src.api.run", "--verbosity", "3"]
