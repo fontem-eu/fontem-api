@@ -31,9 +31,5 @@ USER appuser
 EXPOSE 8000
 
 # Workers=1 keeps memory predictable per pod; scale horizontally via replicas.
-CMD ["uvicorn", "src.api.app:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--workers", "1", \
-     "--root-path", "/api", \
-     "--no-access-log"]
+# --verbosity 3 = INFO (default). Pass --verbosity 4 for DEBUG during debugging.
+CMD ["python", "-m", "src.api.run", "--verbosity", "4"]

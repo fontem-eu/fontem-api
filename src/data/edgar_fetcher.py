@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -252,7 +253,7 @@ class EdgarFetcher:
         set_identity(identity)
 
     # ------------------------------------------------------------------
-    def fetch_fundamentals(  # pylint: disable=too-many-locals
+    def fetch_fundamentals(  # pylint: disable=too-many-locals,too-many-statements
         self, ticker: str, years: int = 10
     ) -> Dict:
         """
@@ -292,7 +293,10 @@ class EdgarFetcher:
                 f"(tried: {', '.join(self._ANNUAL_FORMS)})"
             )
 
+        logger.info("Loading XBRL data for %s (%d %s filings)…", ticker, len(filings), form_type)
+        t0 = time.perf_counter()
         xbrls = XBRLS.from_filings(filings)
+        logger.info("XBRL loaded for %s in %.1fs", ticker, time.perf_counter() - t0)
 
         bs_df = xbrls.statements.balance_sheet(max_periods=years).to_dataframe()
         inc_df = xbrls.statements.income_statement(max_periods=years).to_dataframe()
@@ -316,6 +320,14 @@ class EdgarFetcher:
         # edgartools standardises CapEx as a positive magnitude (spending outflow).
         # FCF = operating_cf − capex  (both positive).
         capex = _to_annual_series(_find_concept(cf_df, _CAPEX))
+
+        # Warn if core concepts are missing — usually means the label list needs extending
+        if revenue.empty:
+            logger.warning("Revenue not found in %s filings for %s", form_type, ticker)
+        if net_income.empty:
+            logger.warning("Net income not found in %s filings for %s", form_type, ticker)
+        if equity.empty and not (total_assets.empty or total_liabilities.empty):
+            logger.debug("Equity not stated for %s — will derive from assets − liabilities", ticker)
 
         # Fallback: derive equity from assets − liabilities when not stated
         if equity.empty and not total_assets.empty and not total_liabilities.empty:

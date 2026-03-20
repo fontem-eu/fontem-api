@@ -18,6 +18,7 @@ A 404 is returned when:
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
@@ -46,6 +47,8 @@ from src.api.schemas.gmr_data import (
     CurrentSnapshotSchema,
     AnnualRowSchema,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["GMR Analysis"])
 
@@ -101,14 +104,17 @@ def gmr_long(
     try:
         result = GMRLong(data_source).compute(ticker)
     except (ValueError, LookupError) as exc:
+        logger.warning("404 gmr_long %s: %s", ticker, exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
+        logger.error("Error in gmr_long for %s: %s", ticker, exc, exc_info=True)
         raise HTTPException(
             status_code=404,
             detail=f"No data found for ticker '{ticker}': {exc}",
         ) from exc
 
     if result.per_year.empty:
+        logger.warning("No annual filings found for ticker '%s'", ticker)
         raise HTTPException(
             status_code=404,
             detail=f"No annual filings found for ticker '{ticker}'",
@@ -199,8 +205,10 @@ def gmr_short(
     try:
         result = GMRShort(data_source).compute(ticker)
     except (ValueError, LookupError) as exc:
+        logger.warning("404 gmr_short %s: %s", ticker, exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
+        logger.error("Error in gmr_short for %s: %s", ticker, exc, exc_info=True)
         raise HTTPException(
             status_code=404,
             detail=f"No data found for ticker '{ticker}': {exc}",
@@ -208,6 +216,7 @@ def gmr_short(
 
     # If the data source returns an empty result (unknown ticker / no history)
     if math.isnan(result.current_price) and result.monthly_breakdown.empty:
+        logger.warning("No price history found for ticker '%s'", ticker)
         raise HTTPException(
             status_code=404,
             detail=f"No price history found for ticker '{ticker}'",

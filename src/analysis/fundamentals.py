@@ -116,6 +116,7 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
         self, ticker: str, years: int = 5
     ) -> FundamentalsResult:
         """Compute fundamentals for *ticker* over the last *years* fiscal years."""
+        logger.info("Computing fundamentals for %s (%d years)…", ticker, years)
         fundamentals  = self._ds.get_annual_fundamentals(ticker, years)
         annual_prices = self._ds.get_annual_avg_prices(ticker, years)
         dividends     = self._ds.get_annual_dividends(ticker)
@@ -151,6 +152,13 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
         if not sorted_years:
             logger.warning("No fiscal years found for '%s' — returning empty result", ticker)
             return self._empty_result(ticker, snapshot)
+
+        logger.info(
+            "Fundamentals for %s: %d fiscal years [%s]",
+            ticker,
+            len(sorted_years),
+            ", ".join(str(y) for y in sorted_years),
+        )
 
         # ── Safe scalar lookup ────────────────────────────────────────────
         nan = float("nan")

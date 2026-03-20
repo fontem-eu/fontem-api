@@ -10,6 +10,9 @@ matplotlib
 # CLI presentation
 rich
 
+# Logging
+loguru
+
 # REST API
 fastapi
 uvicorn[standard]

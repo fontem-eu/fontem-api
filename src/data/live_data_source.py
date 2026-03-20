@@ -10,6 +10,7 @@ Inject a MockDataSource in unit tests to avoid any network traffic.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional, List, Dict
 
 
@@ -67,19 +68,17 @@ class LiveDataSource(FinancialDataSource):
         # Try cache first
         cached = self._cache.get(cache_key)
         if cached is not None:
-            logger.debug("Cache hit for %s", cache_key)
+            logger.debug("Cache HIT  %s", cache_key)
             return cached
 
-        # Cache miss - fetch and cache
-        logger.debug("Cache miss for %s", cache_key)
+        # Cache miss — fetch, store, return
+        logger.debug("Cache MISS %s — fetching…", cache_key)
+        t0 = time.perf_counter()
 
-        # Get TTL from config
         ttl = getattr(self._cache_config, ttl_key, self._cache_config.ttl_default)
-
-        # Fetch data
         result = fetch_func(*args, **kwargs)
 
-        # Store in cache
+        logger.debug("Fetched %s in %.1fs", cache_key, time.perf_counter() - t0)
         self._cache.set(cache_key, result, ttl)
         return result
 

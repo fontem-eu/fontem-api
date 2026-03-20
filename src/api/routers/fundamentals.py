@@ -23,6 +23,8 @@ A 404 is returned when:
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.analysis.fundamentals import Fundamentals
@@ -35,6 +37,8 @@ from src.api.schemas.fundamentals import (
     FundamentalsRatiosSummary,
     FundamentalsResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Fundamentals"])
 
@@ -74,14 +78,17 @@ def fundamentals(
     try:
         result = Fundamentals(data_source).compute(ticker, years=years)
     except (ValueError, LookupError) as exc:
+        logger.warning("404 fundamentals %s: %s", ticker, exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
+        logger.error("Error computing fundamentals for %s: %s", ticker, exc, exc_info=True)
         raise HTTPException(
             status_code=404,
             detail=f"No data found for ticker '{ticker}': {exc}",
         ) from exc
 
     if result.per_year.empty:
+        logger.warning("No annual filings found for ticker '%s'", ticker)
         raise HTTPException(
             status_code=404,
             detail=f"No annual filings found for ticker '{ticker}'",
