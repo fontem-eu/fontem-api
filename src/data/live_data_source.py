@@ -97,11 +97,12 @@ class LiveDataSource(FinancialDataSource):
                 logger.debug("Cache HIT  %s", cache_key)
                 return cached
 
-            logger.debug("Cache MISS %s — fetching…", cache_key)
+            logger.info("Cache MISS %s — fetching…", cache_key)
             t0 = time.perf_counter()
             ttl = getattr(self._cache_config, ttl_key, self._cache_config.ttl_default)
             result = fetch_func(*args, **kwargs)
-            logger.debug("Fetched %s in %.1fs", cache_key, time.perf_counter() - t0)
+            elapsed = time.perf_counter() - t0
+            logger.info("Fetched %s in %.1fs", cache_key, elapsed)
             self._cache.set(cache_key, result, ttl)
             return result
 

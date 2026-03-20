@@ -52,11 +52,16 @@ app = FastAPI(
 
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
-    """Log every HTTP request with method, path, status code, and duration."""
+    """Log every HTTP request with method, path, status code, and duration.
+
+    Health-probe traffic (/health) is logged at DEBUG only — it fires every
+    few seconds from Kubernetes and adds no signal at INFO level.
+    """
     start = time.perf_counter()
     response = await call_next(request)
     duration_ms = (time.perf_counter() - start) * 1000
-    logger.info(
+    log = logger.debug if request.url.path.endswith("/health") else logger.info
+    log(
         "{method} {path} → {status}  ({duration:.1f} ms)",
         method=request.method,
         path=request.url.path,
