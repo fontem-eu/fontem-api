@@ -85,11 +85,15 @@ class LiveDataSource(FinancialDataSource):
     # ------------------------------------------------------------------
     def get_annual_fundamentals(self, ticker: str, years: int = 10) -> dict:
         cache_key = self._cache_config.get_full_key("fundamentals", ticker)
-        return self._get_cached_data(
-            cache_key,
-            lambda: self._edgar.fetch_fundamentals(ticker, years=years),
-            "ttl_fundamentals"
-        )
+
+        def _fetch() -> dict:
+            result = self._edgar.fetch_fundamentals(ticker, years=years)
+            # Strip raw edgartools DataFrames (_balance_sheet, _income, _cashflow)
+            # before caching: they're large, fragile to pickle across version upgrades,
+            # and unused by any caller of this method.
+            return {k: v for k, v in result.items() if not k.startswith("_")}
+
+        return self._get_cached_data(cache_key, _fetch, "ttl_fundamentals")
 
     def get_annual_avg_prices(self, ticker: str, years: int = 10) -> pd.Series:
         cache_key = self._cache_config.get_full_key("prices", ticker)
@@ -118,20 +122,9 @@ class LiveDataSource(FinancialDataSource):
 
     def get_market_snapshot(self, ticker: str) -> dict:
         cache_key = self._cache_config.get_full_key("snapshot", ticker)
-
-        def fetch_snapshot():
-            return {
-                "current_price":      self._price.get_current_price(ticker),
-                "avg_volume":         self._price.get_avg_volume(ticker),
-                "shares_outstanding": self._price.get_shares_outstanding(ticker),
-                "last_dividend":      self._price.get_last_dividend(ticker),
-                "splits":             self._price.get_splits(ticker),
-                "latest_quarter":     self._price.get_latest_quarter(ticker),
-            }
-
         return self._get_cached_data(
             cache_key,
-            fetch_snapshot,
+            lambda: self._price.get_snapshot(ticker),
             "ttl_market_snapshot"
         )
 

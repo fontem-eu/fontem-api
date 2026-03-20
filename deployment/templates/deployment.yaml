@@ -28,13 +28,13 @@ spec:
           # to receive a response before liveness kicks in.
           livenessProbe:
             httpGet:
-              path: /docs
+              path: /health
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /docs
+              path: /health
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 15
@@ -53,11 +53,11 @@ spec:
             # Cache Configuration
             - name: CACHE_PROVIDER
               value: "redis"
-            - name: REDIS_HOST
+            - name: CACHE_REDIS_HOST
               value: "gmr-redis"
-            - name: REDIS_PORT
+            - name: CACHE_REDIS_PORT
               value: "6379"
-            - name: REDIS_DB
+            - name: CACHE_REDIS_DB
               value: "0"
 
             # Cache TTL Configuration (in seconds)

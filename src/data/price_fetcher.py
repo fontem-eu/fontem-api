@@ -206,6 +206,116 @@ class PriceFetcher:
             return pd.Series(dtype=float)
 
     # ------------------------------------------------------------------
+    def get_snapshot(self, ticker: str) -> dict:  # pylint: disable=too-many-locals
+        """
+        Return a single market-snapshot dict by reusing one ``yf.Ticker`` instance
+        for all fields, rather than creating a separate instance per call.
+
+        Keys returned:
+            current_price, avg_volume, shares_outstanding,
+            last_dividend (dict), splits (pd.Series), latest_quarter (dict)
+        """
+        t = yf.Ticker(ticker)
+
+        # ── info (shares, volume) ─────────────────────────────────────
+        try:
+            info = t.info or {}
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("yfinance.info failed for %s: %s", ticker, exc)
+            info = {}
+
+        shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+        volume = info.get("averageVolume") or info.get("averageDailyVolume3Month")
+
+        # ── current price via recent OHLCV ────────────────────────────
+        try:
+            hist5d = self.get_history(ticker, period="5d")
+            current_price = float(hist5d["Close"].iloc[-1]) if not hist5d.empty else float("nan")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("get_history failed for %s: %s", ticker, exc)
+            current_price = float("nan")
+
+        # ── dividends ─────────────────────────────────────────────────
+        last_dividend: dict = {"date": None, "amount": 0.0}
+        try:
+            divs = t.dividends
+            if divs is not None and not divs.empty:
+                if divs.index.tz is not None:
+                    divs = divs.copy()
+                    divs.index = divs.index.tz_localize(None)
+                last = divs.iloc[-1]
+                last_date = divs.index[-1]
+                last_dividend = {
+                    "date": str(last_date.date()) if hasattr(last_date, "date") else str(last_date),
+                    "amount": float(last),
+                }
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("dividends failed for %s: %s", ticker, exc)
+
+        # ── splits ────────────────────────────────────────────────────
+        splits_series: pd.Series = pd.Series(dtype=float)
+        try:
+            raw_splits = t.splits
+            if raw_splits is not None and not raw_splits.empty:
+                if raw_splits.index.tz is not None:
+                    raw_splits = raw_splits.copy()
+                    raw_splits.index = raw_splits.index.tz_localize(None)
+                splits_series = (
+                    raw_splits.groupby(raw_splits.index.year)
+                    .prod()
+                    .sort_index(ascending=False)
+                )
+                splits_series.index = splits_series.index.astype(int)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("splits failed for %s: %s", ticker, exc)
+
+        # ── latest quarter (balance sheet) ────────────────────────────
+        latest_quarter: dict = {}
+        try:
+            qbs = t.quarterly_balance_sheet
+            if qbs is not None and not qbs.empty:
+                col = qbs.columns[0]
+                row = qbs[col]
+
+                def _get(*keys) -> Optional[float]:
+                    for k in keys:
+                        if k in row.index:
+                            val = row[k]
+                            if pd.notna(val):
+                                return float(val)
+                    return None
+
+                latest_quarter = {
+                    "as_of":               str(col.date()) if hasattr(col, "date") else str(col),
+                    "current_assets":      _get("Current Assets", "Total Current Assets"),
+                    "inventory":           _get("Inventory"),
+                    "prepaid_expenses":    _get("Prepaid Expenses", "Other Current Assets",
+                                                "Prepaid And Other Current Assets"),
+                    "current_liabilities": _get("Current Liabilities", "Total Current Liabilities"),
+                    "total_liabilities":   _get("Total Liabilities Net Minority Interest",
+                                                "Total Liabilities"),
+                    "total_debt":          _get("Total Debt",
+                                                "Long Term Debt And Capital Lease Obligation",
+                                                "Long Term Debt", "Net Debt"),
+                    "equity":              _get("Stockholders Equity",
+                                                "Total Equity Gross Minority Interest",
+                                                "Common Stock Equity"),
+                    "shares_outstanding":  _get("Ordinary Shares Number", "Share Issued",
+                                                "Common Stock"),
+                }
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("quarterly_balance_sheet failed for %s: %s", ticker, exc)
+
+        return {
+            "current_price":      current_price,
+            "avg_volume":         float(volume) if volume else None,
+            "shares_outstanding": float(shares) if shares else None,
+            "last_dividend":      last_dividend,
+            "splits":             splits_series,
+            "latest_quarter":     latest_quarter,
+        }
+
+    # ------------------------------------------------------------------
     def get_latest_quarter(self, ticker: str) -> dict:
         """
         Return a snapshot of the most recent quarterly balance sheet values.

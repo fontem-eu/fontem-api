@@ -234,6 +234,7 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
                 "total_assets":     assets,
                 "total_liabilities": liab,
                 "equity":           eq,
+                "shares":           sh,
                 "current_assets":   ca,
                 "current_liabilities": cl,
                 # Cash flow

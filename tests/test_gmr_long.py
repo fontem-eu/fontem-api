@@ -354,3 +354,51 @@ def test_no_dividends_gives_zero_yield():
     result = GMRLong(ds).compute("NODIV", years=5)
     assert result.avg_dividend_yield == pytest.approx(0.0)
     assert result.flags["dividend_yield"] is False
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — specific bugs fixed in the refactor
+# ---------------------------------------------------------------------------
+
+def test_per_year_has_dividends_column(passing_result):
+    """per_year must expose 'dividends' (alias for dividend_per_share from Fundamentals)."""
+    assert "dividends" in passing_result.per_year.columns
+
+
+def test_per_year_has_shares_column(passing_result):
+    """per_year must expose 'shares' so the GMR router can render the per-year table."""
+    assert "shares" in passing_result.per_year.columns
+
+
+def test_per_year_has_debt_equity_column(passing_result):
+    """per_year must expose 'debt_equity' (alias for debt_to_equity from Fundamentals)."""
+    assert "debt_equity" in passing_result.per_year.columns
+
+
+def test_union_year_logic_includes_partial_year():
+    """
+    Regression: old intersection logic silently dropped years that were present
+    in prices but missing in one EDGAR series (e.g. most-recent year not yet filed).
+    Union logic keeps the year; ratios that can't be computed are NaN, not absent.
+    """
+    f = _passing_fundamentals()
+    # Drop 2024 from all income/balance series — simulates a not-yet-filed year
+    for key in ("revenue", "net_income", "equity", "total_liabilities",
+                "shares_outstanding", "current_assets", "current_liabilities",
+                "inventory", "prepaid_expenses", "free_cashflow"):
+        if 2024 in f[key].index:
+            f[key] = f[key].drop(2024)
+
+    ds = MockDataSource(
+        fundamentals=f,
+        prices=_series([13.0] * len(YEARS)),   # 2024 still in prices
+        dividends=_series([0.50] * len(YEARS)),
+        snapshot=_snapshot(),
+    )
+    result = GMRLong(ds).compute("PARTIAL", years=5)
+    assert 2024 in result.per_year.index, (
+        "Year 2024 should appear in per_year even though income data is missing"
+    )
+    assert math.isnan(result.per_year.at[2024, "pe"]), (
+        "P/E for 2024 should be NaN when EPS data is unavailable"
+    )

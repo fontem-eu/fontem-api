@@ -1,5 +1,5 @@
 """
-FastAPI dependency that provides a GMRDataSource.
+FastAPI dependency that provides a FinancialDataSource.
 
 In production:  returns a LiveDataSource (real EDGAR + yfinance).
 In unit tests:  override with app.dependency_overrides[get_data_source].
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from src.analysis.gmr_data_source import GMRDataSource
+from src.analysis.gmr_data_source import FinancialDataSource
 from src.data.live_data_source import LiveDataSource
 
 
@@ -18,7 +18,7 @@ def _live_source() -> LiveDataSource:
     return LiveDataSource()
 
 
-def get_data_source() -> GMRDataSource:
+def get_data_source() -> FinancialDataSource:
     """
     Dependency injected into every GMR endpoint.
     Override in tests::

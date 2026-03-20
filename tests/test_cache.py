@@ -54,12 +54,14 @@ def mock_data_source(fake_cache):
 
         mock_price_instance.get_annual_avg_prices.return_value = [150.0, 160.0, 170.0]
         mock_price_instance.get_annual_dividends.return_value = [1.0, 1.2, 1.5]
-        mock_price_instance.get_current_price.return_value = 180.0
-        mock_price_instance.get_avg_volume.return_value = 1000000
-        mock_price_instance.get_shares_outstanding.return_value = 1000000000
-        mock_price_instance.get_last_dividend.return_value = {"date": "2023-01-01", "amount": 1.0}
-        mock_price_instance.get_splits.return_value = []
-        mock_price_instance.get_latest_quarter.return_value = {}
+        mock_price_instance.get_snapshot.return_value = {
+            "current_price": 180.0,
+            "avg_volume": 1000000,
+            "shares_outstanding": 1000000000,
+            "last_dividend": {"date": "2023-01-01", "amount": 1.0},
+            "splits": [],
+            "latest_quarter": {},
+        }
 
         # Create data source with fake cache
         return LiveDataSource(
@@ -215,7 +217,7 @@ def test_cache_key_generation(cache_config):
 
     # Verify key format
     assert key1.startswith(cache_config.key_prefix)
-    assert "fund_" in key1
+    assert "fundamentals_" in key1
     assert "AAPL" in key1
 
 def test_cache_ttl_configuration(cache_config):
@@ -268,6 +270,66 @@ def test_cache_stats_reset(mock_data_source):
     assert stats_after.hits == 0
     assert stats_after.misses == 0
     assert stats_after.sets == 0
+
+# ---------------------------------------------------------------------------
+# Regression tests — specific bugs fixed in the refactor
+# ---------------------------------------------------------------------------
+
+def test_private_keys_stripped_before_caching(fake_cache):
+    """
+    Regression: EdgarFetcher returns _balance_sheet/_income/_cashflow DataFrames.
+    LiveDataSource must strip these before caching — they're unpicklable across
+    pandas version upgrades and inflate cache entries by tens of MB.
+    """
+    import pandas as pd
+
+    raw_fundamentals = {
+        "revenue": pd.Series({2023: 500e6}),
+        "net_income": pd.Series({2023: 100e6}),
+        "_balance_sheet": pd.DataFrame({"col": [1, 2, 3]}),   # should be stripped
+        "_income": pd.DataFrame({"col": [4, 5, 6]}),           # should be stripped
+        "_cashflow": pd.DataFrame({"col": [7, 8, 9]}),         # should be stripped
+    }
+
+    with patch('src.data.live_data_source.EdgarFetcher') as mock_edgar, \
+         patch('src.data.live_data_source.PriceFetcher'):
+
+        mock_edgar.return_value.fetch_fundamentals.return_value = raw_fundamentals
+
+        ds = LiveDataSource(cache=fake_cache, cache_config=CacheConfig.from_env())
+        result = ds.get_annual_fundamentals("TEST")
+
+    assert "_balance_sheet" not in result, "_balance_sheet must be stripped before caching"
+    assert "_income"        not in result, "_income must be stripped before caching"
+    assert "_cashflow"      not in result, "_cashflow must be stripped before caching"
+    assert "revenue"     in result, "revenue must survive the stripping"
+    assert "net_income"  in result, "net_income must survive the stripping"
+
+
+def test_get_snapshot_called_for_market_data(fake_cache):
+    """
+    Regression: old code called 6 separate PriceFetcher methods, each creating
+    a new yf.Ticker instance. LiveDataSource.get_market_snapshot must now delegate
+    to the single get_snapshot() method.
+    """
+    with patch('src.data.live_data_source.EdgarFetcher'), \
+         patch('src.data.live_data_source.PriceFetcher') as mock_price:
+
+        mock_price.return_value.get_snapshot.return_value = {
+            "current_price": 150.0,
+            "avg_volume": 50_000_000,
+            "shares_outstanding": 15_000_000_000,
+            "last_dividend": {"date": "2024-01-01", "amount": 0.25},
+            "splits": [],
+            "latest_quarter": {},
+        }
+
+        ds = LiveDataSource(cache=fake_cache, cache_config=CacheConfig.from_env())
+        snap = ds.get_market_snapshot("AAPL")
+
+    mock_price.return_value.get_snapshot.assert_called_once_with("AAPL")
+    assert snap["current_price"] == 150.0
+
 
 # ---------------------------------------------------------------------------
 # Integration Tests

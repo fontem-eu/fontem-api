@@ -83,5 +83,5 @@ class FinancialDataSource(ABC):
         """
 
 
-# Backward-compatible alias — will be removed once all call sites are updated.
+# Alias kept for backward compatibility with tests and legacy call sites.
 GMRDataSource = FinancialDataSource

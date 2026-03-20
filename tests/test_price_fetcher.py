@@ -186,3 +186,35 @@ def test_latest_quarter_total_debt_positive_for_aapl(fetcher):
     q = fetcher.get_latest_quarter(TICKER)
     if q and q.get("total_debt") is not None:
         assert q["total_debt"] > 0, f"AAPL total_debt should be positive: {q['total_debt']}"
+
+# ── get_snapshot ───────────────────────────────────────────────────────────
+
+def test_get_snapshot_returns_dict(fetcher):
+    """get_snapshot must return a dict (regression: old code called 6 separate methods)."""
+    snap = fetcher.get_snapshot(TICKER)
+    assert isinstance(snap, dict)
+
+def test_get_snapshot_has_all_expected_keys(fetcher):
+    snap = fetcher.get_snapshot(TICKER)
+    for key in ("current_price", "avg_volume", "shares_outstanding",
+                "last_dividend", "splits", "latest_quarter"):
+        assert key in snap, f"Missing key '{key}' in get_snapshot result"
+
+def test_get_snapshot_current_price_positive(fetcher):
+    snap = fetcher.get_snapshot(TICKER)
+    assert isinstance(snap["current_price"], float)
+    assert snap["current_price"] > 0
+
+def test_get_snapshot_last_dividend_is_dict(fetcher):
+    snap = fetcher.get_snapshot(TICKER)
+    assert isinstance(snap["last_dividend"], dict)
+    assert "date" in snap["last_dividend"]
+    assert "amount" in snap["last_dividend"]
+
+def test_get_snapshot_splits_is_series(fetcher):
+    snap = fetcher.get_snapshot(TICKER)
+    assert isinstance(snap["splits"], pd.Series)
+
+def test_get_snapshot_latest_quarter_is_dict(fetcher):
+    snap = fetcher.get_snapshot(TICKER)
+    assert isinstance(snap["latest_quarter"], dict)

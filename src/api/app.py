@@ -68,3 +68,9 @@ async def _log_requests(request: Request, call_next):
 app.include_router(router)
 app.include_router(tickers_router)
 app.include_router(fundamentals_router)
+
+
+@app.get("/health", tags=["Health"], include_in_schema=False)
+async def health() -> dict:
+    """Lightweight liveness/readiness probe — returns 200 immediately."""
+    return {"status": "ok"}

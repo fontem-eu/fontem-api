@@ -30,11 +30,8 @@ class CacheConfig:  # pylint: disable=too-many-instance-attributes
     ttl_market_snapshot: int = 60  # 1 minute (market data is volatile)
     ttl_ticker_list: int = 86400  # 24 hours (SEC updates company list daily)
 
-    # Cache key prefixes
+    # Cache key prefix
     key_prefix: str = "gmretl_"
-    key_fundamentals: str = "fund_"
-    key_prices: str = "price_"
-    key_snapshot: str = "snap_"
 
     @classmethod
     def from_env(cls) -> 'CacheConfig':
@@ -54,9 +51,6 @@ class CacheConfig:  # pylint: disable=too-many-instance-attributes
             ttl_market_snapshot=int(os.environ.get("CACHE_TTL_SNAPSHOT", "60")),
             ttl_ticker_list=int(os.environ.get("CACHE_TTL_TICKER_LIST", "86400")),
             key_prefix=os.environ.get("CACHE_KEY_PREFIX", "gmretl_"),
-            key_fundamentals=os.environ.get("CACHE_KEY_FUNDAMENTALS", "fund_"),
-            key_prices=os.environ.get("CACHE_KEY_PRICES", "price_"),
-            key_snapshot=os.environ.get("CACHE_KEY_SNAPSHOT", "snap_"),
         )
 
     def get_full_key(self, key_type: str, ticker: str) -> str:
@@ -70,20 +64,6 @@ class CacheConfig:  # pylint: disable=too-many-instance-attributes
         Returns:
             Full cache key string
         """
-        if key_type == "fundamentals":
-            prefix = self.key_fundamentals
-        elif key_type == "prices":
-            prefix = self.key_prices
-        elif key_type == "snapshot":
-            prefix = self.key_snapshot
-        else:
-            # Use the key_type itself so every logical bucket gets a unique key.
-            # Without this, "dividends", "history_1y", "ticker_list", etc. all
-            # collapse to the same cache key and overwrite each other.
-            prefix = f"{key_type}_"
+        prefix = f"{key_type}_"
 
         return f"{self.key_prefix}{prefix}{ticker.upper()}"
-
-    def is_real_redis(self) -> bool:
-        """Check if real Redis should be used (vs fake)."""
-        return os.environ.get("USE_REAL_REDIS", "false").lower() in ("true", "1", "yes")
