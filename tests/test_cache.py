@@ -120,9 +120,11 @@ def test_cache_hit_miss_fundamentals(mock_data_source):
     # First call - should miss cache
     result1 = mock_data_source.get_annual_fundamentals("AAPL")
 
-    # Verify cache miss
+    # Verify cache miss.
+    # Double-checked locking does two cache.get() calls on a cold miss
+    # (fast path + re-check inside the per-key lock), so miss count is +2.
     stats_after_miss = cache.get_stats()
-    assert stats_after_miss.misses == initial_stats.misses + 1
+    assert stats_after_miss.misses == initial_stats.misses + 2
     assert stats_after_miss.sets == initial_stats.sets + 1
 
     # Second call - should hit cache
@@ -147,9 +149,11 @@ def test_cache_hit_miss_market_snapshot(mock_data_source):
     # First call - should miss cache
     result1 = mock_data_source.get_market_snapshot("AAPL")
 
-    # Verify cache miss
+    # Verify cache miss.
+    # Double-checked locking does two cache.get() calls on a cold miss
+    # (fast path + re-check inside the per-key lock), so miss count is +2.
     stats_after_miss = cache.get_stats()
-    assert stats_after_miss.misses == initial_stats.misses + 1
+    assert stats_after_miss.misses == initial_stats.misses + 2
     assert stats_after_miss.sets == initial_stats.sets + 1
 
     # Second call - should hit cache
@@ -281,7 +285,7 @@ def test_private_keys_stripped_before_caching(fake_cache):
     LiveDataSource must strip these before caching — they're unpicklable across
     pandas version upgrades and inflate cache entries by tens of MB.
     """
-    import pandas as pd
+    import pandas as pd  # pylint: disable=import-outside-toplevel
 
     raw_fundamentals = {
         "revenue": pd.Series({2023: 500e6}),

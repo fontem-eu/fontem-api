@@ -10,4 +10,8 @@ release:
 
 deploy:
 	helm upgrade --install gmr ./deployment --set-string version=$(shell git rev-parse --short HEAD)
+	@echo "Deploying..."
 	kubectl -n gmr rollout restart deployment gmr-api
+	@echo "Waiting for deployment to become ready..."
+	kubectl -n gmr rollout status deployment/gmr-api --timeout=300s
+	@echo "Deployment is ready!"

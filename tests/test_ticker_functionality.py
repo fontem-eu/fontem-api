@@ -242,9 +242,10 @@ def test_cache_behavior_tickers(live_data_source):
     # Verify results are identical
     assert tickers1 == tickers2
 
-    # Verify cache stats show 1 miss and 1 hit
+    # Verify cache stats: 1 hit (second call) and 2 misses (first call goes
+    # through double-checked locking: fast-path get + re-check inside lock).
     assert stats_after_hit['stats']['hits'] == 1
-    assert stats_after_hit['stats']['misses'] == 1
+    assert stats_after_hit['stats']['misses'] == 2
     assert stats_after_hit['stats']['sets'] == 1
 
 # ---------------------------------------------------------------------------

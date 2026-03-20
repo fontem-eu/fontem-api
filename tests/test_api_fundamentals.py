@@ -20,6 +20,8 @@ Scenarios covered
 from __future__ import annotations
 # pylint: disable=missing-function-docstring,redefined-outer-name,unnecessary-lambda,line-too-long
 
+import warnings
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -511,3 +513,22 @@ def test_nan_fields_serialised_as_null(client_nan):
 def test_nan_gross_margin_null_when_missing(client_nan):
     body = client_nan.get("/XYZ/fundamentals").json()
     assert body["ratios_summary"].get("avg_gross_margin") is None
+
+
+# ---------------------------------------------------------------------------
+# RuntimeWarning regression — avg of all-NaN column must not warn
+# ---------------------------------------------------------------------------
+
+def test_no_mean_of_empty_slice_warning(client_good):
+    """
+    Regression: _avg() used np.nanmean() which emits RuntimeWarning: Mean of
+    empty slice when a column is entirely NaN (e.g. revenue_growth /
+    earnings_growth for the most-recent year, which has no prior year to diff
+    against).  The fix drops NaNs before calling mean(), so no warning is
+    raised.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        # If the bug is present this raises RuntimeWarning; with the fix it passes.
+        resp = client_good.get("/XYZ/fundamentals")
+    assert resp.status_code == 200

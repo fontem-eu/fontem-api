@@ -277,7 +277,10 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
 
         # ── Averages ──────────────────────────────────────────────────────
         def _avg(col: str) -> float:
-            return float(np.nanmean(per_year[col])) if col in per_year.columns else nan
+            if col not in per_year.columns:
+                return nan
+            vals = per_year[col].dropna()
+            return float(vals.mean()) if not vals.empty else nan
 
         # ── Market snapshot ───────────────────────────────────────────────
         current_price  = float(snapshot.get("current_price", nan))

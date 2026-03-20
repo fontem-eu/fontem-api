@@ -10,6 +10,7 @@ Inject a MockDataSource in unit tests to avoid any network traffic.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Optional, List, Dict
 
@@ -49,12 +50,28 @@ class LiveDataSource(FinancialDataSource):
         self._cache = cache or create_cache(cache_config)
         self._cache_config = cache_config or CacheConfig.from_env()
 
+        # Per-key locks to prevent thundering-herd on cold-cache misses.
+        # Multiple concurrent requests for the same key each see a cache miss
+        # and would all fetch independently without this guard.
+        self._fetch_locks: dict[str, threading.Lock] = {}
+        self._fetch_locks_guard = threading.Lock()
+
         logger.info("LiveDataSource initialized with %s cache",
                    type(self._cache).__name__)
+
+    def _get_fetch_lock(self, cache_key: str) -> threading.Lock:
+        with self._fetch_locks_guard:
+            if cache_key not in self._fetch_locks:
+                self._fetch_locks[cache_key] = threading.Lock()
+            return self._fetch_locks[cache_key]
 
     def _get_cached_data(self, cache_key: str, fetch_func, ttl_key: str, *args, **kwargs) -> Any:
         """
         Helper method to handle caching logic with a fetch function.
+
+        Uses double-checked locking (per cache key) to prevent the thundering
+        herd: when multiple concurrent requests all see a cold-cache miss, only
+        the first one fetches — the rest wait and then read the warm cache.
 
         Args:
             cache_key: The cache key to use
@@ -65,22 +82,28 @@ class LiveDataSource(FinancialDataSource):
         Returns:
             The cached or fetched data
         """
-        # Try cache first
+        # Fast path — no lock needed for a cache hit
         cached = self._cache.get(cache_key)
         if cached is not None:
             logger.debug("Cache HIT  %s", cache_key)
             return cached
 
-        # Cache miss — fetch, store, return
-        logger.debug("Cache MISS %s — fetching…", cache_key)
-        t0 = time.perf_counter()
+        # Slow path — acquire a per-key lock so only one thread fetches
+        lock = self._get_fetch_lock(cache_key)
+        with lock:
+            # Re-check: another thread may have populated the cache while we waited
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                logger.debug("Cache HIT  %s", cache_key)
+                return cached
 
-        ttl = getattr(self._cache_config, ttl_key, self._cache_config.ttl_default)
-        result = fetch_func(*args, **kwargs)
-
-        logger.debug("Fetched %s in %.1fs", cache_key, time.perf_counter() - t0)
-        self._cache.set(cache_key, result, ttl)
-        return result
+            logger.debug("Cache MISS %s — fetching…", cache_key)
+            t0 = time.perf_counter()
+            ttl = getattr(self._cache_config, ttl_key, self._cache_config.ttl_default)
+            result = fetch_func(*args, **kwargs)
+            logger.debug("Fetched %s in %.1fs", cache_key, time.perf_counter() - t0)
+            self._cache.set(cache_key, result, ttl)
+            return result
 
     # ------------------------------------------------------------------
     def get_annual_fundamentals(self, ticker: str, years: int = 10) -> dict:
