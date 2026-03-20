@@ -2,6 +2,7 @@
 Integration tests for EdgarFetcher (edgartools).
 These hit the real SEC EDGAR API — run with network access.
 """
+# pylint: disable=missing-function-docstring,redefined-outer-name
 import pytest
 import pandas as pd
 from src.data.edgar_fetcher import EdgarFetcher

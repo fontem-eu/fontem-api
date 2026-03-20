@@ -12,6 +12,7 @@ These tests drill into each layer individually to find where the KeyError:'Close
 actually originates.
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,line-too-long
 
 import pytest
 import pandas as pd
@@ -113,7 +114,7 @@ def test_live_ds_price_history_second_call_uses_cache(live_ds):
     A second call to get_price_history with the same key returns the cached
     DataFrame intact — columns must still be Title-Case.
     """
-    hist1 = live_ds.get_price_history("AAPL", period="1y")
+    _hist1 = live_ds.get_price_history("AAPL", period="1y")
     hist2 = live_ds.get_price_history("AAPL", period="1y")  # should be cache hit
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         assert col in hist2.columns, (

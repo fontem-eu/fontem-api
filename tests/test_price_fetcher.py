@@ -2,6 +2,7 @@
 Integration tests for PriceFetcher (yfinance).
 These hit the real yfinance API — run with network access.
 """
+# pylint: disable=missing-function-docstring,redefined-outer-name,line-too-long
 import pytest
 import pandas as pd
 from src.data.price_fetcher import PriceFetcher

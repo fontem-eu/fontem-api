@@ -17,8 +17,8 @@ Run all (including live SEC call):
     pytest tests/test_api_tickers.py -v
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,import-outside-toplevel,protected-access
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest

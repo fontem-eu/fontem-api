@@ -1,0 +1,5 @@
+[MESSAGES CONTROL]
+# R0801: duplicate-code — similarity detection runs across files and cannot be
+# suppressed with per-file inline comments; disabled globally for test files
+# which intentionally share fixture/mock boilerplate patterns.
+disable=R0801

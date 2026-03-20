@@ -15,6 +15,7 @@ Expected ratio values (XYZ, identical across 5 years for easy arithmetic):
   QR    = (200M-30M-10M)/150M = 1.0̄7
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,multiple-statements,unused-argument
 
 import math
 import pytest

@@ -18,6 +18,7 @@ Scenarios covered
 • All summary ratio keys present
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,unnecessary-lambda,line-too-long
 
 import pytest
 from starlette.testclient import TestClient

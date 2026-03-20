@@ -16,6 +16,7 @@ Scenarios covered
 • Ticker uppercasing — lowercase ticker in URL normalised in response
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,unnecessary-lambda
 
 import pytest
 from starlette.testclient import TestClient

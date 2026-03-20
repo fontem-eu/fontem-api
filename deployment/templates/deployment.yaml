@@ -43,8 +43,8 @@ spec:
               cpu: "250m"
               memory: "512Mi"
             limits:
-              cpu: "1000m"
-              memory: "1Gi"
+              cpu: "2"
+              memory: "8Gi"
           env:
             # Override to send your own identity to the SEC EDGAR API.
             - name: EDGAR_IDENTITY

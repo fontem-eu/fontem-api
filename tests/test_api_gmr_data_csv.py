@@ -20,6 +20,7 @@ Scenarios covered
 • 404 on ValueError from data source
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,arguments-renamed,multiple-statements,unused-argument,line-too-long,unnecessary-lambda
 
 import pytest
 import pandas as pd

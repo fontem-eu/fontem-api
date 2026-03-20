@@ -1,9 +1,11 @@
 """
 EDGAR Financial Data Fetcher
 =============================
-Fetches and parses annual 10-K filing data from the SEC EDGAR database using
-the `edgartools` library.  Returns clean, numeric pandas Series indexed by
-fiscal year (int) for each key financial concept.
+Fetches and parses annual filing data from the SEC EDGAR database using the
+`edgartools` library.  Supports 10-K (US domestic), 20-F (foreign private
+issuers, e.g. ASML, LVMH), and 40-F (Canadian companies, e.g. Shopify).
+Returns clean, numeric pandas Series indexed by fiscal year (int) for each
+key financial concept.
 
 Concept matching uses a priority list approach: the XBRL filing labels used by
 different companies are inconsistent, so we try common names in order of
@@ -232,9 +234,14 @@ def _to_annual_series(row: Optional[pd.Series]) -> pd.Series:
 
 class EdgarFetcher:
     """
-    Fetches and structures fundamental financial data from SEC EDGAR 10-K
-    filings using the `edgartools` library.
+    Fetches and structures fundamental financial data from SEC EDGAR annual
+    filings using the `edgartools` library.  Tries 10-K, then 20-F, then 40-F
+    so that both US domestic companies and foreign private issuers (e.g. ASML,
+    Shopify) are supported transparently.
     """
+
+    # Annual report forms tried in priority order
+    _ANNUAL_FORMS = ("10-K", "20-F", "40-F")
 
     def __init__(self, identity: str = "bemar-edgar@research.com"):
         """
@@ -249,12 +256,16 @@ class EdgarFetcher:
         self, ticker: str, years: int = 10
     ) -> Dict:
         """
-        Fetch and parse 10-K fundamental data for *ticker*.
+        Fetch and parse annual fundamental data for *ticker*.
+
+        Tries 10-K first (US domestic), then 20-F (foreign private issuers
+        such as ASML or LVMH), then 40-F (Canadian companies such as Shopify).
 
         Returns a dict with the following keys, each containing an annual
         pd.Series indexed by integer fiscal year (descending):
 
-            ticker, revenue, net_income, total_assets, total_liabilities,
+            ticker, form_type,
+            revenue, net_income, total_assets, total_liabilities,
             equity, operating_cashflow, current_assets, current_liabilities,
             shares_outstanding, eps,
             _balance_sheet, _income, _cashflow   ← raw DataFrames
@@ -265,10 +276,21 @@ class EdgarFetcher:
         logger.info("Fetching EDGAR data for %s (%d years)…", ticker, years)
 
         company = Company(ticker)
-        filings = company.get_filings(form="10-K").head(years)
+        filings = None
+        form_type = None
+        for form in self._ANNUAL_FORMS:
+            candidate = company.get_filings(form=form).head(years)
+            if len(candidate) > 0:
+                filings = candidate
+                form_type = form
+                logger.info("Found %d %s filings for %s", len(filings), form, ticker)
+                break
 
-        if len(filings) == 0:
-            raise ValueError(f"No 10-K filings found for '{ticker}'")
+        if filings is None:
+            raise ValueError(
+                f"No annual filings found for '{ticker}' "
+                f"(tried: {', '.join(self._ANNUAL_FORMS)})"
+            )
 
         xbrls = XBRLS.from_filings(filings)
 
@@ -310,6 +332,7 @@ class EdgarFetcher:
 
         return {
             "ticker":              ticker.upper(),
+            "form_type":           form_type,
             "revenue":             revenue,
             "gross_profit":        gross_profit,
             "operating_income":    operating_income,

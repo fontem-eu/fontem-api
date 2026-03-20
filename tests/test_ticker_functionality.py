@@ -4,9 +4,11 @@ Ticker Functionality Tests
 Comprehensive tests for the ticker list and search functionality.
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name
+
+from unittest.mock import Mock
 
 import pytest
-from unittest.mock import Mock, patch
 
 from src.data.edgar_fetcher import EdgarFetcher
 from src.data.live_data_source import LiveDataSource
@@ -231,7 +233,7 @@ def test_cache_behavior_tickers(live_data_source):
 
     # First call - cache miss
     tickers1 = live_data_source.get_available_tickers()
-    stats_after_miss = live_data_source.get_cache_stats()
+    _stats_after_miss = live_data_source.get_cache_stats()
 
     # Second call - cache hit
     tickers2 = live_data_source.get_available_tickers()
@@ -251,7 +253,7 @@ def test_cache_behavior_tickers(live_data_source):
 
 def test_search_performance(live_data_source):
     """Test that search is fast even with many tickers."""
-    import time
+    import time  # pylint: disable=import-outside-toplevel
 
     # First search (cache miss for ticker list)
     start_time = time.time()

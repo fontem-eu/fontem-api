@@ -8,16 +8,17 @@ Comprehensive tests for the caching system, including:
 - Cache statistics
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,protected-access
 
 import time
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import Mock, patch
 
 from src.cache.interface import CacheInterface, CacheStats
 from src.cache.config import CacheConfig
 from src.cache.factory import create_cache
 from src.cache.fake_redis_cache import FakeRedisCache
-from src.cache.redis_cache import RedisCache
 from src.data.live_data_source import LiveDataSource
 
 # ---------------------------------------------------------------------------
@@ -188,8 +189,8 @@ def test_cache_performance_improvement(mock_data_source):
 def test_multiple_ticker_cache_isolation(mock_data_source):
     """Test that cache properly isolates different tickers."""
     # Get data for two different tickers
-    result_aapl = mock_data_source.get_annual_fundamentals("AAPL")
-    result_msft = mock_data_source.get_annual_fundamentals("MSFT")
+    _result_aapl = mock_data_source.get_annual_fundamentals("AAPL")
+    _result_msft = mock_data_source.get_annual_fundamentals("MSFT")
 
     # Verify they're different (mock returns same data, but in real scenario they'd be different)
     # For this test, we just verify cache stats show 2 misses and 2 sets

@@ -16,6 +16,7 @@ Scenarios covered
 • monthly breakdown  — month field is a string, v_up/v_down are floats
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,duplicate-code,arguments-renamed,multiple-statements,unused-argument,unnecessary-lambda,too-many-arguments,too-many-positional-arguments
 
 import numpy as np
 import pytest

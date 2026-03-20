@@ -2,7 +2,7 @@
 End-to-end API tests — real EDGAR + Yahoo Finance data
 =======================================================
 These tests go all the way from the HTTP endpoint through the GMR logic layer
-to live SEC EDGAR 10-K filings and Yahoo Finance price data.
+to live SEC EDGAR filings and Yahoo Finance price data.
 
 Mark: @pytest.mark.slow  → excluded from the fast unit-test run.
 Run them explicitly with:
@@ -12,12 +12,24 @@ Design principles
 -----------------
 • We do NOT assert hardcoded values (market data changes daily).
 • We DO assert structural correctness: right keys, right types, sane ranges.
-• AAPL is used because it consistently has 10+ years of 10-K filings and
-  active price / dividend data on Yahoo Finance.
-• MSFT is used for a second long-term test (different balance-sheet profile).
+• AAPL / MSFT cover the 10-K (US domestic) path.
+• ASML covers the 20-F (foreign private issuer) path — Dutch company.
+• RY   covers the 40-F (Canadian MJDS) path — Royal Bank of Canada.
+• SHOP covers a company with both 10-K and 40-F on EDGAR.
 • A deliberately invalid ticker verifies the 404 path end-to-end.
+
+WHY these e2e tests matter
+--------------------------
+Unit tests mock the data source, so they never exercise the real XBRL parsing
+pipeline.  Integration tests on EdgarFetcher in isolation verify data is
+fetched but do not run it through Fundamentals.compute() or the HTTP layer.
+Only these e2e tests exercise the full stack: HTTP → LiveDataSource →
+EdgarFetcher → XBRLS.from_filings() → Fundamentals → JSON response.
+That is the layer where issues such as 20-F/40-F OOM crashes or schema
+mismatches surface.
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name
 
 import pytest
 from starlette.testclient import TestClient
@@ -303,3 +315,126 @@ def test_e2e_msft_fundamentals_summarize_ticker(client):
 def test_e2e_invalid_ticker_fundamentals_returns_404(client):
     resp = client.get("/ZZZZNOTASTOCK9999/fundamentals")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# E2E 8 — ASML /fundamentals  (20-F — Dutch foreign private issuer)
+#
+# This test exists to protect the 20-F filing path end-to-end.
+# EdgarFetcher-level tests verify data is fetched, but only these e2e tests
+# exercise the full stack: XBRLS.from_filings() → Fundamentals.compute() →
+# HTTP response.  A regression here (e.g. OOM, schema mismatch) would cause
+# a 502/404 in production without being caught by the unit or fetcher tests.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def asml_fundamentals(client):
+    return client.get("/ASML/fundamentals").json()
+
+
+@pytest.mark.slow
+def test_e2e_asml_fundamentals_returns_200(client):
+    resp = client.get("/ASML/fundamentals")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.slow
+def test_e2e_asml_fundamentals_ticker(asml_fundamentals):
+    assert asml_fundamentals["ticker"] == "ASML"
+
+
+@pytest.mark.slow
+def test_e2e_asml_fundamentals_per_year_non_empty(asml_fundamentals):
+    assert isinstance(asml_fundamentals["per_year"], list)
+    assert len(asml_fundamentals["per_year"]) >= 3
+
+
+@pytest.mark.slow
+def test_e2e_asml_fundamentals_revenue_positive(asml_fundamentals):
+    rows_with_revenue = [r for r in asml_fundamentals["per_year"] if r.get("revenue")]
+    assert len(rows_with_revenue) >= 1
+    assert all(r["revenue"] > 0 for r in rows_with_revenue)
+
+
+@pytest.mark.slow
+def test_e2e_asml_fundamentals_has_ratios_summary(asml_fundamentals):
+    assert "ratios_summary" in asml_fundamentals
+    assert asml_fundamentals["ratios_summary"] is not None
+
+
+# ---------------------------------------------------------------------------
+# E2E 9 — RY /fundamentals  (40-F — Royal Bank of Canada, MJDS filer)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def ry_fundamentals(client):
+    return client.get("/RY/fundamentals").json()
+
+
+@pytest.mark.slow
+def test_e2e_ry_fundamentals_returns_200(client):
+    resp = client.get("/RY/fundamentals")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.slow
+def test_e2e_ry_fundamentals_ticker(ry_fundamentals):
+    assert ry_fundamentals["ticker"] == "RY"
+
+
+@pytest.mark.slow
+def test_e2e_ry_fundamentals_per_year_non_empty(ry_fundamentals):
+    assert isinstance(ry_fundamentals["per_year"], list)
+    assert len(ry_fundamentals["per_year"]) >= 3
+
+
+@pytest.mark.slow
+def test_e2e_ry_fundamentals_revenue_positive(ry_fundamentals):
+    rows_with_revenue = [r for r in ry_fundamentals["per_year"] if r.get("revenue")]
+    assert len(rows_with_revenue) >= 1
+    assert all(r["revenue"] > 0 for r in rows_with_revenue)
+
+
+@pytest.mark.slow
+def test_e2e_ry_fundamentals_has_ratios_summary(ry_fundamentals):
+    assert "ratios_summary" in ry_fundamentals
+    assert ry_fundamentals["ratios_summary"] is not None
+
+
+# ---------------------------------------------------------------------------
+# E2E 10 — SHOP /fundamentals  (Shopify — has both 10-K and 40-F on EDGAR)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def shop_fundamentals(client):
+    return client.get("/SHOP/fundamentals").json()
+
+
+@pytest.mark.slow
+def test_e2e_shop_fundamentals_returns_200(client):
+    resp = client.get("/SHOP/fundamentals")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.slow
+def test_e2e_shop_fundamentals_ticker(shop_fundamentals):
+    assert shop_fundamentals["ticker"] == "SHOP"
+
+
+@pytest.mark.slow
+def test_e2e_shop_fundamentals_per_year_non_empty(shop_fundamentals):
+    assert isinstance(shop_fundamentals["per_year"], list)
+    assert len(shop_fundamentals["per_year"]) >= 2
+
+
+@pytest.mark.slow
+def test_e2e_shop_fundamentals_revenue_positive(shop_fundamentals):
+    rows_with_revenue = [r for r in shop_fundamentals["per_year"] if r.get("revenue")]
+    assert len(rows_with_revenue) >= 1
+    assert all(r["revenue"] > 0 for r in rows_with_revenue)
+
+
+@pytest.mark.slow
+def test_e2e_shop_fundamentals_has_ratios_summary(shop_fundamentals):
+    assert "ratios_summary" in shop_fundamentals
+    assert shop_fundamentals["ratios_summary"] is not None

@@ -20,6 +20,7 @@ MAT = mean of the 43 most-recent closing prices within the 6-month window.
 diffMAT = (MAT − current_price) / current_price.
 """
 from __future__ import annotations
+# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,multiple-statements,too-many-arguments,too-many-positional-arguments
 
 import numpy as np
 import pytest

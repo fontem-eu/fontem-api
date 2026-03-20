@@ -2,6 +2,7 @@
 all: build release deploy
 
 build:
+	docker pull python:3.12-slim
 	docker build -t contribute.void42.internal/golden/gmr-api:$(shell git rev-parse --short HEAD) .
 
 release:
