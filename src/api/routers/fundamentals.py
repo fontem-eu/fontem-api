@@ -126,6 +126,9 @@ def fundamentals(
         avg_volume=_f(result.avg_volume) if result.avg_volume else None,
         last_dividend_date=last_div.get("date"),
         last_dividend_amount=_f(float(last_div["amount"])) if "amount" in last_div else None,
+        beta=_f(result.beta) if result.beta is not None else None,
+        week_52_high=_f(result.week_52_high) if result.week_52_high is not None else None,
+        week_52_low=_f(result.week_52_low) if result.week_52_low is not None else None,
     )
 
     # ── Per-year rows ──────────────────────────────────────────────────

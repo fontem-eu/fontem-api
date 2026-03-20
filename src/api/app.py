@@ -19,6 +19,7 @@ from loguru import logger
 from src.api.routers.fundamentals import router as fundamentals_router
 from src.api.routers.gmr import router
 from src.api.routers.tickers import router as tickers_router
+from src.api.routers.valuation import router as valuation_router
 
 
 @asynccontextmanager
@@ -68,6 +69,7 @@ async def _log_requests(request: Request, call_next):
 app.include_router(router)
 app.include_router(tickers_router)
 app.include_router(fundamentals_router)
+app.include_router(valuation_router)
 
 
 @app.get("/health", tags=["Health"], include_in_schema=False)

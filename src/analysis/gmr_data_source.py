@@ -55,7 +55,9 @@ class FinancialDataSource(ABC):
             revenue, net_income, total_assets, total_liabilities, equity,
             operating_cashflow, capex, free_cashflow,
             current_assets, current_liabilities,
-            inventory, prepaid_expenses, shares_outstanding, eps
+            inventory, prepaid_expenses, shares_outstanding, eps,
+            long_term_debt, cash_and_equivalents,
+            depreciation_amortization, interest_expense, income_tax_expense
         """
 
     @abstractmethod

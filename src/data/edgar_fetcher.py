@@ -132,6 +132,47 @@ _LONG_TERM_DEBT = [
     "LongTermDebtNoncurrent", "Long-term borrowings",
     "Long term debt", "Notes payable, long-term",
 ]
+_CASH_AND_EQUIVALENTS = [
+    "Cash and cash equivalents",
+    "Cash and Cash Equivalents",
+    "CashAndCashEquivalentsAtCarryingValue",
+    "Cash, cash equivalents and short-term investments",
+    "Cash and short-term investments",
+    "CashCashEquivalentsAndShortTermInvestments",
+    "Cash and equivalents",
+    "Cash",
+]
+_DEPRECIATION_AMORTIZATION = [
+    "Depreciation and amortization",
+    "Depreciation, depletion and amortization",
+    "Depreciation & amortization",
+    "DepreciationDepletionAndAmortization",
+    "DepreciationAndAmortization",
+    "Depreciation, amortization and accretion",
+    "Depreciation and amortization of property and equipment",
+    "Amortization of intangible assets",
+]
+_INTEREST_EXPENSE = [
+    "Interest expense",
+    "Interest Expense",
+    "InterestExpense",
+    "Interest expense, net",
+    "Interest and debt expense",
+    "InterestAndDebtExpense",
+    "Finance costs",
+    "Net interest expense",
+    "Interest costs",
+]
+_INCOME_TAX_EXPENSE = [
+    "Income tax expense",
+    "Income tax provision",
+    "Provision for income taxes",
+    "Income taxes",
+    "IncomeTaxExpenseBenefit",
+    "Income Tax Expense (Benefit)",
+    "Tax expense",
+    "Taxes on income",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +351,11 @@ class EdgarFetcher:
         total_liabilities  = _to_annual_series(_find_concept(bs_df,  _TOTAL_LIABILITIES))
         equity             = _to_annual_series(_find_concept(bs_df,  _EQUITY))
         long_term_debt     = _to_annual_series(_find_concept(bs_df,  _LONG_TERM_DEBT))
+        cash               = _to_annual_series(_find_concept(bs_df,  _CASH_AND_EQUIVALENTS))
         operating_cf       = _to_annual_series(_find_concept(cf_df,  _OPERATING_CF))
+        da                 = _to_annual_series(_find_concept(cf_df,  _DEPRECIATION_AMORTIZATION))
+        interest_expense   = _to_annual_series(_find_concept(inc_df, _INTEREST_EXPENSE))
+        income_tax         = _to_annual_series(_find_concept(inc_df, _INCOME_TAX_EXPENSE))
         current_assets     = _to_annual_series(_find_concept(bs_df,  _CURRENT_ASSETS))
         current_liab       = _to_annual_series(_find_concept(bs_df,  _CURRENT_LIABILITIES))
         shares             = _to_annual_series(_find_concept(bs_df,  _SHARES_OUTSTANDING))
@@ -353,6 +398,10 @@ class EdgarFetcher:
             "total_liabilities":   total_liabilities,
             "equity":              equity,
             "long_term_debt":      long_term_debt,
+            "cash_and_equivalents": cash,
+            "depreciation_amortization": da,
+            "interest_expense":    interest_expense,
+            "income_tax_expense":  income_tax,
             "operating_cashflow":  operating_cf,
             "capex":               capex,
             "free_cashflow":       fcf,

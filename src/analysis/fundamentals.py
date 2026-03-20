@@ -91,6 +91,9 @@ class FundamentalsResult:  # pylint: disable=too-many-instance-attributes
     shares_outstanding: float
     avg_volume: float
     last_dividend: dict = field(default_factory=dict)
+    beta: float = float("nan")
+    week_52_high: float = float("nan")
+    week_52_low: float = float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +292,9 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
         market_cap     = current_price * snap_shares if (
             not np.isnan(current_price) and snap_shares > 0
         ) else nan
+        beta_raw       = snapshot.get("beta")
+        week_52_high   = snapshot.get("week_52_high")
+        week_52_low    = snapshot.get("week_52_low")
 
         return FundamentalsResult(
             ticker=ticker.upper(),
@@ -320,6 +326,9 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             shares_outstanding=snap_shares,
             avg_volume=volume,
             last_dividend=snapshot.get("last_dividend", {}),
+            beta=float(beta_raw) if beta_raw is not None else nan,
+            week_52_high=float(week_52_high) if week_52_high is not None else nan,
+            week_52_low=float(week_52_low) if week_52_low is not None else nan,
         )
 
     # ------------------------------------------------------------------

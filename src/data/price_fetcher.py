@@ -206,7 +206,7 @@ class PriceFetcher:
             return pd.Series(dtype=float)
 
     # ------------------------------------------------------------------
-    def get_snapshot(self, ticker: str) -> dict:  # pylint: disable=too-many-locals
+    def get_snapshot(self, ticker: str) -> dict:  # pylint: disable=too-many-locals,too-many-statements
         """
         Return a single market-snapshot dict by reusing one ``yf.Ticker`` instance
         for all fields, rather than creating a separate instance per call.
@@ -306,6 +306,10 @@ class PriceFetcher:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug("quarterly_balance_sheet failed for %s: %s", ticker, exc)
 
+        beta         = info.get("beta")
+        week_52_high = info.get("fiftyTwoWeekHigh")
+        week_52_low  = info.get("fiftyTwoWeekLow")
+
         return {
             "current_price":      current_price,
             "avg_volume":         float(volume) if volume else None,
@@ -313,6 +317,9 @@ class PriceFetcher:
             "last_dividend":      last_dividend,
             "splits":             splits_series,
             "latest_quarter":     latest_quarter,
+            "beta":               float(beta) if beta is not None else None,
+            "week_52_high":       float(week_52_high) if week_52_high is not None else None,
+            "week_52_low":        float(week_52_low) if week_52_low is not None else None,
         }
 
     # ------------------------------------------------------------------

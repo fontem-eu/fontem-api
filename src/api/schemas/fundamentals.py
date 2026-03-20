@@ -9,13 +9,16 @@ from pydantic import BaseModel
 
 
 class FundamentalsMarketSnapshot(BaseModel):
-    """Current market data: price, market cap, volume, and last dividend."""
+    """Current market data: price, market cap, volume, last dividend, and price range."""
     current_price: Optional[float] = None
     market_cap: Optional[float] = None
     shares_outstanding: Optional[float] = None
     avg_volume: Optional[float] = None
     last_dividend_date: Optional[str] = None
     last_dividend_amount: Optional[float] = None
+    beta: Optional[float] = None
+    week_52_high: Optional[float] = None
+    week_52_low: Optional[float] = None
 
 
 class FundamentalsRatiosSummary(BaseModel):
