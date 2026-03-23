@@ -1,6 +1,5 @@
 # Data sources
 edgartools
-yfinance
 
 # Data & analysis
 pandas
@@ -17,7 +16,3 @@ loguru
 fastapi
 uvicorn[standard]
 httpx
-
-# Caching
-redis
-fakeredis

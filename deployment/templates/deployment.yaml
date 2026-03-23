@@ -24,8 +24,6 @@ spec:
           ports:
             - containerPort: 8000
               name: http
-          # SEC EDGAR rate-limits by IP/user-agent; give the pod enough time
-          # to receive a response before liveness kicks in.
           livenessProbe:
             httpGet:
               path: /health
@@ -46,40 +44,16 @@ spec:
               cpu: "2"
               memory: "8Gi"
           env:
-            # Override to send your own identity to the SEC EDGAR API.
             - name: EDGAR_IDENTITY
               value: "bemar-edgar@research.com"
 
-            # Cache Configuration
-            - name: CACHE_PROVIDER
-              value: "redis"
-            - name: CACHE_REDIS_HOST
-              value: "gmr-redis"
-            - name: CACHE_REDIS_PORT
-              value: "6379"
-            - name: CACHE_REDIS_DB
-              value: "0"
-
-            # Cache TTL Configuration (in seconds)
-            - name: CACHE_TTL_FUNDAMENTALS
-              value: "86400"  # 24 hours
-            - name: CACHE_TTL_PRICES
-              value: "3600"   # 1 hour
-            - name: CACHE_TTL_MARKET_SNAPSHOT
-              value: "300"    # 5 minutes
-
-            # Cache Key Configuration
-            - name: CACHE_KEY_PREFIX
-              value: "gmretl:"
-
             # Local EDGAR bulk data (written by edgar-data-fetcher CronJob).
-            # NOTE: do NOT use EDGAR_LOCAL_DATA_DIR here — that is an edgartools
-            # internal env var read at import time; setting it to a read-only
-            # path causes a crash before our app starts.
-            - name: EDGAR_USE_LOCAL_DATA
-              value: "1"
             - name: GMR_EDGAR_LOCAL_DATA_DIR
               value: "/edgar-data/full"
+
+            # Local price data (written by usa-stock-price-fetcher CronJob).
+            - name: GMR_PRICE_DATA_DIR
+              value: "/edgar-data/prices"
 
           volumeMounts:
             - name: edgar-data

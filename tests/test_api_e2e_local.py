@@ -5,9 +5,8 @@ These tests exercise the full HTTP → LiveDataSource → LocalEdgarFetcher →
 EntityFacts → JSON response stack using data already downloaded to the local
 edgar-data-fetcher/full directory.
 
-No network calls are made for EDGAR fundamentals.  Price data (yfinance) is
-still fetched live — the tests do NOT assert specific price values, only that
-the response is structurally correct.
+No network calls are made.  Both EDGAR fundamentals and price data are read
+from local files.  Tests assert structural correctness, not exact values.
 
 Tickers used:
   AAPL (CIK 320193) — 10-K, US domestic — confirmed present in local data
@@ -21,7 +20,6 @@ Mark: @pytest.mark.local_e2e — excluded from the standard unit-test run.
 from __future__ import annotations
 # pylint: disable=missing-function-docstring,redefined-outer-name
 
-import os
 from pathlib import Path
 
 import pytest
@@ -35,8 +33,9 @@ from src.data.live_data_source import LiveDataSource
 # Locate the local data directory relative to this file's repository root.
 # edgar-data-fetcher lives alongside edgar-gmr-etl under /config/repos/.
 # ---------------------------------------------------------------------------
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent  # /config/repos
-_LOCAL_DATA_DIR = _REPO_ROOT / "edgar-data-fetcher" / "full"
+_REPO_ROOT       = Path(__file__).resolve().parent.parent.parent  # /config/repos
+_LOCAL_DATA_DIR  = _REPO_ROOT / "edgar-data-fetcher" / "full"
+_LOCAL_PRICE_DIR = _REPO_ROOT / "edgar-data-fetcher" / "prices"
 
 
 def _require_local_data() -> None:
@@ -62,7 +61,10 @@ def client():
     TestClient with LiveDataSource(local_data_dir=...) injected.
     This avoids relying on env vars or the lru_cache singleton.
     """
-    local_source = LiveDataSource(local_data_dir=str(_LOCAL_DATA_DIR))
+    local_source = LiveDataSource(
+        local_data_dir=str(_LOCAL_DATA_DIR),
+        local_price_data_dir=str(_LOCAL_PRICE_DIR),
+    )
     app.dependency_overrides[get_data_source] = lambda: local_source
     with TestClient(app) as c:
         yield c

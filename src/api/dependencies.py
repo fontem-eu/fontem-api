@@ -1,10 +1,11 @@
 """
-FastAPI dependency that provides a FinancialDataSource.
+FastAPI dependency that provides the application's FinancialDataSource.
 
-In production:  returns a LiveDataSource (real EDGAR + yfinance).
-                Set EDGAR_USE_LOCAL_DATA=1 and EDGAR_LOCAL_DATA_DIR=/edgar-data/full
-                to read EDGAR fundamentals from local bulk data instead.
-In unit tests:  override with app.dependency_overrides[get_data_source].
+Always uses local files:
+  GMR_EDGAR_LOCAL_DATA_DIR  — path to EDGAR bulk data (default: /edgar-data/full)
+  GMR_PRICE_DATA_DIR        — path to EOD price CSVs (default: /edgar-data/prices)
+
+In unit tests, override via app.dependency_overrides[get_data_source].
 """
 from __future__ import annotations
 
@@ -17,24 +18,17 @@ from src.data.live_data_source import LiveDataSource
 
 @lru_cache(maxsize=1)
 def _live_source() -> LiveDataSource:
-    """Singleton data source — constructed once per process.
-
-    Reads EDGAR_USE_LOCAL_DATA and EDGAR_LOCAL_DATA_DIR at startup to decide
-    whether to use local bulk data or live SEC API for fundamentals.
-    """
-    local_dir: str | None = None
-    if os.environ.get("EDGAR_USE_LOCAL_DATA") == "1":
-        # Use GMR_EDGAR_LOCAL_DATA_DIR (not EDGAR_LOCAL_DATA_DIR) to avoid
-        # edgartools reading it at import time and trying to write _tcache
-        # into the read-only volume.
-        local_dir = os.environ.get("GMR_EDGAR_LOCAL_DATA_DIR")
-
-    return LiveDataSource(local_data_dir=local_dir)
+    local_data_dir = os.environ.get("GMR_EDGAR_LOCAL_DATA_DIR", "/edgar-data/full")
+    local_price_data_dir = os.environ.get("GMR_PRICE_DATA_DIR", "/edgar-data/prices")
+    return LiveDataSource(
+        local_data_dir=local_data_dir,
+        local_price_data_dir=local_price_data_dir,
+    )
 
 
 def get_data_source() -> FinancialDataSource:
     """
-    Dependency injected into every GMR endpoint.
+    Dependency injected into every endpoint.
     Override in tests::
 
         from src.api.dependencies import get_data_source
