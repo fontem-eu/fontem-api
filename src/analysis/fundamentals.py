@@ -39,6 +39,7 @@ Averages are taken across all fiscal years in the look-back window.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from dataclasses import dataclass, field
 
@@ -120,10 +121,26 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
     ) -> FundamentalsResult:
         """Compute fundamentals for *ticker* over the last *years* fiscal years."""
         logger.info("Computing fundamentals for %s (%d years)…", ticker, years)
-        fundamentals  = self._ds.get_annual_fundamentals(ticker, years)
-        annual_prices = self._ds.get_annual_avg_prices(ticker, years)
-        dividends     = self._ds.get_annual_dividends(ticker)
-        snapshot      = self._ds.get_market_snapshot(ticker)
+
+        # Fetch EDGAR fundamentals and all yfinance data in parallel.  EDGAR
+        # reads from local bulk files (fast); yfinance hits the network (slow on
+        # cold cache).  Running them concurrently cuts cold-cache latency from
+        # sum-of-fetches to max-of-fetches.
+        #
+        # shutdown(wait=False): once all .result() calls return we do not block
+        # on background threads that are still running (e.g. a yfinance call
+        # that timed out internally but whose network thread lives on).  Those
+        # threads will finish on their own and cache the result for next time.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        f_fund   = pool.submit(self._ds.get_annual_fundamentals, ticker, years)
+        f_prices = pool.submit(self._ds.get_annual_avg_prices, ticker, years)
+        f_divs   = pool.submit(self._ds.get_annual_dividends, ticker)
+        f_snap   = pool.submit(self._ds.get_market_snapshot, ticker)
+        fundamentals  = f_fund.result()
+        annual_prices = f_prices.result()
+        dividends     = f_divs.result()
+        snapshot      = f_snap.result()
+        pool.shutdown(wait=False)
 
         # Unpack — each value is a pd.Series indexed by int fiscal year
         revenue          = fundamentals.get("revenue",            pd.Series(dtype=float))

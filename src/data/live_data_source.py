@@ -9,6 +9,7 @@ Inject a MockDataSource in unit tests to avoid any network traffic.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import threading
 import time
@@ -24,14 +25,30 @@ from ..cache import CacheInterface, CacheConfig, create_cache
 
 logger = logging.getLogger(__name__)
 
+# Hard cap on how long a single yfinance network call may block the worker
+# thread.  If Yahoo Finance is slow or rate-limiting, we return the cached
+# fallback rather than leaving callers waiting 30 + seconds.
+_PRICE_FETCH_TIMEOUT_S = 15
+
+# When a price fetch times out or errors, cache the fallback for this many
+# seconds.  This prevents every subsequent request from also waiting the
+# full timeout period when the upstream is persistently unavailable.
+_NEGATIVE_RESULT_TTL_S = 60
+
+
 class LiveDataSource(FinancialDataSource):
     """
     Production adapter that satisfies the GMRDataSource port using the two
     fetcher classes already implemented in this project.
 
+    When *local_data_dir* is provided the EDGAR fundamentals are read from the
+    locally downloaded bulk data (companyfacts / submissions) instead of being
+    fetched over the network.  Price data (yfinance) is always live.
+
     Example::
 
-        ds = LiveDataSource()                   # uses default identities
+        ds = LiveDataSource()                              # live EDGAR + live prices
+        ds = LiveDataSource(local_data_dir="/edgar-data/full")  # local EDGAR + live prices
         result = GMRLong(ds).compute("KO")
     """
 
@@ -42,8 +59,14 @@ class LiveDataSource(FinancialDataSource):
         edgar_identity: str = "bemar-edgar@research.com",
         cache: Optional[CacheInterface] = None,
         cache_config: Optional[CacheConfig] = None,
+        local_data_dir: Optional[str] = None,
     ) -> None:
-        self._edgar = edgar_fetcher or EdgarFetcher(identity=edgar_identity)
+        if local_data_dir is not None:
+            from .local_edgar_fetcher import LocalEdgarFetcher  # pylint: disable=import-outside-toplevel
+            self._edgar = LocalEdgarFetcher(local_data_dir=local_data_dir)
+            logger.info("LiveDataSource using local EDGAR data from %s", local_data_dir)
+        else:
+            self._edgar = edgar_fetcher or EdgarFetcher(identity=edgar_identity)
         self._price = price_fetcher or PriceFetcher()
 
         # Initialize caching
@@ -65,22 +88,21 @@ class LiveDataSource(FinancialDataSource):
                 self._fetch_locks[cache_key] = threading.Lock()
             return self._fetch_locks[cache_key]
 
-    def _get_cached_data(self, cache_key: str, fetch_func, ttl_key: str, *args, **kwargs) -> Any:
+    def _get_cached_data(
+        self,
+        cache_key: str,
+        fetch_func,
+        ttl_key: str,
+        timeout_s: Optional[float] = None,
+        fallback: Any = None,
+    ) -> Any:
         """
-        Helper method to handle caching logic with a fetch function.
+        Caching helper with optional per-call timeout.
 
         Uses double-checked locking (per cache key) to prevent the thundering
-        herd: when multiple concurrent requests all see a cold-cache miss, only
-        the first one fetches — the rest wait and then read the warm cache.
-
-        Args:
-            cache_key: The cache key to use
-            fetch_func: Function to call if cache miss occurs
-            ttl_key: Configuration key for TTL
-            *args, **kwargs: Arguments to pass to fetch_func
-
-        Returns:
-            The cached or fetched data
+        herd.  When *timeout_s* is set and the fetch exceeds it, *fallback* is
+        returned immediately (and the result is NOT cached, so the next caller
+        will retry the live fetch).
         """
         # Fast path — no lock needed for a cache hit
         cached = self._cache.get(cache_key)
@@ -94,13 +116,48 @@ class LiveDataSource(FinancialDataSource):
             # Re-check: another thread may have populated the cache while we waited
             cached = self._cache.get(cache_key)
             if cached is not None:
-                logger.debug("Cache HIT  %s", cache_key)
+                logger.debug("Cache HIT (post-lock) %s", cache_key)
                 return cached
 
             logger.info("Cache MISS %s — fetching…", cache_key)
             t0 = time.perf_counter()
             ttl = getattr(self._cache_config, ttl_key, self._cache_config.ttl_default)
-            result = fetch_func(*args, **kwargs)
+
+            if timeout_s is not None:
+                # NOTE: do NOT use `with ThreadPoolExecutor() as ex` here.
+                # A `return` inside a `with` block still triggers __exit__,
+                # which calls shutdown(wait=True) and blocks until the
+                # background thread finishes — defeating the timeout entirely.
+                _ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                _future = _ex.submit(fetch_func)
+                try:
+                    result = _future.result(timeout=timeout_s)
+                except concurrent.futures.TimeoutError:
+                    _ex.shutdown(wait=False)  # let background thread finish on its own
+                    elapsed = time.perf_counter() - t0
+                    logger.warning(
+                        "Cache TIMEOUT %s after %.1fs — caching fallback for %ds",
+                        cache_key, elapsed, _NEGATIVE_RESULT_TTL_S,
+                    )
+                    # Cache the fallback briefly so the next request does not
+                    # wait another timeout period for a persistently slow source.
+                    if fallback is not None:
+                        self._cache.set(cache_key, fallback, _NEGATIVE_RESULT_TTL_S)
+                    return fallback
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    _ex.shutdown(wait=False)
+                    elapsed = time.perf_counter() - t0
+                    logger.warning(
+                        "Cache FETCH ERROR %s after %.1fs: %s — caching fallback for %ds",
+                        cache_key, elapsed, exc, _NEGATIVE_RESULT_TTL_S,
+                    )
+                    if fallback is not None:
+                        self._cache.set(cache_key, fallback, _NEGATIVE_RESULT_TTL_S)
+                    return fallback
+                _ex.shutdown(wait=False)
+            else:
+                result = fetch_func()
+
             elapsed = time.perf_counter() - t0
             logger.info("Fetched %s in %.1fs", cache_key, elapsed)
             self._cache.set(cache_key, result, ttl)
@@ -125,7 +182,9 @@ class LiveDataSource(FinancialDataSource):
         return self._get_cached_data(
             cache_key,
             lambda: self._price.get_annual_avg_prices(ticker, period=period),
-            "ttl_prices"
+            "ttl_prices",
+            timeout_s=_PRICE_FETCH_TIMEOUT_S,
+            fallback=pd.Series(dtype=float),
         )
 
     def get_annual_dividends(self, ticker: str) -> pd.Series:
@@ -133,7 +192,9 @@ class LiveDataSource(FinancialDataSource):
         return self._get_cached_data(
             cache_key,
             lambda: self._price.get_annual_dividends(ticker),
-            "ttl_prices"
+            "ttl_prices",
+            timeout_s=_PRICE_FETCH_TIMEOUT_S,
+            fallback=pd.Series(dtype=float),
         )
 
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
@@ -141,7 +202,9 @@ class LiveDataSource(FinancialDataSource):
         return self._get_cached_data(
             cache_key,
             lambda: self._price.get_history(ticker, period=period),
-            "ttl_prices"
+            "ttl_prices",
+            timeout_s=_PRICE_FETCH_TIMEOUT_S,
+            fallback=pd.DataFrame(),
         )
 
     def get_market_snapshot(self, ticker: str) -> dict:
@@ -149,7 +212,9 @@ class LiveDataSource(FinancialDataSource):
         return self._get_cached_data(
             cache_key,
             lambda: self._price.get_snapshot(ticker),
-            "ttl_market_snapshot"
+            "ttl_market_snapshot",
+            timeout_s=_PRICE_FETCH_TIMEOUT_S,
+            fallback={},
         )
 
     # ------------------------------------------------------------------

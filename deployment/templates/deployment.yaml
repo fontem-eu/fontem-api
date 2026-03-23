@@ -71,3 +71,22 @@ spec:
             # Cache Key Configuration
             - name: CACHE_KEY_PREFIX
               value: "gmretl:"
+
+            # Local EDGAR bulk data (written by edgar-data-fetcher CronJob).
+            # NOTE: do NOT use EDGAR_LOCAL_DATA_DIR here — that is an edgartools
+            # internal env var read at import time; setting it to a read-only
+            # path causes a crash before our app starts.
+            - name: EDGAR_USE_LOCAL_DATA
+              value: "1"
+            - name: GMR_EDGAR_LOCAL_DATA_DIR
+              value: "/edgar-data/full"
+
+          volumeMounts:
+            - name: edgar-data
+              mountPath: /edgar-data
+              readOnly: true
+
+      volumes:
+        - name: edgar-data
+          persistentVolumeClaim:
+            claimName: edgar-data
