@@ -90,11 +90,13 @@ def _fmt(val) -> str:
         "Runs the GMR long-term fundamental screen for a given ticker. "
         "Returns per-year ratios (P/E, P/B, ROE, NPM, D/E, Div Yield, Quick Ratio, FCF) "
         "averaged over the look-back window, plus a pass/fail verdict per ratio. "
+        "Use `?years=N` (default 10, max 20) to set the historical look-back window. "
         "Add **?summarize=true** to receive only the `gmr_ratio` object."
     ),
 )
 def gmr_long(
     ticker: str,
+    years: int = Query(default=10, ge=1, le=20, description="Number of historical fiscal years"),
     summarize: bool = Query(default=False, description="Return only the gmr_ratio object"),
     data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRLongResponse:
@@ -102,7 +104,7 @@ def gmr_long(
     ticker = ticker.upper()
 
     try:
-        result = GMRLong(data_source).compute(ticker)
+        result = GMRLong(data_source).compute(ticker, years=years)
     except (ValueError, LookupError) as exc:
         logger.warning("404 gmr_long %s: %s", ticker, exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc

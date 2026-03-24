@@ -65,7 +65,7 @@ router = APIRouter(tags=["Fundamentals"])
 )
 def fundamentals(
     ticker: str,
-    years: int = Query(default=5, ge=1, le=20, description="Number of historical fiscal years"),
+    years: int = Query(default=10, ge=1, le=20, description="Number of historical fiscal years"),
     summarize: bool = Query(
         default=False,
         description="Return only ratios_summary (no per_year table)",

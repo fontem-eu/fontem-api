@@ -16,7 +16,7 @@ Data sources:
     equity, long-term debt, cash & equivalents, revenue, FCF
   • Yahoo Finance (live): current price, shares outstanding → market cap → EV
 
-Use ?years=N (default 5, range 1–20) to control the historical window.
+Use ?years=N (default 10, range 1–20) to control the historical window.
 Use ?summarize=true to receive only ticker + summary (no per_year table).
 
 A 404 is returned when:
@@ -70,7 +70,7 @@ router = APIRouter(tags=["Valuation"])
 )
 def valuation(
     ticker: str,
-    years: int = Query(default=5, ge=1, le=20, description="Number of historical fiscal years"),
+    years: int = Query(default=10, ge=1, le=20, description="Number of historical fiscal years"),
     summarize: bool = Query(
         default=False,
         description="Return only summary (no per_year table)",

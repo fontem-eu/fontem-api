@@ -337,3 +337,46 @@ def test_per_year_first_year_is_most_recent(full_json):
 def test_per_year_pe_value(full_json):
     entry = full_json["per_year"][0]
     assert pytest.approx(entry["pe"], rel=1e-3) == 13 / (100e6 / 60e6)
+
+
+# ---------------------------------------------------------------------------
+# ?years query parameter
+# ---------------------------------------------------------------------------
+
+def test_years_param_limits_per_year_rows(client_good):
+    resp = client_good.get("/XYZ/gmr_long?years=3")
+    assert resp.status_code == 200
+    assert len(resp.json()["per_year"]) == 3
+
+
+def test_years_param_1_returns_one_row(client_good):
+    resp = client_good.get("/XYZ/gmr_long?years=1")
+    assert resp.status_code == 200
+    assert len(resp.json()["per_year"]) == 1
+
+
+def test_years_param_default_is_ten(client_good):
+    # Mock supplies 5 years; with default=10 we still get all 5 (data-limited).
+    resp = client_good.get("/XYZ/gmr_long")
+    assert resp.status_code == 200
+    assert len(resp.json()["per_year"]) == 5
+
+
+def test_years_param_out_of_range_returns_422(client_good):
+    assert client_good.get("/XYZ/gmr_long?years=0").status_code == 422
+    assert client_good.get("/XYZ/gmr_long?years=21").status_code == 422
+
+
+def test_years_3_most_recent_years_returned(client_good):
+    resp = client_good.get("/XYZ/gmr_long?years=3")
+    returned = [e["year"] for e in resp.json()["per_year"]]
+    assert returned == [2024, 2023, 2022]
+
+
+def test_years_2_averages_over_two_years(client_good):
+    # With years=2 the gmr_ratio averages should still be computed (not 404).
+    resp = client_good.get("/XYZ/gmr_long?years=2")
+    assert resp.status_code == 200
+    ratio = resp.json()["gmr_ratio"]
+    assert ratio["avg_pe"] is not None
+    assert ratio["avg_roe"] is not None
