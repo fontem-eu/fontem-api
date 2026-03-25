@@ -18,6 +18,7 @@ from loguru import logger
 
 from src.api.routers.fundamentals import router as fundamentals_router
 from src.api.routers.gmr import router
+from src.api.routers.health import router as health_router
 from src.api.routers.prices import router as prices_router
 from src.api.routers.tickers import router as tickers_router
 from src.api.routers.valuation import router as valuation_router
@@ -77,6 +78,7 @@ app.include_router(tickers_router)
 app.include_router(fundamentals_router)
 app.include_router(valuation_router)
 app.include_router(prices_router)
+app.include_router(health_router)
 
 
 @app.get("/health", tags=["Health"], include_in_schema=False)
