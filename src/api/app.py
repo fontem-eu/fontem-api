@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from loguru import logger
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.api.routers.fundamentals import router as fundamentals_router
 from src.api.routers.gmr import router
@@ -79,6 +80,9 @@ app.include_router(fundamentals_router)
 app.include_router(valuation_router)
 app.include_router(prices_router)
 app.include_router(health_router)
+
+# Expose Prometheus metrics at /metrics (scraped by ServiceMonitor)
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health", tags=["Health"], include_in_schema=False)

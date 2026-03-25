@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gmr-api
+  namespace: gmr
+  labels:
+    app: gmr-api
+    # Must match the Prometheus operator's serviceMonitorSelector
+    release: monitoring-stack
+spec:
+  selector:
+    matchLabels:
+      app: gmr-api
+  namespaceSelector:
+    matchNames:
+      - gmr
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

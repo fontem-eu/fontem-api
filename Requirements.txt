@@ -16,3 +16,6 @@ loguru
 fastapi
 uvicorn[standard]
 httpx
+
+# Observability
+prometheus-fastapi-instrumentator
