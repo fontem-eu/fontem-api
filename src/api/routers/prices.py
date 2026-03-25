@@ -21,13 +21,12 @@ A 404 is returned when no local price data exists for the ticker.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.api.dependencies import get_data_source
+from src.api.schemas.prices import PriceBar, PricesResponse
 
 logger = logging.getLogger(__name__)
 
@@ -44,28 +43,9 @@ _PERIOD_MAP: dict[str, str] = {
 }
 
 
-class PriceBar(BaseModel):
-    """One daily OHLCV bar."""
-    date: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-
-
-class PricesResponse(BaseModel):
-    """Full prices response for a ticker."""
-    ticker: str
-    name: Optional[str] = None
-    exchange: Optional[str] = None
-    period: str
-    bars: List[PriceBar]
-
-
 def _lookup_company(
     data_source: FinancialDataSource, ticker: str
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     """Return (name, exchange) from the EDGAR ticker list, or (None, None)."""
     try:
         tickers = data_source.get_available_tickers()

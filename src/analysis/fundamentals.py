@@ -97,6 +97,34 @@ class FundamentalsResult:  # pylint: disable=too-many-instance-attributes
 
 
 # ---------------------------------------------------------------------------
+# Module-level helpers (pure functions, no side effects)
+# ---------------------------------------------------------------------------
+
+_NAN = float("nan")
+
+
+def _v(series: pd.Series, yr: int, default: float = _NAN) -> float:
+    """Safe scalar lookup in a pandas Series by year index."""
+    if hasattr(series, "at") and yr in series.index:
+        return float(series.at[yr])
+    return default
+
+
+def _safe(num: float, denom: float) -> float:
+    """Divide num by denom; return NaN if either is NaN/zero."""
+    if denom and not np.isnan(denom) and denom != 0 and num and not np.isnan(num):
+        return num / denom
+    return _NAN
+
+
+def _price_ratio(price: float, divisor: float) -> float:
+    """Compute price / divisor; return NaN if inputs are invalid."""
+    if np.isnan(price) or np.isnan(divisor) or divisor <= 0:
+        return _NAN
+    return price / divisor
+
+
+# ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
 
@@ -164,24 +192,6 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             ", ".join(str(y) for y in sorted_years),
         )
 
-        # ── Safe scalar lookup ────────────────────────────────────────────
-        nan = float("nan")
-
-        def _v(series: pd.Series, yr: int, default: float = nan) -> float:
-            if hasattr(series, "at") and yr in series.index:
-                return float(series.at[yr])
-            return default
-
-        def _safe(num: float, denom: float) -> float:
-            if denom and not np.isnan(denom) and denom != 0 and num and not np.isnan(num):
-                return num / denom
-            return nan
-
-        def _price_ratio(price: float, divisor: float) -> float:
-            if np.isnan(price) or np.isnan(divisor) or divisor <= 0:
-                return nan
-            return price / divisor
-
         # ── Build per-year rows ───────────────────────────────────────────
         rows = []
         for yr in sorted_years:
@@ -210,19 +220,19 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             pb = _price_ratio(price, bvps)
             ps = _price_ratio(price, rev_ps)
 
-            roe      = _safe(ni,     eq)     * 100 if not np.isnan(_safe(ni, eq))     else nan
-            roa      = _safe(ni,     assets) * 100 if not np.isnan(_safe(ni, assets)) else nan
-            npm      = _safe(ni,     rev)    * 100 if not np.isnan(_safe(ni, rev))    else nan
-            gm       = _safe(gp,     rev)    * 100 if not np.isnan(_safe(gp, rev))    else nan
-            om       = _safe(op_inc, rev)    * 100 if not np.isnan(_safe(op_inc, rev)) else nan
+            roe      = _safe(ni,     eq)     * 100 if not np.isnan(_safe(ni, eq))     else _NAN
+            roa      = _safe(ni,     assets) * 100 if not np.isnan(_safe(ni, assets)) else _NAN
+            npm      = _safe(ni,     rev)    * 100 if not np.isnan(_safe(ni, rev))    else _NAN
+            gm       = _safe(gp,     rev)    * 100 if not np.isnan(_safe(gp, rev))    else _NAN
+            om       = _safe(op_inc, rev)    * 100 if not np.isnan(_safe(op_inc, rev)) else _NAN
 
             cr       = _safe(ca, cl)
-            qr       = _safe(ca - inv - prep, cl) if (cl and not np.isnan(cl) and cl != 0) else nan
+            qr       = _safe(ca - inv - prep, cl) if (cl and not np.isnan(cl) and cl != 0) else _NAN
             de       = _safe(liab, eq)
             da       = _safe(liab, assets)
 
             _fcf_ps_ratio = _safe(fcf_ps, price)
-            fcf_yield = _fcf_ps_ratio * 100 if not np.isnan(_fcf_ps_ratio) else nan
+            fcf_yield = _fcf_ps_ratio * 100 if not np.isnan(_fcf_ps_ratio) else _NAN
             div_yield = div / price * 100 if (price and not np.isnan(price) and price > 0) else 0.0
 
             rows.append({
@@ -258,8 +268,8 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
                 "debt_to_equity": de, "debt_to_assets": da,
                 "fcf_yield": fcf_yield, "dividend_yield": div_yield,
                 # Growth placeholder (filled below)
-                "revenue_growth": nan,
-                "earnings_growth": nan,
+                "revenue_growth": _NAN,
+                "earnings_growth": _NAN,
             })
 
         per_year = pd.DataFrame(rows).set_index("year")
@@ -282,17 +292,17 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
         # ── Averages ──────────────────────────────────────────────────────
         def _avg(col: str) -> float:
             if col not in per_year.columns:
-                return nan
+                return _NAN
             vals = per_year[col].dropna()
-            return float(vals.mean()) if not vals.empty else nan
+            return float(vals.mean()) if not vals.empty else _NAN
 
         # ── Market snapshot ───────────────────────────────────────────────
-        current_price  = float(snapshot.get("current_price", nan))
+        current_price  = float(snapshot.get("current_price", _NAN))
         snap_shares    = float(snapshot.get("shares_outstanding") or 0)
         volume         = float(snapshot.get("avg_volume") or 0)
         market_cap     = current_price * snap_shares if (
             not np.isnan(current_price) and snap_shares > 0
-        ) else nan
+        ) else _NAN
         beta_raw       = snapshot.get("beta")
         week_52_high   = snapshot.get("week_52_high")
         week_52_low    = snapshot.get("week_52_low")
@@ -327,26 +337,25 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             shares_outstanding=snap_shares,
             avg_volume=volume,
             last_dividend=snapshot.get("last_dividend", {}),
-            beta=float(beta_raw) if beta_raw is not None else nan,
-            week_52_high=float(week_52_high) if week_52_high is not None else nan,
-            week_52_low=float(week_52_low) if week_52_low is not None else nan,
+            beta=float(beta_raw) if beta_raw is not None else _NAN,
+            week_52_high=float(week_52_high) if week_52_high is not None else _NAN,
+            week_52_low=float(week_52_low) if week_52_low is not None else _NAN,
         )
 
     # ------------------------------------------------------------------
     def _empty_result(self, ticker: str, snapshot: dict) -> FundamentalsResult:
-        nan = float("nan")
         return FundamentalsResult(
             ticker=ticker.upper(),
             per_year=pd.DataFrame(),
-            avg_pe=nan, avg_pb=nan, avg_ps=nan,
-            avg_roe=nan, avg_roa=nan, avg_npm=nan,
-            avg_gross_margin=nan, avg_operating_margin=nan,
-            avg_current_ratio=nan, avg_quick_ratio=nan,
-            avg_debt_to_equity=nan, avg_debt_to_assets=nan,
-            avg_fcf_yield=nan, avg_dividend_yield=nan,
-            avg_revenue_growth=nan, avg_earnings_growth=nan,
-            current_price=float(snapshot.get("current_price", nan)),
-            market_cap=nan,
+            avg_pe=_NAN, avg_pb=_NAN, avg_ps=_NAN,
+            avg_roe=_NAN, avg_roa=_NAN, avg_npm=_NAN,
+            avg_gross_margin=_NAN, avg_operating_margin=_NAN,
+            avg_current_ratio=_NAN, avg_quick_ratio=_NAN,
+            avg_debt_to_equity=_NAN, avg_debt_to_assets=_NAN,
+            avg_fcf_yield=_NAN, avg_dividend_yield=_NAN,
+            avg_revenue_growth=_NAN, avg_earnings_growth=_NAN,
+            current_price=float(snapshot.get("current_price", _NAN)),
+            market_cap=_NAN,
             shares_outstanding=float(snapshot.get("shares_outstanding") or 0),
             avg_volume=float(snapshot.get("avg_volume") or 0),
         )

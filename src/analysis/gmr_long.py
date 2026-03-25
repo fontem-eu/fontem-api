@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -56,7 +55,7 @@ class GMRLongResult:  # pylint: disable=too-many-instance-attributes
     avg_fcf: float
 
     # Boolean verdict per ratio
-    flags: Dict[str, bool]
+    flags: dict[str, bool]
     passes_all: bool
 
     # Market context (from snapshot)
@@ -84,14 +83,14 @@ class GMRLong:  # pylint: disable=too-few-public-methods
     def __init__(
         self,
         data_source: FinancialDataSource,
-        settings: Optional[GMRSettings] = None,
+        settings: GMRSettings | None = None,
     ) -> None:
         self._ds = data_source
         self._s = settings or GMRSettings()
 
     # ------------------------------------------------------------------
     def compute(
-        self, ticker: str, years: Optional[int] = None
+        self, ticker: str, years: int | None = None
     ) -> GMRLongResult:
         """Run the long-term GMR screen and return a :class:`GMRLongResult`."""
         n = years if years is not None else self._s.years_for_avg
@@ -113,7 +112,7 @@ class GMRLong:  # pylint: disable=too-few-public-methods
         avg_fcf = float(np.nanmean(per_year["free_cashflow"]))
 
         s = self._s
-        flags: Dict[str, bool] = {
+        flags: dict[str, bool] = {
             "pe":             fund.avg_pe              <= s.pe,
             "pb":             fund.avg_pb              <= s.pb_value,
             "roe":            fund.avg_roe             >= s.roe,

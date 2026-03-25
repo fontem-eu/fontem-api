@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -67,7 +66,7 @@ class LocalPriceFetcher:
     def _has_local(self, ticker: str) -> bool:
         return self._csv_path(ticker).exists()
 
-    def _load_history(self, ticker: str) -> Optional[pd.DataFrame]:
+    def _load_history(self, ticker: str) -> pd.DataFrame | None:
         """Load the full local OHLCV CSV.  Returns None if absent or unreadable."""
         path = self._csv_path(ticker)
         if not path.exists():
@@ -207,7 +206,7 @@ class LocalPriceFetcher:
         """Not available from local OHLCV files — returns empty dict."""
         return {}
 
-    def get_shares_outstanding(self, ticker: str) -> Optional[float]:  # pylint: disable=unused-argument
+    def get_shares_outstanding(self, ticker: str) -> float | None:  # pylint: disable=unused-argument
         """Not available from local OHLCV files — returns None."""
         return None
 

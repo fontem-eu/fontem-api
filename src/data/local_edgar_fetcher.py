@@ -17,7 +17,6 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List
 
 import pandas as pd
 from edgar import Company, set_identity, use_local_storage
@@ -153,7 +152,7 @@ logger = logging.getLogger(__name__)
 _ANNUAL_FORMS = {"10-K", "20-F", "40-F"}
 
 
-def _xbrl_names(label_list: List[str]) -> List[str]:
+def _xbrl_names(label_list: list[str]) -> list[str]:
     """Return only XBRL concept names (no spaces) from a label priority list."""
     return [lbl for lbl in label_list if " " not in lbl]
 
@@ -211,7 +210,7 @@ def _build_concept_map(facts) -> tuple[dict, str]:
     Facts with missing period dates are skipped — they cannot be placed on the
     correct fiscal year axis.
     """
-    concept_map: Dict[str, Dict[int, float]] = {}
+    concept_map: dict[str, dict[int, float]] = {}
     form_counter: Counter = Counter()
 
     for fact in facts.get_all_facts():
@@ -256,7 +255,7 @@ def _build_concept_map(facts) -> tuple[dict, str]:
 
 
 def _get_annual_series(
-    concept_map: dict, xbrl_names: List[str], years: int
+    concept_map: dict, xbrl_names: list[str], years: int
 ) -> pd.Series:
     """
     Merge all matching XBRL concepts and return the most-recent N years as a
@@ -304,7 +303,7 @@ class LocalEdgarFetcher:
     # ------------------------------------------------------------------
     def fetch_fundamentals(  # pylint: disable=too-many-locals
         self, ticker: str, years: int = 10
-    ) -> Dict:
+    ) -> dict:
         """
         Return the same dict structure as EdgarFetcher.fetch_fundamentals() but
         sourced entirely from local EntityFacts bulk data.
@@ -324,7 +323,7 @@ class LocalEdgarFetcher:
 
         logger.debug("Concept map has %d concepts for %s", len(concept_map), ticker)
 
-        def _s(names: List[str]) -> pd.Series:
+        def _s(names: list[str]) -> pd.Series:
             return _get_annual_series(concept_map, names, years)
 
         revenue           = _s(_R_REVENUE)
@@ -394,7 +393,7 @@ class LocalEdgarFetcher:
         }
 
     # ------------------------------------------------------------------
-    def get_edgar_ticker_list(self) -> List[Dict]:
+    def get_edgar_ticker_list(self) -> list[dict]:
         """
         Return the company ticker list from the locally downloaded reference data.
         Reads reference/company_tickers.json — no network call.
@@ -416,7 +415,7 @@ class LocalEdgarFetcher:
             raw_cik = company_info.get("cik_str", "")
             cik_padded = str(raw_cik).zfill(10)
 
-            ticker_info: Dict = {
+            ticker_info: dict = {
                 "symbol":      ticker.upper(),
                 "cik":         cik_padded,
                 "name":        company_info.get("title", "").strip(),

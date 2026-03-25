@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -82,7 +81,7 @@ class GMRShort:  # pylint: disable=too-few-public-methods
     def __init__(
         self,
         data_source: FinancialDataSource,
-        settings: Optional[GMRSettings] = None,
+        settings: GMRSettings | None = None,
     ) -> None:
         self._ds = data_source
         self._s = settings or GMRSettings()

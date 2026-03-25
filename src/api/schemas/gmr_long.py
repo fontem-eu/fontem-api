@@ -3,7 +3,6 @@ Pydantic response schemas for the GMR Long-term endpoint.
 """
 from __future__ import annotations
 
-from typing import Optional
 from pydantic import BaseModel
 
 
@@ -11,48 +10,48 @@ class GMRLongRatioSchema(BaseModel):
     """The core GMR verdict + averaged ratios."""
     passes: bool
     flags: dict[str, bool]
-    avg_pe: Optional[float] = None
-    avg_pb: Optional[float] = None
-    avg_roe: Optional[float] = None
-    avg_npm: Optional[float] = None
-    avg_debt_equity: Optional[float] = None
-    avg_dividend_yield: Optional[float] = None
-    avg_quick_ratio: Optional[float] = None
-    avg_fcf: Optional[float] = None
+    avg_pe: float | None = None
+    avg_pb: float | None = None
+    avg_roe: float | None = None
+    avg_npm: float | None = None
+    avg_debt_equity: float | None = None
+    avg_dividend_yield: float | None = None
+    avg_quick_ratio: float | None = None
+    avg_fcf: float | None = None
 
 
 class LastDividendSchema(BaseModel):
     """Last dividend date and amount."""
-    date: Optional[str] = None
-    amount: Optional[float] = None
+    date: str | None = None
+    amount: float | None = None
 
 
 class MarketSnapshotLongSchema(BaseModel):
     """Current market snapshot for the long-term endpoint."""
-    current_price: Optional[float] = None
-    avg_volume: Optional[float] = None
-    last_dividend: Optional[LastDividendSchema] = None
+    current_price: float | None = None
+    avg_volume: float | None = None
+    last_dividend: LastDividendSchema | None = None
 
 
 class PerYearRatiosSchema(BaseModel):
     """All raw data + computed ratios for a single fiscal year."""
     year: int
-    avg_price: Optional[float] = None
-    revenue: Optional[float] = None
-    net_income: Optional[float] = None
-    equity: Optional[float] = None
-    total_liabilities: Optional[float] = None
-    shares: Optional[float] = None
-    dividends: Optional[float] = None
+    avg_price: float | None = None
+    revenue: float | None = None
+    net_income: float | None = None
+    equity: float | None = None
+    total_liabilities: float | None = None
+    shares: float | None = None
+    dividends: float | None = None
     # Computed ratios
-    pe: Optional[float] = None
-    pb: Optional[float] = None
-    roe: Optional[float] = None
-    npm: Optional[float] = None
-    debt_equity: Optional[float] = None
-    dividend_yield: Optional[float] = None
-    quick_ratio: Optional[float] = None
-    free_cashflow: Optional[float] = None
+    pe: float | None = None
+    pb: float | None = None
+    roe: float | None = None
+    npm: float | None = None
+    debt_equity: float | None = None
+    dividend_yield: float | None = None
+    quick_ratio: float | None = None
+    free_cashflow: float | None = None
 
 
 class GMRLongResponse(BaseModel):
@@ -64,5 +63,5 @@ class GMRLongResponse(BaseModel):
     """
     ticker: str
     gmr_ratio: GMRLongRatioSchema
-    market_snapshot: Optional[MarketSnapshotLongSchema] = None
-    per_year: Optional[list[PerYearRatiosSchema]] = None
+    market_snapshot: MarketSnapshotLongSchema | None = None
+    per_year: list[PerYearRatiosSchema | None] = None

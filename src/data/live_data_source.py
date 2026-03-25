@@ -10,8 +10,6 @@ No network calls, no caching layer.
 from __future__ import annotations
 
 import logging
-from typing import List, Dict
-
 import pandas as pd
 
 from .local_edgar_fetcher import LocalEdgarFetcher
@@ -72,11 +70,11 @@ class LiveDataSource(FinancialDataSource):
     # Ticker discovery
     # ------------------------------------------------------------------
 
-    def get_available_tickers(self) -> List[Dict]:
+    def get_available_tickers(self) -> list[dict]:
         """Return the full list of EDGAR-registered companies with metadata."""
         return self._edgar.get_edgar_ticker_list()
 
-    def search_tickers(self, query: str, limit: int = 10) -> List[Dict]:
+    def search_tickers(self, query: str, limit: int = 10) -> list[dict]:
         """Search tickers by name, symbol, or keywords (case-insensitive)."""
         all_tickers = self.get_available_tickers()
         if not query:

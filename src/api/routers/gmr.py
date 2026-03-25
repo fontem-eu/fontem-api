@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
@@ -41,7 +40,7 @@ from src.api.schemas.gmr_short import (
     MarketSnapshotShortSchema,
     MonthlyBreakdownSchema,
 )
-from src.api.helpers import _f
+from src.api.helpers import nan_to_none
 from src.api.schemas.gmr_data import (
     GMRDataResponse,
     CurrentSnapshotSchema,
@@ -125,14 +124,14 @@ def gmr_long(
     ratio = GMRLongRatioSchema(
         passes=result.passes_all,
         flags=result.flags,
-        avg_pe=_f(result.avg_pe),
-        avg_pb=_f(result.avg_pb),
-        avg_roe=_f(result.avg_roe),
-        avg_npm=_f(result.avg_npm),
-        avg_debt_equity=_f(result.avg_debt_equity),
-        avg_dividend_yield=_f(result.avg_dividend_yield),
-        avg_quick_ratio=_f(result.avg_quick_ratio),
-        avg_fcf=_f(result.avg_fcf),
+        avg_pe=nan_to_none(result.avg_pe),
+        avg_pb=nan_to_none(result.avg_pb),
+        avg_roe=nan_to_none(result.avg_roe),
+        avg_npm=nan_to_none(result.avg_npm),
+        avg_debt_equity=nan_to_none(result.avg_debt_equity),
+        avg_dividend_yield=nan_to_none(result.avg_dividend_yield),
+        avg_quick_ratio=nan_to_none(result.avg_quick_ratio),
+        avg_fcf=nan_to_none(result.avg_fcf),
     )
 
     if summarize:
@@ -142,11 +141,11 @@ def gmr_long(
     last_div_raw = result.last_dividend or {}
     last_div = LastDividendSchema(
         date=last_div_raw.get("date"),
-        amount=_f(float(last_div_raw["amount"])) if "amount" in last_div_raw else None,
+        amount=nan_to_none(float(last_div_raw["amount"])) if "amount" in last_div_raw else None,
     )
     snapshot = MarketSnapshotLongSchema(
-        current_price=_f(result.current_price),
-        avg_volume=_f(result.avg_volume) if result.avg_volume else None,
+        current_price=nan_to_none(result.current_price),
+        avg_volume=nan_to_none(result.avg_volume) if result.avg_volume else None,
         last_dividend=last_div,
     )
 
@@ -155,21 +154,21 @@ def gmr_long(
     for yr, row in result.per_year.iterrows():
         per_year_list.append(PerYearRatiosSchema(
             year=int(yr),
-            avg_price=_f(row.get("avg_price")),
-            revenue=_f(row.get("revenue")),
-            net_income=_f(row.get("net_income")),
-            equity=_f(row.get("equity")),
-            total_liabilities=_f(row.get("total_liabilities")),
-            shares=_f(row.get("shares")),
-            dividends=_f(row.get("dividends")),
-            pe=_f(row.get("pe")),
-            pb=_f(row.get("pb")),
-            roe=_f(row.get("roe")),
-            npm=_f(row.get("npm")),
-            debt_equity=_f(row.get("debt_equity")),
-            dividend_yield=_f(row.get("dividend_yield")),
-            quick_ratio=_f(row.get("quick_ratio")),
-            free_cashflow=_f(row.get("free_cashflow")),
+            avg_price=nan_to_none(row.get("avg_price")),
+            revenue=nan_to_none(row.get("revenue")),
+            net_income=nan_to_none(row.get("net_income")),
+            equity=nan_to_none(row.get("equity")),
+            total_liabilities=nan_to_none(row.get("total_liabilities")),
+            shares=nan_to_none(row.get("shares")),
+            dividends=nan_to_none(row.get("dividends")),
+            pe=nan_to_none(row.get("pe")),
+            pb=nan_to_none(row.get("pb")),
+            roe=nan_to_none(row.get("roe")),
+            npm=nan_to_none(row.get("npm")),
+            debt_equity=nan_to_none(row.get("debt_equity")),
+            dividend_yield=nan_to_none(row.get("dividend_yield")),
+            quick_ratio=nan_to_none(row.get("quick_ratio")),
+            free_cashflow=nan_to_none(row.get("free_cashflow")),
         ))
 
     return GMRLongResponse(
@@ -227,27 +226,27 @@ def gmr_short(
     ratio = GMRShortRatioSchema(
         passes=result.passes_all,
         flags=result.flags,
-        win_probability=_f(result.win_probability),
-        avg_v_up=_f(result.avg_v_up),
-        avg_v_down=_f(result.avg_v_down),
-        mat_43d=_f(result.mat_43d),
-        diff_mat_pct=_f(result.diff_mat_pct),
+        win_probability=nan_to_none(result.win_probability),
+        avg_v_up=nan_to_none(result.avg_v_up),
+        avg_v_down=nan_to_none(result.avg_v_down),
+        mat_43d=nan_to_none(result.mat_43d),
+        diff_mat_pct=nan_to_none(result.diff_mat_pct),
     )
 
     if summarize:
         return GMRShortResponse(ticker=result.ticker, gmr_ratio=ratio)
 
     snapshot = MarketSnapshotShortSchema(
-        current_price=_f(result.current_price),
-        avg_volume=_f(result.avg_volume) if result.avg_volume else None,
+        current_price=nan_to_none(result.current_price),
+        avg_volume=nan_to_none(result.avg_volume) if result.avg_volume else None,
     )
 
     monthly = []
     for period, row in result.monthly_breakdown.iterrows():
         monthly.append(MonthlyBreakdownSchema(
             month=str(period),
-            v_up=_f(row.get("v_up")),
-            v_down=_f(row.get("v_down")),
+            v_up=nan_to_none(row.get("v_up")),
+            v_down=nan_to_none(row.get("v_down")),
         ))
 
     return GMRShortResponse(
@@ -300,24 +299,24 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
     last_div = snapshot.get("last_dividend") or {}
     splits_series = snapshot.get("splits")
 
-    last_split_year: Optional[int] = None
-    last_split_ratio: Optional[float] = None
+    last_split_year: int | None = None
+    last_split_ratio: float | None = None
     if splits_series is not None and not splits_series.empty:
         last_split_year = int(splits_series.index[0])
-        last_split_ratio = _f(float(splits_series.iloc[0]))
+        last_split_ratio = nan_to_none(float(splits_series.iloc[0]))
 
     current_snapshot = CurrentSnapshotSchema(
-        price=_f(float(snapshot.get("current_price", float("nan")))),
-        avg_volume=_f(float(snapshot.get("avg_volume") or 0) or None),
-        current_assets=_f(lq.get("current_assets")),
-        inventory=_f(lq.get("inventory")),
-        prepaid_expenses=_f(lq.get("prepaid_expenses")),
-        current_liabilities=_f(lq.get("current_liabilities")),
-        total_debt=_f(lq.get("total_debt")),
-        equity=_f(lq.get("equity")),
-        shares=_f(float(snapshot.get("shares_outstanding") or 0) or None),
+        price=nan_to_none(float(snapshot.get("current_price", float("nan")))),
+        avg_volume=nan_to_none(float(snapshot.get("avg_volume") or 0) or None),
+        current_assets=nan_to_none(lq.get("current_assets")),
+        inventory=nan_to_none(lq.get("inventory")),
+        prepaid_expenses=nan_to_none(lq.get("prepaid_expenses")),
+        current_liabilities=nan_to_none(lq.get("current_liabilities")),
+        total_debt=nan_to_none(lq.get("total_debt")),
+        equity=nan_to_none(lq.get("equity")),
+        shares=nan_to_none(float(snapshot.get("shares_outstanding") or 0) or None),
         last_dividend_date=last_div.get("date"),
-        last_dividend_amount=_f(float(last_div.get("amount") or 0) or None),
+        last_dividend_amount=nan_to_none(float(last_div.get("amount") or 0) or None),
         last_split_year=last_split_year,
         last_split_ratio=last_split_ratio,
     )
@@ -352,7 +351,7 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
             cfo=_sv(operating_cf, yr),
             # CapEx is stored as positive magnitude; negate for Delta PP&E convention
             delta_ppe=(-capex_v if capex_v is not None else None),
-            splits=_f(float(splits_series.at[yr])) if (
+            splits=nan_to_none(float(splits_series.at[yr])) if (
                 splits_series is not None and yr in splits_series.index
             ) else 0.0,
         ))

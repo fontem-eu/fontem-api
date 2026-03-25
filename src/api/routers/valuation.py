@@ -35,7 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.valuation import Valuation
 from src.api.dependencies import get_data_source
-from src.api.helpers import _f
+from src.api.helpers import nan_to_none
 from src.api.schemas.valuation import (
     ValuationPerYearRow,
     ValuationResponse,
@@ -101,10 +101,10 @@ def valuation(
 
     # ── Summary ─────────────────────────────────────────────────────────
     summary = ValuationSummary(
-        avg_ebitda_margin=_f(result.avg_ebitda_margin),
-        avg_roic=_f(result.avg_roic),
-        avg_interest_coverage=_f(result.avg_interest_coverage),
-        avg_net_debt_to_ebitda=_f(result.avg_net_debt_to_ebitda),
+        avg_ebitda_margin=nan_to_none(result.avg_ebitda_margin),
+        avg_roic=nan_to_none(result.avg_roic),
+        avg_interest_coverage=nan_to_none(result.avg_interest_coverage),
+        avg_net_debt_to_ebitda=nan_to_none(result.avg_net_debt_to_ebitda),
     )
 
     if summarize:
@@ -112,12 +112,12 @@ def valuation(
 
     # ── Valuation snapshot ───────────────────────────────────────────────
     snap = ValuationSnapshot(
-        enterprise_value=_f(result.enterprise_value),
-        market_cap=_f(result.market_cap),
-        ev_ebitda=_f(result.ev_ebitda),
-        ev_revenue=_f(result.ev_revenue),
-        ev_fcf=_f(result.ev_fcf),
-        ev_ebit=_f(result.ev_ebit),
+        enterprise_value=nan_to_none(result.enterprise_value),
+        market_cap=nan_to_none(result.market_cap),
+        ev_ebitda=nan_to_none(result.ev_ebitda),
+        ev_revenue=nan_to_none(result.ev_revenue),
+        ev_fcf=nan_to_none(result.ev_fcf),
+        ev_ebit=nan_to_none(result.ev_ebit),
     )
 
     # ── Per-year rows ────────────────────────────────────────────────────
@@ -125,19 +125,19 @@ def valuation(
     for yr, row in result.per_year.iterrows():
         per_year_list.append(ValuationPerYearRow(
             year=int(yr),
-            da=_f(row.get("da")),
-            interest_expense=_f(row.get("interest_expense")),
-            cash_and_equivalents=_f(row.get("cash_and_equivalents")),
-            long_term_debt=_f(row.get("long_term_debt")),
-            ebitda=_f(row.get("ebitda")),
-            ebitda_margin=_f(row.get("ebitda_margin")),
-            net_debt=_f(row.get("net_debt")),
-            net_debt_to_ebitda=_f(row.get("net_debt_to_ebitda")),
-            interest_coverage=_f(row.get("interest_coverage")),
-            effective_tax_rate=_f(row.get("effective_tax_rate")),
-            nopat=_f(row.get("nopat")),
-            invested_capital=_f(row.get("invested_capital")),
-            roic=_f(row.get("roic")),
+            da=nan_to_none(row.get("da")),
+            interest_expense=nan_to_none(row.get("interest_expense")),
+            cash_and_equivalents=nan_to_none(row.get("cash_and_equivalents")),
+            long_term_debt=nan_to_none(row.get("long_term_debt")),
+            ebitda=nan_to_none(row.get("ebitda")),
+            ebitda_margin=nan_to_none(row.get("ebitda_margin")),
+            net_debt=nan_to_none(row.get("net_debt")),
+            net_debt_to_ebitda=nan_to_none(row.get("net_debt_to_ebitda")),
+            interest_coverage=nan_to_none(row.get("interest_coverage")),
+            effective_tax_rate=nan_to_none(row.get("effective_tax_rate")),
+            nopat=nan_to_none(row.get("nopat")),
+            invested_capital=nan_to_none(row.get("invested_capital")),
+            roic=nan_to_none(row.get("roic")),
         ))
 
     return ValuationResponse(

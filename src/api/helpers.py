@@ -4,10 +4,9 @@ Shared helpers for API router modules.
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 
-def _f(value: float) -> Optional[float]:
+def nan_to_none(value: float) -> float | None:
     """Convert NaN / Inf to None for JSON serialisation."""
     if value is None:
         return None

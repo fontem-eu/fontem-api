@@ -5,7 +5,6 @@ Pydantic models for ticker list and search responses.
 """
 from __future__ import annotations
 
-from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,19 +38,19 @@ class TickerInfo(BaseModel):
     symbol: str = Field(..., description="Stock ticker symbol")
     name: str = Field(..., description="Company name")
     cik: str = Field(..., description="SEC Central Index Key")
-    sic: Optional[str] = Field(None, description="Standard Industrial Classification code")
-    sic_description: Optional[str] = Field(None, description="SIC code description")
-    exchange: Optional[str] = Field(None, description="Stock exchange")
-    sector: Optional[str] = Field(None, description="Business sector")
-    industry: Optional[str] = Field(None, description="Specific industry")
-    country: Optional[str] = Field(None, description="Country of incorporation")
-    currency: Optional[str] = Field(None, description="Currency for financials")
-    is_active: Optional[bool] = Field(None, description="Whether company is actively trading")
-    last_updated: Optional[str] = Field(None, description="Last update timestamp")
+    sic: str | None = Field(None, description="Standard Industrial Classification code")
+    sic_description: str | None = Field(None, description="SIC code description")
+    exchange: str | None = Field(None, description="Stock exchange")
+    sector: str | None = Field(None, description="Business sector")
+    industry: str | None = Field(None, description="Specific industry")
+    country: str | None = Field(None, description="Country of incorporation")
+    currency: str | None = Field(None, description="Currency for financials")
+    is_active: bool | None = Field(None, description="Whether company is actively trading")
+    last_updated: str | None = Field(None, description="Last update timestamp")
 
     # Search-friendly fields (not displayed but used for filtering)
-    search_name: Optional[str] = Field(None, description="Combined name and symbol for search")
-    search_keywords: Optional[str] = Field(None, description="Additional search keywords")
+    search_name: str | None = Field(None, description="Combined name and symbol for search")
+    search_keywords: str | None = Field(None, description="Additional search keywords")
 
 
 class TickerSearchResponse(BaseModel):
@@ -81,6 +80,6 @@ class TickerSearchResponse(BaseModel):
     )
 
     query: str = Field(..., description="Search query that was executed")
-    results: List[TickerInfo] = Field(..., description="Matching ticker results")
+    results: list[TickerInfo] = Field(..., description="Matching ticker results")
     count: int = Field(..., description="Number of results returned")
     total_available: int = Field(..., description="Total number of tickers available")
