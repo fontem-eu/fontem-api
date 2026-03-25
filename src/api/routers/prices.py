@@ -39,6 +39,7 @@ _PERIOD_MAP: dict[str, str] = {
     "1y":  "1y",
     "3y":  "3y",
     "5y":  "5y",
+    "10y": "10y",
     "all": "max",
 }
 
