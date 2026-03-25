@@ -1,7 +1,7 @@
 """
 Tickers API — Unit Tests
 =========================
-Tests for the /tickers/ API endpoints using a mocked data source.
+Tests for GET /tickers/search using a mocked data source.
 No network, no filesystem access.
 """
 from __future__ import annotations
@@ -38,18 +38,6 @@ _FAKE_TICKERS = [
      "is_active": True, "last_updated": "",
      "search_name": "tesla inc. tsla",
      "search_keywords": "tesla inc. tsla"},
-    {"symbol": "NVDA",  "cik": "0001045810", "name": "NVIDIA Corp",
-     "sic": "", "sic_description": "", "exchange": "NASDAQ", "sector": "Technology",
-     "industry": "Semiconductors", "country": "US", "currency": "USD",
-     "is_active": True, "last_updated": "",
-     "search_name": "nvidia corp nvda",
-     "search_keywords": "nvidia corp nvda"},
-    {"symbol": "IBM",   "cik": "0000051143", "name": "Intl Business Machines Corp",
-     "sic": "", "sic_description": "", "exchange": "NYSE", "sector": "Technology",
-     "industry": "IT Services", "country": "US", "currency": "USD",
-     "is_active": True, "last_updated": "",
-     "search_name": "intl business machines corp ibm",
-     "search_keywords": "ibm intl business machines corp"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -84,52 +72,6 @@ def test_live_data_source_imports_without_error():
 
 
 # ---------------------------------------------------------------------------
-# GET /tickers/
-# ---------------------------------------------------------------------------
-
-def test_list_tickers_returns_200(client):
-    assert client.get("/tickers/").status_code == 200
-
-def test_list_tickers_returns_list(client):
-    assert isinstance(client.get("/tickers/").json(), list)
-
-def test_list_tickers_non_empty(client):
-    assert len(client.get("/tickers/").json()) > 0
-
-def test_list_tickers_symbol_field_present(client):
-    for item in client.get("/tickers/").json():
-        assert "symbol" in item
-        assert isinstance(item["symbol"], str)
-
-def test_list_tickers_cik_field_present(client):
-    for item in client.get("/tickers/").json():
-        assert "cik" in item
-
-def test_list_tickers_name_field_present(client):
-    for item in client.get("/tickers/").json():
-        assert "name" in item
-
-def test_list_tickers_cik_is_not_row_index(client):
-    body = client.get("/tickers/").json()
-    row_index_ciks = {str(i).zfill(10) for i in range(5)}
-    assert {item["cik"] for item in body}.isdisjoint(row_index_ciks)
-
-def test_list_tickers_aapl_cik_correct(client):
-    body = client.get("/tickers/").json()
-    aapl = next(t for t in body if t["symbol"] == "AAPL")
-    assert aapl["cik"] == "0000320193"
-
-def test_list_tickers_pagination_limit(client):
-    assert len(client.get("/tickers/?limit=2").json()) == 2
-
-def test_list_tickers_pagination_offset(client):
-    full = client.get("/tickers/").json()
-    paged = client.get("/tickers/?offset=1").json()
-    assert len(paged) == len(full) - 1
-    assert paged[0]["symbol"] == full[1]["symbol"]
-
-
-# ---------------------------------------------------------------------------
 # GET /tickers/search
 # ---------------------------------------------------------------------------
 
@@ -148,3 +90,18 @@ def test_search_tickers_query_echoed(client):
 def test_search_tickers_count_matches_results(client):
     body = client.get("/tickers/search?query=apple").json()
     assert body["count"] == len(body["results"])
+
+def test_search_tickers_returns_matching_ticker(client):
+    body = client.get("/tickers/search?query=apple").json()
+    assert any(t["symbol"] == "AAPL" for t in body["results"])
+
+def test_search_tickers_total_available_reflects_full_list(client):
+    body = client.get("/tickers/search?query=apple").json()
+    assert body["total_available"] == len(_FAKE_TICKERS)
+
+def test_search_tickers_missing_query_returns_422(client):
+    assert client.get("/tickers/search").status_code == 422
+
+def test_search_tickers_limit_param(client):
+    body = client.get("/tickers/search?query=a&limit=1").json()
+    assert body["count"] <= 1

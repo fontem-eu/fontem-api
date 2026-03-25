@@ -93,13 +93,3 @@ class LiveDataSource(FinancialDataSource):
                 if len(matches) >= limit:
                     break
         return matches
-
-    def list_sectors(self) -> List[str]:
-        """Return sorted list of unique sector names."""
-        sectors = {t["sector"] for t in self.get_available_tickers() if t.get("sector")}
-        return sorted(sectors)
-
-    def list_exchanges(self) -> List[str]:
-        """Return sorted list of unique exchange names."""
-        exchanges = {t["exchange"] for t in self.get_available_tickers() if t.get("exchange")}
-        return sorted(exchanges)

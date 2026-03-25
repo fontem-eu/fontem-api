@@ -136,18 +136,6 @@ def test_search_tickers_empty_query(live_data_source):
     assert len(results) == 2
 
 # ---------------------------------------------------------------------------
-# LiveDataSource.list_sectors / list_exchanges
-# ---------------------------------------------------------------------------
-
-def test_list_sectors(live_data_source):
-    sectors = live_data_source.list_sectors()
-    assert sectors == ['Technology']
-
-def test_list_exchanges(live_data_source):
-    exchanges = live_data_source.list_exchanges()
-    assert exchanges == ['NASDAQ']
-
-# ---------------------------------------------------------------------------
 # Ticker data structure
 # ---------------------------------------------------------------------------
 
