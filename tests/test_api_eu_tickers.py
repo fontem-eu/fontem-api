@@ -6,8 +6,10 @@ Verifies that:
   • data_source field is "esef" in all responses
   • /fundamentals returns financial data for EU tickers
   • /gmr_long returns a verdict (no price → ratios that need price are null)
+  • /gmr_data returns 200 for EU tickers (regression: was 500 due to float(None))
   • /tickers/search returns EU tickers with data_source="esef"
   • /prices returns 404 for EU tickers (no price data)
+  • Sparse ESEF data (many None fields, as seen with GALP.LS) does not cause 500
 """
 from __future__ import annotations
 # pylint: disable=missing-function-docstring,redefined-outer-name
@@ -214,3 +216,105 @@ def test_ticker_search_eu_data_source(client: TestClient):
     resp = client.get("/tickers/search?query=ASML")
     results = resp.json()["results"]
     assert results[0].get("data_source") == "esef"
+
+
+def test_ticker_search_eu_ticker_field(client: TestClient):
+    """Full ticker (ASML.AS) must be present so the frontend emits the right value."""
+    resp = client.get("/tickers/search?query=ASML")
+    results = resp.json()["results"]
+    assert results[0].get("ticker") == "ASML.AS"
+
+
+# ---------------------------------------------------------------------------
+# /gmr_data — regression: was 500 for EU tickers due to float(None) on price
+# ---------------------------------------------------------------------------
+
+def test_gmr_data_eu_200(client: TestClient):
+    """/{ticker}/gmr_data must return 200 for EU tickers (not 500)."""
+    resp = client.get("/ASML.AS/gmr_data")
+    assert resp.status_code == 200
+
+
+def test_gmr_data_eu_data_source(client: TestClient):
+    resp = client.get("/ASML.AS/gmr_data")
+    assert resp.json()["data_source"] == "esef"
+
+
+def test_gmr_data_eu_no_price(client: TestClient):
+    """current_snapshot.price must be null — ESEF has no price data."""
+    resp = client.get("/ASML.AS/gmr_data")
+    assert resp.json()["current_snapshot"].get("price") is None
+
+
+# ---------------------------------------------------------------------------
+# Sparse ESEF data — many None fields (regression: GALP.LS pattern)
+#
+# Real ESEF filings often omit gross_profit, operating_income, capex,
+# free_cashflow, eps, shares_outstanding, etc.  All endpoints must return
+# 200 and not raise TypeError / float(None).
+# ---------------------------------------------------------------------------
+
+def _s_none(years):
+    """Series indexed by year where every value is None (sparse ESEF field)."""
+    return pd.Series({y: None for y in years}, dtype=object)
+
+
+class SparseEUMockDataSource(EUMockDataSource):
+    """
+    Mimics a real ESEF company like GALP.LS where many optional fields
+    (gross_profit, capex, eps, shares_outstanding, …) are None.
+    """
+
+    def get_annual_fundamentals(self, ticker: str, years: int) -> dict:
+        base = super().get_annual_fundamentals(ticker, years)
+        # Nullify the fields that are commonly missing in real ESEF filings.
+        sparse = {
+            "gross_profit":               _s_none(_YEARS),
+            "operating_income":           _s_none(_YEARS),
+            "capex":                      _s_none(_YEARS),
+            "free_cashflow":              _s_none(_YEARS),
+            "eps":                        _s_none(_YEARS),
+            "shares_outstanding":         _s_none(_YEARS),
+            "income_tax_expense":         _s_none(_YEARS),
+            "depreciation_amortization":  _s_none(_YEARS),
+            "prepaid_expenses":           _s_none(_YEARS),
+        }
+        return {**base, **sparse}
+
+
+@pytest.fixture()
+def sparse_client():
+    app.dependency_overrides[get_data_source] = SparseEUMockDataSource
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+def test_sparse_fundamentals_200(sparse_client: TestClient):
+    """Sparse ESEF data must not crash /fundamentals."""
+    resp = sparse_client.get("/GALP.LS/fundamentals")
+    assert resp.status_code == 200
+
+
+def test_sparse_fundamentals_has_revenue(sparse_client: TestClient):
+    resp = sparse_client.get("/GALP.LS/fundamentals")
+    first = resp.json()["per_year"][0]
+    assert first["revenue"] is not None
+
+
+def test_sparse_gmr_long_200(sparse_client: TestClient):
+    """Sparse ESEF data must not crash /gmr_long."""
+    resp = sparse_client.get("/GALP.LS/gmr_long")
+    assert resp.status_code == 200
+
+
+def test_sparse_gmr_data_200(sparse_client: TestClient):
+    """Regression: float(None) on current_price must not cause 500."""
+    resp = sparse_client.get("/GALP.LS/gmr_data")
+    assert resp.status_code == 200
+
+
+def test_sparse_valuation_200(sparse_client: TestClient):
+    """Sparse ESEF data must not crash /valuation."""
+    resp = sparse_client.get("/GALP.LS/valuation")
+    assert resp.status_code == 200

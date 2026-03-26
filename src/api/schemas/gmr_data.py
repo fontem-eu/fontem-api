@@ -54,5 +54,6 @@ class AnnualRowSchema(BaseModel):
 class GMRDataResponse(BaseModel):
     """Full response for GET /{ticker}/gmr_data."""
     ticker: str
+    data_source: str | None = None
     current_snapshot: CurrentSnapshotSchema
     annual_data: list[AnnualRowSchema]

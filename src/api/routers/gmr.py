@@ -317,7 +317,7 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
         last_split_ratio = nan_to_none(float(splits_series.iloc[0]))
 
     current_snapshot = CurrentSnapshotSchema(
-        price=nan_to_none(float(snapshot.get("current_price", float("nan")))),
+        price=nan_to_none(float(snapshot.get("current_price") or float("nan"))),
         avg_volume=nan_to_none(float(snapshot.get("avg_volume") or 0) or None),
         current_assets=nan_to_none(lq.get("current_assets")),
         inventory=nan_to_none(lq.get("inventory")),
@@ -369,6 +369,7 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
 
     return GMRDataResponse(
         ticker=ticker,
+        data_source=get_data_source_name(ticker),
         current_snapshot=current_snapshot,
         annual_data=annual_data,
     )
