@@ -9,7 +9,7 @@ release:
 	docker push contribute.void42.internal/golden/gmr-api:$(shell git rev-parse --short HEAD)
 
 deploy:
-	helm upgrade --install gmr ./deployment --set-string version=$(shell git rev-parse --short HEAD)
+	helm upgrade --install gmr ./deployment --set-string version=$(shell git rev-parse --short HEAD) --force-conflicts
 	@echo "Deploying..."
 	kubectl -n gmr rollout restart deployment gmr-api
 	@echo "Waiting for deployment to become ready..."
