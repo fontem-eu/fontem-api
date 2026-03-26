@@ -291,14 +291,28 @@ class LocalEdgarFetcher:
       {local_data_dir}/companyfacts/CIK{cik}.json  via edgartools EntityFacts
       {local_data_dir}/reference/company_tickers.json  for the ticker list
 
-    No network calls are made by this class.
+    No network calls are made by this class.  The ticker index is built once
+    at construction time; ``fetch_fundamentals`` raises ``ValueError`` immediately
+    for any ticker not present in that local index, preventing edgartools from
+    falling back to live SEC.gov requests.
     """
 
     def __init__(self, local_data_dir: str) -> None:
         self._local_data_dir = Path(local_data_dir)
         set_identity("local-storage")
         use_local_storage(str(self._local_data_dir))
-        logger.info("LocalEdgarFetcher initialised with data dir: %s", self._local_data_dir)
+
+        # Build the ticker→CIK index once at startup and cache the full
+        # ticker list so every search request reads from memory, not disk.
+        self._ticker_list: list[dict] = self._load_ticker_list()
+        self._known_symbols: frozenset[str] = frozenset(
+            t["symbol"] for t in self._ticker_list
+        )
+        logger.info(
+            "LocalEdgarFetcher initialised: %s, %d tickers indexed",
+            self._local_data_dir,
+            len(self._known_symbols),
+        )
 
     # ------------------------------------------------------------------
     def fetch_fundamentals(  # pylint: disable=too-many-locals
@@ -308,10 +322,22 @@ class LocalEdgarFetcher:
         Return the same dict structure as EdgarFetcher.fetch_fundamentals() but
         sourced entirely from local EntityFacts bulk data.
         """
-        logger.info("LocalEdgarFetcher: loading EntityFacts for %s", ticker)
-        company = Company(ticker)
+        sym = ticker.upper()
+        if sym not in self._known_symbols:
+            # Guard: raise before calling Company() so edgartools never makes
+            # a live network request for an unknown ticker.
+            logger.warning(
+                "LocalEdgarFetcher: '%s' not in local EDGAR index (%d known tickers) — "
+                "returning 404 without hitting the network",
+                sym,
+                len(self._known_symbols),
+            )
+            raise ValueError(f"Ticker '{sym}' not found in local EDGAR data")
+
+        logger.info("LocalEdgarFetcher: loading EntityFacts for %s", sym)
+        company = Company(sym)
         if company is None:
-            raise ValueError(f"Unknown ticker '{ticker}'")
+            raise ValueError(f"Unknown ticker '{sym}'")
 
         facts = company.get_facts()
         if facts is None:
@@ -394,10 +420,11 @@ class LocalEdgarFetcher:
 
     # ------------------------------------------------------------------
     def get_edgar_ticker_list(self) -> list[dict]:
-        """
-        Return the company ticker list from the locally downloaded reference data.
-        Reads reference/company_tickers.json — no network call.
-        """
+        """Return the cached company ticker list (loaded once at startup)."""
+        return self._ticker_list
+
+    def _load_ticker_list(self) -> list[dict]:
+        """Read reference/company_tickers.json and build the ticker list once."""
         ticker_file = self._local_data_dir / "reference" / "company_tickers.json"
         logger.info("Loading ticker list from local file: %s", ticker_file)
 
