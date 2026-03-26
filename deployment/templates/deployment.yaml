@@ -59,12 +59,22 @@ spec:
             - name: GMR_PRICE_DATA_DIR
               value: "/edgar-data/prices"
 
+            # ESEF European financial summaries (written by esef-data-fetcher).
+            - name: GMR_ESEF_DATA_DIR
+              value: "/esef-data/esef"
+
           volumeMounts:
             - name: edgar-data
               mountPath: /edgar-data
+              readOnly: true
+            - name: esef-data
+              mountPath: /esef-data
               readOnly: true
 
       volumes:
         - name: edgar-data
           persistentVolumeClaim:
             claimName: edgar-data
+        - name: esef-data
+          persistentVolumeClaim:
+            claimName: esef-data
