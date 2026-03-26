@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.data.live_data_source import LiveDataSource
+from src.data.north_america.live_data_source import LiveDataSource
 
 # ---------------------------------------------------------------------------
 # Sample ticker data
@@ -74,8 +74,8 @@ _SAMPLE_TICKERS = [
 
 @pytest.fixture
 def live_data_source():
-    with patch('src.data.live_data_source.LocalEdgarFetcher') as mock_edgar_cls, \
-         patch('src.data.live_data_source.LocalPriceFetcher'):
+    with patch('src.data.north_america.live_data_source.LocalEdgarFetcher') as mock_edgar_cls, \
+         patch('src.data.north_america.live_data_source.LocalPriceFetcher'):
         mock_edgar_cls.return_value.get_edgar_ticker_list.return_value = _SAMPLE_TICKERS
         yield LiveDataSource(local_data_dir='/fake', local_price_data_dir='/fake')
 

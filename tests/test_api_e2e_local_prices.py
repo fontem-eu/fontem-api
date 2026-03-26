@@ -27,7 +27,7 @@ from starlette.testclient import TestClient
 
 from src.api.app import app
 from src.api.dependencies import get_data_source
-from src.data.live_data_source import LiveDataSource
+from src.data.north_america.live_data_source import LiveDataSource
 
 # ---------------------------------------------------------------------------
 # Locate data directories

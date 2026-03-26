@@ -67,7 +67,7 @@ def _mock_data_source():
 # ---------------------------------------------------------------------------
 
 def test_live_data_source_imports_without_error():
-    from src.data.live_data_source import LiveDataSource  # noqa: F401  # pylint: disable=import-outside-toplevel
+    from src.data.north_america.live_data_source import LiveDataSource  # noqa: F401  # pylint: disable=import-outside-toplevel
     assert LiveDataSource is not None
 
 

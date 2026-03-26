@@ -14,7 +14,7 @@ import pandas as pd
 
 from .local_edgar_fetcher import LocalEdgarFetcher
 from .local_price_fetcher import LocalPriceFetcher
-from ..analysis.gmr_data_source import FinancialDataSource
+from ...analysis.gmr_data_source import FinancialDataSource
 
 logger = logging.getLogger(__name__)
 

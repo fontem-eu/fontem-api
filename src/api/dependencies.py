@@ -13,7 +13,7 @@ import os
 from functools import lru_cache
 
 from src.analysis.gmr_data_source import FinancialDataSource
-from src.data.live_data_source import LiveDataSource
+from src.data.north_america.live_data_source import LiveDataSource
 
 
 @lru_cache(maxsize=1)

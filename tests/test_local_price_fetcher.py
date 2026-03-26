@@ -16,7 +16,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.data.local_price_fetcher import LocalPriceFetcher
+from src.data.north_america.local_price_fetcher import LocalPriceFetcher
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures" / "prices"
 
