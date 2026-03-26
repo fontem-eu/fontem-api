@@ -268,3 +268,117 @@ def test_fundamentals_no_nan_for_known_fields(ds: EsefDataSource):
         for val in result[key]:
             if val is not None:
                 assert not (isinstance(val, float) and math.isnan(val))
+
+
+# ---------------------------------------------------------------------------
+# shares_outstanding derivation  (net_income / eps fallback)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def esef_dir_derivation(tmp_path: Path) -> Path:
+    """ESEF dir with a GALP-like ticker to exercise shares_outstanding derivation."""
+    summaries_dir = tmp_path / "summaries"
+    summaries_dir.mkdir()
+
+    # Registry stub — not needed for derivation tests but keeps the DS happy.
+    (tmp_path / "eu_entities.json").write_text("{}", encoding="utf-8")
+
+    galp_summary = {
+        "ticker": "GALP.LS",
+        "filings": [
+            {
+                # 2023: shares_outstanding missing → should be derived as NI / EPS
+                "year": 2023,
+                "net_income": 1_040_000_000,
+                "eps": 1.36,
+                "shares_outstanding": None,
+                "revenue": 20_000_000_000,
+                "total_assets": None, "total_liabilities": None, "equity": None,
+                "operating_cashflow": None, "capex": None, "free_cashflow": None,
+                "current_assets": None, "current_liabilities": None,
+                "inventory": None, "prepaid_expenses": None,
+                "long_term_debt": None, "cash_and_equivalents": None,
+                "depreciation_amortization": None, "interest_expense": None,
+                "income_tax_expense": None,
+            },
+            {
+                # 2022: shares_outstanding already set → must NOT be overwritten
+                "year": 2022,
+                "net_income": 900_000_000,
+                "eps": 1.10,
+                "shares_outstanding": 764_000_000,
+                "revenue": 18_000_000_000,
+                "total_assets": None, "total_liabilities": None, "equity": None,
+                "operating_cashflow": None, "capex": None, "free_cashflow": None,
+                "current_assets": None, "current_liabilities": None,
+                "inventory": None, "prepaid_expenses": None,
+                "long_term_debt": None, "cash_and_equivalents": None,
+                "depreciation_amortization": None, "interest_expense": None,
+                "income_tax_expense": None,
+            },
+            {
+                # 2021: eps is zero → derivation must be skipped (no ZeroDivisionError)
+                "year": 2021,
+                "net_income": 500_000_000,
+                "eps": 0,
+                "shares_outstanding": None,
+                "revenue": None,
+                "total_assets": None, "total_liabilities": None, "equity": None,
+                "operating_cashflow": None, "capex": None, "free_cashflow": None,
+                "current_assets": None, "current_liabilities": None,
+                "inventory": None, "prepaid_expenses": None,
+                "long_term_debt": None, "cash_and_equivalents": None,
+                "depreciation_amortization": None, "interest_expense": None,
+                "income_tax_expense": None,
+            },
+            {
+                # 2020: both net_income and eps are None → derivation must be skipped
+                "year": 2020,
+                "net_income": None,
+                "eps": None,
+                "shares_outstanding": None,
+                "revenue": None,
+                "total_assets": None, "total_liabilities": None, "equity": None,
+                "operating_cashflow": None, "capex": None, "free_cashflow": None,
+                "current_assets": None, "current_liabilities": None,
+                "inventory": None, "prepaid_expenses": None,
+                "long_term_debt": None, "cash_and_equivalents": None,
+                "depreciation_amortization": None, "interest_expense": None,
+                "income_tax_expense": None,
+            },
+        ],
+    }
+    (summaries_dir / "GALP.LS.json").write_text(
+        json.dumps(galp_summary, ensure_ascii=False), encoding="utf-8"
+    )
+    return tmp_path
+
+
+@pytest.fixture()
+def ds_derivation(esef_dir_derivation: Path) -> EsefDataSource:
+    return EsefDataSource(esef_data_dir=str(esef_dir_derivation))
+
+
+def test_shares_outstanding_derived_from_eps(ds_derivation: EsefDataSource):
+    # 2023: shares_outstanding was None; expect 1_040_000_000 / 1.36
+    result = ds_derivation.get_annual_fundamentals("GALP.LS")
+    derived = result["shares_outstanding"][2023]
+    assert derived == pytest.approx(1_040_000_000 / 1.36, rel=1e-6)
+
+
+def test_shares_outstanding_not_overwritten(ds_derivation: EsefDataSource):
+    # 2022: shares_outstanding was already 764_000_000 — must stay unchanged
+    result = ds_derivation.get_annual_fundamentals("GALP.LS")
+    assert result["shares_outstanding"][2022] == 764_000_000
+
+
+def test_shares_outstanding_not_derived_if_eps_zero(ds_derivation: EsefDataSource):
+    # 2021: eps=0 → should stay None (no ZeroDivisionError)
+    result = ds_derivation.get_annual_fundamentals("GALP.LS")
+    assert result["shares_outstanding"][2021] is None
+
+
+def test_shares_outstanding_not_derived_if_both_missing(ds_derivation: EsefDataSource):
+    # 2020: net_income=None, eps=None → should stay None
+    result = ds_derivation.get_annual_fundamentals("GALP.LS")
+    assert result["shares_outstanding"][2020] is None

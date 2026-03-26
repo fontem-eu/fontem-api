@@ -20,6 +20,34 @@ from pathlib import Path
 
 import pandas as pd
 
+
+def _fill_missing_shares_outstanding(result: dict) -> None:
+    """Derive ``shares_outstanding = net_income / eps`` for years where it is missing.
+
+    Mutates *result* in-place.  Existing non-null values are never overwritten.
+    Skips a year when any of the following is true:
+    - ``shares_outstanding`` is already present
+    - ``net_income`` or ``eps`` is missing / null
+    - ``eps`` is zero (would cause division by zero)
+    """
+    so = result.get("shares_outstanding", pd.Series(dtype=float))
+    ni = result.get("net_income", pd.Series(dtype=float))
+    eps = result.get("eps", pd.Series(dtype=float))
+
+    if so.empty:
+        return
+
+    for year in so.index:
+        if not pd.isna(so[year]):
+            continue  # already has a value — never overwrite
+        if year not in ni.index or year not in eps.index:
+            continue
+        ni_val = ni[year]
+        eps_val = eps[year]
+        if pd.isna(ni_val) or pd.isna(eps_val) or eps_val == 0:
+            continue
+        so[year] = ni_val / eps_val
+
 from ...analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -106,6 +134,7 @@ class EsefDataSource(FinancialDataSource):
             else:
                 result[key] = pd.Series(dtype=float)
 
+        _fill_missing_shares_outstanding(result)
         return result
 
     def get_annual_avg_prices(self, ticker: str, years: int = 10) -> pd.Series:
