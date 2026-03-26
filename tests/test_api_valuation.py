@@ -187,7 +187,7 @@ def test_top_level_keys_full(full_json):
 
 
 def test_summary_only_has_ticker_and_summary(summary_json):
-    assert set(summary_json.keys()) == {"ticker", "summary"}
+    assert set(summary_json.keys()) == {"ticker", "data_source", "summary"}
 
 
 def test_ticker_uppercased(full_json):

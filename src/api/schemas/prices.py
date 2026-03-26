@@ -20,6 +20,7 @@ class PriceBar(BaseModel):
 class PricesResponse(BaseModel):
     """Full prices response for a ticker."""
     ticker: str
+    data_source: str | None = None
     name: str | None = None
     exchange: str | None = None
     period: str

@@ -41,6 +41,7 @@ from src.api.schemas.gmr_short import (
     MonthlyBreakdownSchema,
 )
 from src.api.helpers import nan_to_none
+from src.data.routing_data_source import get_data_source_name
 from src.api.schemas.gmr_data import (
     GMRDataResponse,
     CurrentSnapshotSchema,
@@ -135,13 +136,17 @@ def gmr_long(
     )
 
     if summarize:
-        return GMRLongResponse(ticker=result.ticker, gmr_ratio=ratio)
+        return GMRLongResponse(
+            ticker=result.ticker,
+            data_source=get_data_source_name(ticker),
+            gmr_ratio=ratio,
+        )
 
     # ── Build market snapshot ──────────────────────────────────────────
     last_div_raw = result.last_dividend or {}
     last_div = LastDividendSchema(
         date=last_div_raw.get("date"),
-        amount=nan_to_none(float(last_div_raw["amount"])) if "amount" in last_div_raw else None,
+        amount=nan_to_none(float(last_div_raw["amount"])) if last_div_raw.get("amount") is not None else None,
     )
     snapshot = MarketSnapshotLongSchema(
         current_price=nan_to_none(result.current_price),
@@ -173,6 +178,7 @@ def gmr_long(
 
     return GMRLongResponse(
         ticker=result.ticker,
+        data_source=get_data_source_name(ticker),
         gmr_ratio=ratio,
         market_snapshot=snapshot,
         per_year=per_year_list,
@@ -234,7 +240,11 @@ def gmr_short(
     )
 
     if summarize:
-        return GMRShortResponse(ticker=result.ticker, gmr_ratio=ratio)
+        return GMRShortResponse(
+            ticker=result.ticker,
+            data_source=get_data_source_name(ticker),
+            gmr_ratio=ratio,
+        )
 
     snapshot = MarketSnapshotShortSchema(
         current_price=nan_to_none(result.current_price),
@@ -251,6 +261,7 @@ def gmr_short(
 
     return GMRShortResponse(
         ticker=result.ticker,
+        data_source=get_data_source_name(ticker),
         gmr_ratio=ratio,
         market_snapshot=snapshot,
         monthly_breakdown=monthly,

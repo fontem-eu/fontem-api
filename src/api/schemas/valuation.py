@@ -51,6 +51,7 @@ class ValuationSnapshot(BaseModel):
 class ValuationResponse(BaseModel):
     """Root response for the /valuation endpoint."""
     ticker: str
+    data_source: str | None = None
     valuation_snapshot: ValuationSnapshot | None = None
     summary: ValuationSummary
     per_year: list[ValuationPerYearRow | None] = None

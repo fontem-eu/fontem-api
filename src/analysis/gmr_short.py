@@ -92,7 +92,7 @@ class GMRShort:  # pylint: disable=too-few-public-methods
     ) -> GMRShortResult:
         """Run the short-term GMR screen and return a :class:`GMRShortResult`."""
         snapshot      = self._ds.get_market_snapshot(ticker)
-        current_price = float(snapshot.get("current_price", float("nan")))
+        current_price = float(snapshot.get("current_price") or float("nan"))
         avg_volume    = float(snapshot.get("avg_volume", 0) or 0)
 
         hist = self._ds.get_price_history(ticker, period="1y")

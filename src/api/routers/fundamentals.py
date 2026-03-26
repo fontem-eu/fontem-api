@@ -31,6 +31,7 @@ from src.analysis.fundamentals import Fundamentals
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.api.dependencies import get_data_source
 from src.api.helpers import nan_to_none
+from src.data.routing_data_source import get_data_source_name
 from src.api.schemas.fundamentals import (
     FundamentalsMarketSnapshot,
     FundamentalsPerYearRow,
@@ -115,7 +116,11 @@ def fundamentals(
     )
 
     if summarize:
-        return FundamentalsResponse(ticker=result.ticker, ratios_summary=summary)
+        return FundamentalsResponse(
+            ticker=result.ticker,
+            data_source=get_data_source_name(ticker),
+            ratios_summary=summary,
+        )
 
     # ── Market snapshot ────────────────────────────────────────────────
     last_div = result.last_dividend or {}
@@ -128,7 +133,7 @@ def fundamentals(
         avg_volume=nan_to_none(result.avg_volume) if result.avg_volume else None,
         last_dividend_date=last_div.get("date"),
         last_dividend_amount=(
-            nan_to_none(float(last_div["amount"])) if "amount" in last_div else None
+            nan_to_none(float(last_div["amount"])) if last_div.get("amount") is not None else None
         ),
         beta=nan_to_none(result.beta) if result.beta is not None else None,
         week_52_high=nan_to_none(result.week_52_high) if result.week_52_high is not None else None,
@@ -178,6 +183,7 @@ def fundamentals(
 
     return FundamentalsResponse(
         ticker=result.ticker,
+        data_source=get_data_source_name(ticker),
         market_snapshot=snapshot,
         ratios_summary=summary,
         per_year=per_year_list,

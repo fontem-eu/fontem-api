@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.api.dependencies import get_data_source
 from src.api.schemas.prices import PriceBar, PricesResponse
+from src.data.routing_data_source import get_data_source_name
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ def get_prices(
 
     return PricesResponse(
         ticker=ticker,
+        data_source=get_data_source_name(ticker),
         name=name,
         exchange=exchange,
         period=period,

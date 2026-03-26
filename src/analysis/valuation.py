@@ -227,7 +227,7 @@ class Valuation:  # pylint: disable=too-few-public-methods
             return float(vals.mean()) if not vals.empty else nan
 
         # ── Enterprise Value (current market cap + most-recent net debt) ─
-        current_price = float(snapshot.get("current_price", nan))
+        current_price = float(snapshot.get("current_price") or nan)
         snap_shares   = float(snapshot.get("shares_outstanding") or 0)
         market_cap    = (current_price * snap_shares
                          if not np.isnan(current_price) and snap_shares > 0
@@ -276,7 +276,7 @@ class Valuation:  # pylint: disable=too-few-public-methods
     # ------------------------------------------------------------------
     def _empty_result(self, ticker: str, snapshot: dict) -> ValuationResult:
         nan = float("nan")
-        current_price = float(snapshot.get("current_price", nan))
+        current_price = float(snapshot.get("current_price") or nan)
         snap_shares   = float(snapshot.get("shares_outstanding") or 0)
         market_cap    = (current_price * snap_shares
                          if not np.isnan(current_price) and snap_shares > 0

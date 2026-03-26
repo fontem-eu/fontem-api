@@ -96,6 +96,7 @@ class FundamentalsPerYearRow(BaseModel):
 class FundamentalsResponse(BaseModel):
     """Root response for the /fundamentals endpoint."""
     ticker: str
+    data_source: str | None = None
     market_snapshot: FundamentalsMarketSnapshot | None = None
     ratios_summary: FundamentalsRatiosSummary
     per_year: list[FundamentalsPerYearRow | None] = None

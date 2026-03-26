@@ -38,6 +38,7 @@ class GMRShortResponse(BaseModel):
     When ?summarize=false → all fields are present.
     """
     ticker: str
+    data_source: str | None = None
     gmr_ratio: GMRShortRatioSchema
     market_snapshot: MarketSnapshotShortSchema | None = None
     monthly_breakdown: list[MonthlyBreakdownSchema | None] = None

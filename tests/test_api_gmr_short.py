@@ -180,7 +180,7 @@ def test_top_level_keys_full(full_json):
 
 
 def test_summary_only_has_ticker_and_ratio(summary_json):
-    assert set(summary_json.keys()) == {"ticker", "gmr_ratio"}
+    assert set(summary_json.keys()) == {"ticker", "data_source", "gmr_ratio"}
 
 
 def test_summary_missing_market_snapshot(summary_json):

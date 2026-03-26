@@ -297,7 +297,7 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             return float(vals.mean()) if not vals.empty else _NAN
 
         # ── Market snapshot ───────────────────────────────────────────────
-        current_price  = float(snapshot.get("current_price", _NAN))
+        current_price  = float(snapshot.get("current_price") or _NAN)
         snap_shares    = float(snapshot.get("shares_outstanding") or 0)
         volume         = float(snapshot.get("avg_volume") or 0)
         market_cap     = current_price * snap_shares if (
@@ -354,7 +354,7 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             avg_debt_to_equity=_NAN, avg_debt_to_assets=_NAN,
             avg_fcf_yield=_NAN, avg_dividend_yield=_NAN,
             avg_revenue_growth=_NAN, avg_earnings_growth=_NAN,
-            current_price=float(snapshot.get("current_price", _NAN)),
+            current_price=float(snapshot.get("current_price") or _NAN),
             market_cap=_NAN,
             shares_outstanding=float(snapshot.get("shares_outstanding") or 0),
             avg_volume=float(snapshot.get("avg_volume") or 0),

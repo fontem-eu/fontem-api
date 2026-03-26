@@ -152,6 +152,6 @@ class GMRLong:  # pylint: disable=too-few-public-methods
             avg_debt_equity=float("nan"), avg_dividend_yield=float("nan"),
             avg_quick_ratio=float("nan"), avg_fcf=float("nan"),
             flags=empty_flags, passes_all=False,
-            current_price=float(snapshot.get("current_price", float("nan"))),
+            current_price=float(snapshot.get("current_price") or float("nan")),
             avg_volume=float(snapshot.get("avg_volume", 0) or 0),
         )
