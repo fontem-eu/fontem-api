@@ -49,6 +49,7 @@ def _fill_missing_shares_outstanding(result: dict) -> None:
         so[year] = ni_val / eps_val
 
 from ...analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
+from ..north_america.local_price_fetcher import LocalPriceFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ _FUNDAMENTALS_KEYS = [
 ]
 
 _DEFAULT_ESEF_DATA_DIR = os.environ.get("GMR_ESEF_DATA_DIR", "/esef-data/esef")
+_DEFAULT_PRICE_DATA_DIR = os.environ.get("GMR_PRICE_DATA_DIR")  # None when unset
 
 
 class EsefDataSource(FinancialDataSource):
@@ -89,10 +91,21 @@ class EsefDataSource(FinancialDataSource):
         environment variable, falling back to ``/esef-data/esef``.
     """
 
-    def __init__(self, esef_data_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        esef_data_dir: str | None = None,
+        price_data_dir: str | None = None,
+    ) -> None:
         self._data_dir = Path(esef_data_dir or _DEFAULT_ESEF_DATA_DIR)
         logger.info("EsefDataSource: data dir = %s", self._data_dir)
         self._registry_cache: dict | None = None
+
+        price_dir = price_data_dir or _DEFAULT_PRICE_DATA_DIR
+        self._prices: LocalPriceFetcher | None = (
+            LocalPriceFetcher(price_dir) if price_dir else None
+        )
+        if self._prices:
+            logger.info("EsefDataSource: price data dir = %s", price_dir)
 
     # ------------------------------------------------------------------
     # FinancialDataSource interface
@@ -138,23 +151,35 @@ class EsefDataSource(FinancialDataSource):
         return result
 
     def get_annual_avg_prices(self, ticker: str, years: int = 10) -> pd.Series:
-        """Price data not available for ESEF entities — returns empty Series."""
+        """Annual average prices from local CSV when available, else empty Series."""
+        if self._prices:
+            return self._prices.get_annual_avg_prices(ticker, period=f"{years}y")
         return pd.Series(dtype=float)
 
     def get_annual_dividends(self, ticker: str) -> pd.Series:
-        """Dividend data not available for ESEF entities — returns empty Series."""
+        """Dividend data not available from OHLCV files — returns empty Series."""
         return pd.Series(dtype=float)
 
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
-        """Price history not available for ESEF entities — returns empty DataFrame."""
+        """Price history from local CSV when available, else empty DataFrame."""
+        if self._prices:
+            return self._prices.get_history(ticker, period=period)
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
     def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
         """
-        Market snapshot stub for ESEF entities.
-        All price-dependent fields are ``None`` — ESEF filings carry no live
-        market data.
+        Market snapshot for ESEF entities.
+
+        ``current_price`` and ``avg_volume`` are populated from the local price
+        CSV when available (written by usa-stock-price-fetcher).
+        All other price-dependent fields (splits, dividends, latest_quarter)
+        are not available from OHLCV data and remain ``None``.
         """
+        if self._prices:
+            snap = self._prices.get_snapshot(ticker)
+            price = snap.get("current_price") or None
+            vol = snap.get("avg_volume") or None
+            return MarketSnapshot(current_price=price, avg_volume=vol)
         return MarketSnapshot()
 
     def get_data_source_name(self, ticker: str) -> str:  # pylint: disable=unused-argument

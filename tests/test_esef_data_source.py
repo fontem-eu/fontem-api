@@ -382,3 +382,77 @@ def test_shares_outstanding_not_derived_if_both_missing(ds_derivation: EsefDataS
     # 2020: net_income=None, eps=None → should stay None
     result = ds_derivation.get_annual_fundamentals("GALP.LS")
     assert result["shares_outstanding"][2020] is None
+
+
+# ---------------------------------------------------------------------------
+# Price data integration (LocalPriceFetcher wired into EsefDataSource)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def esef_dir_with_prices(tmp_path: Path) -> tuple[Path, Path]:
+    """ESEF dir + minimal prices dir with one CSV for GALP.LS."""
+    summaries_dir = tmp_path / "summaries"
+    summaries_dir.mkdir()
+    (tmp_path / "eu_entities.json").write_text("{}", encoding="utf-8")
+    (summaries_dir / "GALP.LS.json").write_text(
+        '{"ticker":"GALP.LS","filings":[]}', encoding="utf-8"
+    )
+
+    prices_dir = tmp_path / "prices"
+    (prices_dir / "daily").mkdir(parents=True)
+    csv_content = (
+        "Date,Open,High,Low,Close,Volume\n"
+        "2024-01-02,20.0,21.5,19.8,20.92,3000000\n"
+        "2024-01-03,20.9,21.0,20.5,20.78,2800000\n"
+    )
+    (prices_dir / "daily" / "GALP.LS.csv").write_text(csv_content, encoding="utf-8")
+    return tmp_path, prices_dir
+
+
+def test_market_snapshot_uses_price_data(esef_dir_with_prices):
+    esef_dir, prices_dir = esef_dir_with_prices
+    ds = EsefDataSource(
+        esef_data_dir=str(esef_dir),
+        price_data_dir=str(prices_dir),
+    )
+    snap = ds.get_market_snapshot("GALP.LS")
+    assert snap.current_price == pytest.approx(20.78)
+    assert snap.avg_volume is not None
+    assert snap.avg_volume > 0
+
+
+def test_price_history_uses_local_csv(esef_dir_with_prices):
+    esef_dir, prices_dir = esef_dir_with_prices
+    ds = EsefDataSource(
+        esef_data_dir=str(esef_dir),
+        price_data_dir=str(prices_dir),
+    )
+    # Use "max" to cover all historical dates regardless of fixture timestamps
+    df = ds.get_price_history("GALP.LS", period="max")
+    assert not df.empty
+    assert "Close" in df.columns
+
+
+def test_annual_avg_prices_uses_local_csv(esef_dir_with_prices):
+    esef_dir, prices_dir = esef_dir_with_prices
+    ds = EsefDataSource(
+        esef_data_dir=str(esef_dir),
+        price_data_dir=str(prices_dir),
+    )
+    prices = ds.get_annual_avg_prices("GALP.LS", years=5)
+    assert not prices.empty
+    assert 2024 in prices.index
+
+
+def test_snapshot_no_price_dir_returns_stub(esef_dir: Path):
+    """Without a price dir, snapshot fields remain None (stub behaviour)."""
+    ds = EsefDataSource(esef_data_dir=str(esef_dir))
+    snap = ds.get_market_snapshot("ASML.AS")
+    assert snap.current_price is None
+    assert snap.avg_volume is None
+
+
+def test_price_history_no_price_dir_returns_empty(esef_dir: Path):
+    ds = EsefDataSource(esef_data_dir=str(esef_dir))
+    df = ds.get_price_history("ASML.AS", period="1y")
+    assert df.empty
