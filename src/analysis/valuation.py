@@ -143,7 +143,8 @@ class Valuation:  # pylint: disable=too-few-public-methods
 
         def _v(series: pd.Series, yr: int, default: float = nan) -> float:
             if hasattr(series, "at") and yr in series.index:
-                return float(series.at[yr])
+                val = series.at[yr]
+                return default if val is None else float(val)
             return default
 
         def _safe(num: float, denom: float) -> float:

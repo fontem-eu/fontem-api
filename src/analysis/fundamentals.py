@@ -106,7 +106,8 @@ _NAN = float("nan")
 def _v(series: pd.Series, yr: int, default: float = _NAN) -> float:
     """Safe scalar lookup in a pandas Series by year index."""
     if hasattr(series, "at") and yr in series.index:
-        return float(series.at[yr])
+        val = series.at[yr]
+        return default if val is None else float(val)
     return default
 
 
