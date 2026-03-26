@@ -41,7 +41,6 @@ from src.api.schemas.gmr_short import (
     MonthlyBreakdownSchema,
 )
 from src.api.helpers import nan_to_none
-from src.data.routing_data_source import get_data_source_name
 from src.api.schemas.gmr_data import (
     GMRDataResponse,
     CurrentSnapshotSchema,
@@ -138,7 +137,7 @@ def gmr_long(
     if summarize:
         return GMRLongResponse(
             ticker=result.ticker,
-            data_source=get_data_source_name(ticker),
+            data_source=data_source.get_data_source_name(ticker),
             gmr_ratio=ratio,
         )
 
@@ -178,7 +177,7 @@ def gmr_long(
 
     return GMRLongResponse(
         ticker=result.ticker,
-        data_source=get_data_source_name(ticker),
+        data_source=data_source.get_data_source_name(ticker),
         gmr_ratio=ratio,
         market_snapshot=snapshot,
         per_year=per_year_list,
@@ -242,7 +241,7 @@ def gmr_short(
     if summarize:
         return GMRShortResponse(
             ticker=result.ticker,
-            data_source=get_data_source_name(ticker),
+            data_source=data_source.get_data_source_name(ticker),
             gmr_ratio=ratio,
         )
 
@@ -261,7 +260,7 @@ def gmr_short(
 
     return GMRShortResponse(
         ticker=result.ticker,
-        data_source=get_data_source_name(ticker),
+        data_source=data_source.get_data_source_name(ticker),
         gmr_ratio=ratio,
         market_snapshot=snapshot,
         monthly_breakdown=monthly,
@@ -306,9 +305,8 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
     capex         = fundamentals.get("capex",              {})
 
     # ── Build current snapshot ───────────────────────────────────────
-    lq = snapshot.get("latest_quarter") or {}
-    last_div = snapshot.get("last_dividend") or {}
-    splits_series = snapshot.get("splits")
+    lq = snapshot.latest_quarter or {}
+    splits_series = snapshot.splits
 
     last_split_year: int | None = None
     last_split_ratio: float | None = None
@@ -317,17 +315,17 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
         last_split_ratio = nan_to_none(float(splits_series.iloc[0]))
 
     current_snapshot = CurrentSnapshotSchema(
-        price=nan_to_none(float(snapshot.get("current_price") or float("nan"))),
-        avg_volume=nan_to_none(float(snapshot.get("avg_volume") or 0) or None),
+        price=nan_to_none(float(snapshot.current_price or float("nan"))),
+        avg_volume=nan_to_none(float(snapshot.avg_volume or 0) or None),
         current_assets=nan_to_none(lq.get("current_assets")),
         inventory=nan_to_none(lq.get("inventory")),
         prepaid_expenses=nan_to_none(lq.get("prepaid_expenses")),
         current_liabilities=nan_to_none(lq.get("current_liabilities")),
         total_debt=nan_to_none(lq.get("total_debt")),
         equity=nan_to_none(lq.get("equity")),
-        shares=nan_to_none(float(snapshot.get("shares_outstanding") or 0) or None),
-        last_dividend_date=last_div.get("date"),
-        last_dividend_amount=nan_to_none(float(last_div.get("amount") or 0) or None),
+        shares=nan_to_none(float(snapshot.shares_outstanding or 0) or None),
+        last_dividend_date=snapshot.last_dividend_date,
+        last_dividend_amount=nan_to_none(float(snapshot.last_dividend_amount or 0) or None),
         last_split_year=last_split_year,
         last_split_ratio=last_split_ratio,
     )
@@ -369,7 +367,7 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
 
     return GMRDataResponse(
         ticker=ticker,
-        data_source=get_data_source_name(ticker),
+        data_source=data_source.get_data_source_name(ticker),
         current_snapshot=current_snapshot,
         annual_data=annual_data,
     )

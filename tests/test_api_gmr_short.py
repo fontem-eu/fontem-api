@@ -24,7 +24,7 @@ from starlette.testclient import TestClient
 
 import pandas as pd
 
-from src.analysis.gmr_data_source import GMRDataSource
+from src.analysis.gmr_data_source import GMRDataSource, MarketSnapshot
 from src.api.app import app
 from src.api.dependencies import get_data_source
 
@@ -72,7 +72,11 @@ class _GoodMock(GMRDataSource):
     def get_annual_dividends(self, t):        return pd.Series(dtype=float)
     def get_price_history(self, t, period="1y"): return self._history
     def get_market_snapshot(self, t):
-        return {"current_price": 1.00, "avg_volume": 5_000_000}
+        return MarketSnapshot(current_price=1.00, avg_volume=5_000_000)
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 class _NotFoundMock(GMRDataSource):
@@ -85,6 +89,10 @@ class _NotFoundMock(GMRDataSource):
     def get_market_snapshot(self, t):
         raise ValueError(f"Unknown ticker '{t}'")
 
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
+
 
 class _EmptyMock(GMRDataSource):
     """Returns empty history + NaN price — triggers 404."""
@@ -94,7 +102,11 @@ class _EmptyMock(GMRDataSource):
     def get_price_history(self, t, period="1y"):
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     def get_market_snapshot(self, t):
-        return {"current_price": float("nan"), "avg_volume": 0}
+        return MarketSnapshot(current_price=float("nan"), avg_volume=0)
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 # ---------------------------------------------------------------------------

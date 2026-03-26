@@ -20,13 +20,13 @@ MAT = mean of the 43 most-recent closing prices within the 6-month window.
 diffMAT = (MAT − current_price) / current_price.
 """
 from __future__ import annotations
-# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,multiple-statements,too-many-arguments,too-many-positional-arguments
+# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,multiple-statements,unused-argument,too-many-arguments,too-many-positional-arguments
 
 import numpy as np
 import pytest
 import pandas as pd
 
-from src.analysis.gmr_data_source import GMRDataSource, GMRSettings
+from src.analysis.gmr_data_source import GMRDataSource, GMRSettings, MarketSnapshot
 from src.analysis.gmr_short import GMRShort, GMRShortResult
 
 
@@ -35,15 +35,35 @@ from src.analysis.gmr_short import GMRShort, GMRShortResult
 # ---------------------------------------------------------------------------
 
 class MockDataSource(GMRDataSource):
-    def __init__(self, history: pd.DataFrame, snapshot: dict):
+    def __init__(self, history: pd.DataFrame, snapshot):
         self._history  = history
-        self._snapshot = snapshot
+        raw = snapshot
+        if isinstance(raw, dict):
+            last_div = raw.get("last_dividend") or {}
+            self._snapshot = MarketSnapshot(
+                current_price=raw.get("current_price"),
+                avg_volume=raw.get("avg_volume"),
+                shares_outstanding=raw.get("shares_outstanding"),
+                last_dividend_date=last_div.get("date"),
+                last_dividend_amount=last_div.get("amount"),
+                splits=raw.get("splits", pd.Series(dtype=float)),
+                latest_quarter=raw.get("latest_quarter") or {},
+                beta=raw.get("beta"),
+                week_52_high=raw.get("week_52_high"),
+                week_52_low=raw.get("week_52_low"),
+                market_cap=raw.get("market_cap"),
+            )
+        else:
+            self._snapshot = raw
 
     def get_annual_fundamentals(self, ticker, years):  return {}
     def get_annual_avg_prices(self, ticker, years):    return pd.Series(dtype=float)
     def get_annual_dividends(self, ticker):            return pd.Series(dtype=float)
     def get_price_history(self, ticker, period="1y"):  return self._history
     def get_market_snapshot(self, ticker):             return self._snapshot
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 # ---------------------------------------------------------------------------
@@ -92,12 +112,11 @@ def _micro_history(rows: list[dict]) -> pd.DataFrame:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-PASS_SNAPSHOT = {
-    "current_price": 1.00,
-    "avg_volume":    5_000_000,
-    "last_dividend": {"date": None, "amount": 0.0},
-    "splits":        pd.Series(dtype=float),
-}
+PASS_SNAPSHOT = MarketSnapshot(
+    current_price=1.00,
+    avg_volume=5_000_000,
+    last_dividend_amount=0.0,
+)
 
 
 @pytest.fixture

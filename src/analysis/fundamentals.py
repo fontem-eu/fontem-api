@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .gmr_data_source import FinancialDataSource
+from .gmr_data_source import FinancialDataSource, MarketSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -298,15 +298,12 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             return float(vals.mean()) if not vals.empty else _NAN
 
         # ── Market snapshot ───────────────────────────────────────────────
-        current_price  = float(snapshot.get("current_price") or _NAN)
-        snap_shares    = float(snapshot.get("shares_outstanding") or 0)
-        volume         = float(snapshot.get("avg_volume") or 0)
+        current_price  = float(snapshot.current_price or _NAN)
+        snap_shares    = float(snapshot.shares_outstanding or 0)
+        volume         = float(snapshot.avg_volume or 0)
         market_cap     = current_price * snap_shares if (
             not np.isnan(current_price) and snap_shares > 0
         ) else _NAN
-        beta_raw       = snapshot.get("beta")
-        week_52_high   = snapshot.get("week_52_high")
-        week_52_low    = snapshot.get("week_52_low")
 
         return FundamentalsResult(
             ticker=ticker.upper(),
@@ -337,14 +334,17 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             market_cap=market_cap,
             shares_outstanding=snap_shares,
             avg_volume=volume,
-            last_dividend=snapshot.get("last_dividend", {}),
-            beta=float(beta_raw) if beta_raw is not None else _NAN,
-            week_52_high=float(week_52_high) if week_52_high is not None else _NAN,
-            week_52_low=float(week_52_low) if week_52_low is not None else _NAN,
+            last_dividend={
+                "date": snapshot.last_dividend_date,
+                "amount": snapshot.last_dividend_amount,
+            },
+            beta=float(snapshot.beta) if snapshot.beta is not None else _NAN,
+            week_52_high=float(snapshot.week_52_high) if snapshot.week_52_high is not None else _NAN,
+            week_52_low=float(snapshot.week_52_low) if snapshot.week_52_low is not None else _NAN,
         )
 
     # ------------------------------------------------------------------
-    def _empty_result(self, ticker: str, snapshot: dict) -> FundamentalsResult:
+    def _empty_result(self, ticker: str, snapshot: MarketSnapshot) -> FundamentalsResult:
         return FundamentalsResult(
             ticker=ticker.upper(),
             per_year=pd.DataFrame(),
@@ -355,8 +355,8 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
             avg_debt_to_equity=_NAN, avg_debt_to_assets=_NAN,
             avg_fcf_yield=_NAN, avg_dividend_yield=_NAN,
             avg_revenue_growth=_NAN, avg_earnings_growth=_NAN,
-            current_price=float(snapshot.get("current_price") or _NAN),
+            current_price=float(snapshot.current_price or _NAN),
             market_cap=_NAN,
-            shares_outstanding=float(snapshot.get("shares_outstanding") or 0),
-            avg_volume=float(snapshot.get("avg_volume") or 0),
+            shares_outstanding=float(snapshot.shares_outstanding or 0),
+            avg_volume=float(snapshot.avg_volume or 0),
         )

@@ -36,7 +36,6 @@ from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.valuation import Valuation
 from src.api.dependencies import get_data_source
 from src.api.helpers import nan_to_none
-from src.data.routing_data_source import get_data_source_name
 from src.api.schemas.valuation import (
     ValuationPerYearRow,
     ValuationResponse,
@@ -111,7 +110,7 @@ def valuation(
     if summarize:
         return ValuationResponse(
             ticker=result.ticker,
-            data_source=get_data_source_name(ticker),
+            data_source=data_source.get_data_source_name(ticker),
             summary=summary,
         )
 
@@ -147,7 +146,7 @@ def valuation(
 
     return ValuationResponse(
         ticker=result.ticker,
-        data_source=get_data_source_name(ticker),
+        data_source=data_source.get_data_source_name(ticker),
         valuation_snapshot=snap,
         summary=summary,
         per_year=per_year_list,

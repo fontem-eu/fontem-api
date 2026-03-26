@@ -8,7 +8,7 @@ enabling full unit-testability with zero network traffic.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -36,6 +36,31 @@ class GMRSettings:  # pylint: disable=too-many-instance-attributes
     min_volume: float = 1_000_000  # average daily trading volume
     min_price: float = 0.40        # current share price lower bound
     max_price: float = 2.50        # current share price upper bound
+
+
+@dataclass(eq=False)
+class MarketSnapshot:  # pylint: disable=too-many-instance-attributes
+    """
+    Typed market snapshot returned by ``get_market_snapshot()``.
+
+    ``eq=False`` avoids pd.Series equality issues in dataclass comparison.
+    All fields default to ``None`` / empty so callers can work with partial
+    data (e.g. ESEF sources that have no live price feed).
+    """
+    current_price: float | None = None
+    avg_volume: float | None = None
+    shares_outstanding: float | None = None
+    # Dividend — flattened from the historic {"date": …, "amount": …} dict
+    last_dividend_date: str | None = None
+    last_dividend_amount: float | None = None
+    # Time-series / nested fields
+    splits: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    latest_quarter: dict = field(default_factory=dict)
+    # Optional extra market data
+    beta: float | None = None
+    week_52_high: float | None = None
+    week_52_low: float | None = None
+    market_cap: float | None = None
 
 
 class FinancialDataSource(ABC):
@@ -73,15 +98,23 @@ class FinancialDataSource(ABC):
         """Daily OHLCV with tz-naive DatetimeIndex (Open, High, Low, Close, Volume)."""
 
     @abstractmethod
-    def get_market_snapshot(self, ticker: str) -> dict:
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
+        """Return a typed MarketSnapshot for the given ticker."""
+
+    @abstractmethod
+    def get_available_tickers(self) -> list[dict]:
+        """Return all available tickers with metadata for discovery."""
+
+    @abstractmethod
+    def search_tickers(self, query: str, limit: int = 10) -> list[dict]:
+        """Search tickers by name, symbol, or keywords (case-insensitive)."""
+
+    @abstractmethod
+    def get_data_source_name(self, ticker: str) -> str:
         """
-        Return a dict with:
-            current_price  (float)
-            avg_volume     (float)
-            shares_outstanding (float | None)
-            last_dividend  (dict: {"date": str, "amount": float})
-            splits         (pd.Series)
-            latest_quarter (dict)
+        Return the canonical source name for this ticker.
+        Concrete classes return a fixed string (e.g. ``'edgar'``, ``'esef'``).
+        RoutingDataSource delegates to whichever sub-source owns the ticker.
         """
 
 

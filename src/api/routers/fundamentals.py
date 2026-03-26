@@ -31,7 +31,6 @@ from src.analysis.fundamentals import Fundamentals
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.api.dependencies import get_data_source
 from src.api.helpers import nan_to_none
-from src.data.routing_data_source import get_data_source_name
 from src.api.schemas.fundamentals import (
     FundamentalsMarketSnapshot,
     FundamentalsPerYearRow,
@@ -118,7 +117,7 @@ def fundamentals(
     if summarize:
         return FundamentalsResponse(
             ticker=result.ticker,
-            data_source=get_data_source_name(ticker),
+            data_source=data_source.get_data_source_name(ticker),
             ratios_summary=summary,
         )
 
@@ -183,7 +182,7 @@ def fundamentals(
 
     return FundamentalsResponse(
         ticker=result.ticker,
-        data_source=get_data_source_name(ticker),
+        data_source=data_source.get_data_source_name(ticker),
         market_snapshot=snapshot,
         ratios_summary=summary,
         per_year=per_year_list,

@@ -16,14 +16,14 @@ Scenarios covered
 • Ticker uppercasing — lowercase ticker in URL normalised in response
 """
 from __future__ import annotations
-# pylint: disable=missing-function-docstring,redefined-outer-name,unnecessary-lambda
+# pylint: disable=missing-function-docstring,redefined-outer-name,unnecessary-lambda,multiple-statements,unused-argument
 
 import pytest
 from starlette.testclient import TestClient
 
 import pandas as pd
 
-from src.analysis.gmr_data_source import GMRDataSource
+from src.analysis.gmr_data_source import GMRDataSource, MarketSnapshot
 from src.api.app import app
 from src.api.dependencies import get_data_source
 
@@ -70,12 +70,16 @@ class _GoodMock(GMRDataSource):
         return pd.DataFrame()
 
     def get_market_snapshot(self, ticker):
-        return {
-            "current_price": 13.50,
-            "avg_volume":    2_500_000,
-            "last_dividend": {"date": "2024-11-15", "amount": 0.13},
-            "splits":        pd.Series(dtype=float),
-        }
+        return MarketSnapshot(
+            current_price=13.50,
+            avg_volume=2_500_000,
+            last_dividend_date="2024-11-15",
+            last_dividend_amount=0.13,
+        )
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 class _NotFoundMock(GMRDataSource):
@@ -93,7 +97,11 @@ class _NotFoundMock(GMRDataSource):
         return pd.DataFrame()
 
     def get_market_snapshot(self, ticker):
-        return {}
+        return MarketSnapshot()
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 class _EmptyMock(GMRDataSource):
@@ -114,7 +122,11 @@ class _EmptyMock(GMRDataSource):
         return pd.DataFrame()
 
     def get_market_snapshot(self, ticker):
-        return {"current_price": 5.0, "avg_volume": 1e6}
+        return MarketSnapshot(current_price=5.0, avg_volume=1e6)
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 # ---------------------------------------------------------------------------

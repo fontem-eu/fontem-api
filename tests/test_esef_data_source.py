@@ -194,9 +194,9 @@ def test_price_history_empty_df(ds: EsefDataSource):
 
 def test_market_snapshot_stub(ds: EsefDataSource):
     snap = ds.get_market_snapshot("ASML.AS")
-    assert snap["current_price"] is None
-    assert snap["avg_volume"] is None
-    assert isinstance(snap["splits"], pd.Series)
+    assert snap.current_price is None
+    assert snap.avg_volume is None
+    assert isinstance(snap.splits, pd.Series)
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ import pandas as pd
 
 from starlette.testclient import TestClient
 
-from src.analysis.gmr_data_source import FinancialDataSource
+from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 from src.api.app import app
 from src.api.dependencies import get_data_source
 
@@ -74,13 +74,14 @@ class _GoodMock(FinancialDataSource):
         return pd.DataFrame()
 
     def get_market_snapshot(self, ticker):
-        return {
-            "current_price":      182.5,
-            "avg_volume":         55_123_456.0,
-            "shares_outstanding": 15.4e9,
-            "last_dividend":      {"date": "2024-02-09", "amount": 0.24},
-            "splits":             _series({2020: 4.0, 2014: 7.0}),
-            "latest_quarter": {
+        return MarketSnapshot(
+            current_price=182.5,
+            avg_volume=55_123_456.0,
+            shares_outstanding=15.4e9,
+            last_dividend_date="2024-02-09",
+            last_dividend_amount=0.24,
+            splits=_series({2020: 4.0, 2014: 7.0}),
+            latest_quarter={
                 "as_of":               "2024-09-28",
                 "current_assets":      137e9,
                 "inventory":           7.3e9,
@@ -91,7 +92,11 @@ class _GoodMock(FinancialDataSource):
                 "equity":              56e9,
                 "shares_outstanding":  15.4e9,
             },
-        }
+        )
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 class _NotFoundMock(FinancialDataSource):
@@ -103,6 +108,10 @@ class _NotFoundMock(FinancialDataSource):
     def get_price_history(self, t, p="1y"):   return pd.DataFrame()
     def get_market_snapshot(self, t):
         raise ValueError(f"Unknown ticker '{t}'")
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 # ---------------------------------------------------------------------------

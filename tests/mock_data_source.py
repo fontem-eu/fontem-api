@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.analysis.gmr_data_source import FinancialDataSource
+from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 
 # ---------------------------------------------------------------------------
 # Canonical test data (3 fiscal years: 2023, 2022, 2021)
@@ -49,17 +49,16 @@ _ANNUAL_PRICES = pd.Series({2023: 20.0, 2022: 18.0, 2021: 15.0})
 
 _ANNUAL_DIVIDENDS = pd.Series({2023: 0.40, 2022: 0.35, 2021: 0.30})
 
-_SNAPSHOT: dict = {
-    "current_price":      22.0,
-    "avg_volume":         500_000.0,
-    "shares_outstanding": 10_000.0,
-    "last_dividend":      {"date": "2023-12-15", "amount": 0.10},
-    "splits":             pd.Series(dtype=float),
-    "latest_quarter":     {},
-    "beta":               1.10,
-    "week_52_high":       25.0,
-    "week_52_low":        16.0,
-}
+_SNAPSHOT = MarketSnapshot(
+    current_price=22.0,
+    avg_volume=500_000.0,
+    shares_outstanding=10_000.0,
+    last_dividend_date="2023-12-15",
+    last_dividend_amount=0.10,
+    beta=1.10,
+    week_52_high=25.0,
+    week_52_low=16.0,
+)
 
 
 class MockDataSource(FinancialDataSource):
@@ -77,8 +76,17 @@ class MockDataSource(FinancialDataSource):
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         return pd.DataFrame()
 
-    def get_market_snapshot(self, ticker: str) -> dict:
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
         return _SNAPSHOT
+
+    def get_available_tickers(self) -> list[dict]:
+        return [{"symbol": "TEST", "name": "Test Corp"}]
+
+    def search_tickers(self, query: str, limit: int = 10) -> list[dict]:
+        return [{"symbol": "TEST", "name": "Test Corp"}] if "test" in query.lower() else []
+
+    def get_data_source_name(self, ticker: str) -> str:  # pylint: disable=unused-argument
+        return "edgar"
 
 
 class EmptyDataSource(FinancialDataSource):
@@ -96,8 +104,17 @@ class EmptyDataSource(FinancialDataSource):
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         return pd.DataFrame()
 
-    def get_market_snapshot(self, ticker: str) -> dict:
-        return {"current_price": float("nan"), "shares_outstanding": None}
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
+        return MarketSnapshot()
+
+    def get_available_tickers(self) -> list[dict]:
+        return []
+
+    def search_tickers(self, query: str, limit: int = 10) -> list[dict]:
+        return []
+
+    def get_data_source_name(self, ticker: str) -> str:  # pylint: disable=unused-argument
+        return "edgar"
 
 
 class ErrorDataSource(FinancialDataSource):
@@ -115,5 +132,14 @@ class ErrorDataSource(FinancialDataSource):
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         return pd.DataFrame()
 
-    def get_market_snapshot(self, ticker: str) -> dict:
-        return {}
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
+        return MarketSnapshot()
+
+    def get_available_tickers(self) -> list[dict]:
+        return []
+
+    def search_tickers(self, query: str, limit: int = 10) -> list[dict]:
+        return []
+
+    def get_data_source_name(self, ticker: str) -> str:  # pylint: disable=unused-argument
+        return "edgar"

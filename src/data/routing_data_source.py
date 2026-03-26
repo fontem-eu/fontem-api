@@ -2,24 +2,27 @@
 Routing Data Source
 ===================
 Dispatches requests to either the EU (ESEF) or NA (EDGAR) data source based
-on ticker format.
+on registry membership, not ticker format heuristics.
 
-European tickers follow the exchange-suffix convention: ``SYMBOL.EXCHANGE``
-(e.g. ``ASML.AS``, ``SAP.DE``).  Everything else is routed to the North
-American source.
+At construction time the full list of EU tickers is loaded from the ESEF
+registry and stored as a frozenset.  Every routing decision is an O(1) set
+lookup: if the ticker is in the EU registry it goes to the EU source,
+otherwise it goes to the NA source.
+
+This replaces the previous regex approach which
+misrouted legitimate NA tickers like ``BRK.A`` or ``BRK.B`` to the EU path.
 
 Ticker search merges results from both sources, EU-first.
 """
 from __future__ import annotations
 
-import re
+import logging
 
 import pandas as pd
 
-from ..analysis.gmr_data_source import FinancialDataSource
+from ..analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 
-# Pattern: one or more uppercase letters/digits, a dot, then 1–3 uppercase letters.
-_EU_PATTERN = re.compile(r"^[A-Z0-9]+\.[A-Z]{1,3}$")
+logger = logging.getLogger(__name__)
 
 
 class RoutingDataSource(FinancialDataSource):
@@ -42,6 +45,19 @@ class RoutingDataSource(FinancialDataSource):
         self._na = na_source
         self._eu = eu_source
 
+        # Build an O(1) lookup set from the EU registry at startup.
+        # EU ticker dicts carry a "ticker" key with the full symbol
+        # (e.g. "ASML.AS"); fall back to "symbol" for stubs / tests.
+        self._eu_tickers: frozenset[str] = frozenset(
+            t.get("ticker") or t.get("symbol", "")
+            for t in eu_source.get_available_tickers()
+            if t.get("ticker") or t.get("symbol")
+        )
+        logger.info(
+            "RoutingDataSource ready: %d EU tickers indexed",
+            len(self._eu_tickers),
+        )
+
     # ------------------------------------------------------------------
     # FinancialDataSource interface
     # ------------------------------------------------------------------
@@ -58,8 +74,11 @@ class RoutingDataSource(FinancialDataSource):
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         return self._route(ticker).get_price_history(ticker, period)
 
-    def get_market_snapshot(self, ticker: str) -> dict:
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
         return self._route(ticker).get_market_snapshot(ticker)
+
+    def get_data_source_name(self, ticker: str) -> str:
+        return self._route(ticker).get_data_source_name(ticker)
 
     # ------------------------------------------------------------------
     # Ticker discovery — EU results first, then NA
@@ -79,10 +98,5 @@ class RoutingDataSource(FinancialDataSource):
     # ------------------------------------------------------------------
 
     def _route(self, ticker: str) -> FinancialDataSource:
-        """Return the EU source for exchange-suffix tickers, NA source otherwise."""
-        return self._eu if _EU_PATTERN.match(ticker) else self._na
-
-
-def get_data_source_name(ticker: str) -> str:
-    """Return ``'esef'`` for EU-pattern tickers, ``'edgar'`` otherwise."""
-    return "esef" if _EU_PATTERN.match(ticker) else "edgar"
+        """Return the EU source if ticker is in the EU registry, NA otherwise."""
+        return self._eu if ticker in self._eu_tickers else self._na

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ...analysis.gmr_data_source import FinancialDataSource
+from ...analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -120,20 +120,16 @@ class EsefDataSource(FinancialDataSource):
         """Price history not available for ESEF entities — returns empty DataFrame."""
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
-    def get_market_snapshot(self, ticker: str) -> dict:
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
         """
         Market snapshot stub for ESEF entities.
-        All price-dependent fields are ``None``; non-price fields are populated
-        from the entity registry where available.
+        All price-dependent fields are ``None`` — ESEF filings carry no live
+        market data.
         """
-        return {
-            "current_price": None,
-            "avg_volume": None,
-            "shares_outstanding": None,
-            "last_dividend": {"date": None, "amount": None},
-            "splits": pd.Series(dtype=float),
-            "latest_quarter": {},
-        }
+        return MarketSnapshot()
+
+    def get_data_source_name(self, ticker: str) -> str:  # pylint: disable=unused-argument
+        return "esef"
 
     # ------------------------------------------------------------------
     # Ticker discovery

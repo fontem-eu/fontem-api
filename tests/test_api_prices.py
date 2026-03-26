@@ -68,6 +68,7 @@ def _mock_data_source():
     mock_ds = MagicMock()
     mock_ds.get_available_tickers.return_value = _FAKE_TICKERS
     mock_ds.get_price_history.return_value = _AAPL_BARS.copy()
+    mock_ds.get_data_source_name.return_value = "edgar"
     app.dependency_overrides[get_data_source] = lambda: mock_ds
     yield
     app.dependency_overrides.clear()

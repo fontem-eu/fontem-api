@@ -18,7 +18,7 @@ import pytest
 import pandas as pd
 from starlette.testclient import TestClient
 
-from src.analysis.gmr_data_source import FinancialDataSource
+from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 from src.api.app import app
 from src.api.dependencies import get_data_source
 
@@ -68,15 +68,13 @@ class EUMockDataSource(FinancialDataSource):
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
-    def get_market_snapshot(self, ticker: str) -> dict:
-        return {
-            "current_price":      None,
-            "avg_volume":         None,
-            "shares_outstanding": None,
-            "last_dividend":      {"date": None, "amount": None},
-            "splits":             pd.Series(dtype=float),
-            "latest_quarter":     {},
-        }
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
+        return MarketSnapshot()
+
+    def get_data_source_name(self, ticker: str) -> str:
+        if ticker in {"ASML.AS", "SAP.DE"}:
+            return "esef"
+        return "edgar"
 
     def get_available_tickers(self) -> list[dict]:
         return [

@@ -21,7 +21,7 @@ import math
 import pytest
 import pandas as pd
 
-from src.analysis.gmr_data_source import GMRDataSource, GMRSettings
+from src.analysis.gmr_data_source import GMRDataSource, GMRSettings, MarketSnapshot
 from src.analysis.gmr_long import GMRLong, GMRLongResult
 
 
@@ -41,6 +41,9 @@ class MockDataSource(GMRDataSource):
     def get_annual_dividends(self, ticker):            return self._dividends
     def get_price_history(self, ticker, period="1y"):  return pd.DataFrame()
     def get_market_snapshot(self, ticker):             return self._snapshot
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 # ---------------------------------------------------------------------------
@@ -97,13 +100,13 @@ def _failing_fundamentals() -> dict:
     }
 
 
-def _snapshot(price: float = 13.50, volume: float = 2_500_000) -> dict:
-    return {
-        "current_price": price,
-        "avg_volume": volume,
-        "last_dividend": {"date": "2024-11-15", "amount": 0.13},
-        "splits": pd.Series(dtype=float),
-    }
+def _snapshot(price: float = 13.50, volume: float = 2_500_000) -> MarketSnapshot:
+    return MarketSnapshot(
+        current_price=price,
+        avg_volume=volume,
+        last_dividend_date="2024-11-15",
+        last_dividend_amount=0.13,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +316,7 @@ def test_empty_fundamentals_returns_failed_result():
         },
         prices=pd.Series(dtype=float),
         dividends=pd.Series(dtype=float),
-        snapshot={"current_price": 10.0, "avg_volume": 1e6},
+        snapshot=MarketSnapshot(current_price=10.0, avg_volume=1e6),
     )
     result = GMRLong(ds).compute("EMPTY", years=5)
     assert result.passes_all is False

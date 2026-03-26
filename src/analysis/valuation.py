@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .gmr_data_source import FinancialDataSource
+from .gmr_data_source import FinancialDataSource, MarketSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -228,8 +228,8 @@ class Valuation:  # pylint: disable=too-few-public-methods
             return float(vals.mean()) if not vals.empty else nan
 
         # ── Enterprise Value (current market cap + most-recent net debt) ─
-        current_price = float(snapshot.get("current_price") or nan)
-        snap_shares   = float(snapshot.get("shares_outstanding") or 0)
+        current_price = float(snapshot.current_price or nan)
+        snap_shares   = float(snapshot.shares_outstanding or 0)
         market_cap    = (current_price * snap_shares
                          if not np.isnan(current_price) and snap_shares > 0
                          else nan)
@@ -271,14 +271,17 @@ class Valuation:  # pylint: disable=too-few-public-methods
             ev_ebit=_ev_multiple(latest_ebit),
             current_price=current_price,
             market_cap=market_cap,
-            last_dividend=snapshot.get("last_dividend", {}),
+            last_dividend={
+                "date": snapshot.last_dividend_date,
+                "amount": snapshot.last_dividend_amount,
+            },
         )
 
     # ------------------------------------------------------------------
-    def _empty_result(self, ticker: str, snapshot: dict) -> ValuationResult:
+    def _empty_result(self, ticker: str, snapshot: MarketSnapshot) -> ValuationResult:
         nan = float("nan")
-        current_price = float(snapshot.get("current_price") or nan)
-        snap_shares   = float(snapshot.get("shares_outstanding") or 0)
+        current_price = float(snapshot.current_price or nan)
+        snap_shares   = float(snapshot.shares_outstanding or 0)
         market_cap    = (current_price * snap_shares
                          if not np.isnan(current_price) and snap_shares > 0
                          else nan)

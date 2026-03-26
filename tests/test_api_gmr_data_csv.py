@@ -27,7 +27,7 @@ import pandas as pd
 
 from starlette.testclient import TestClient
 
-from src.analysis.gmr_data_source import FinancialDataSource
+from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 from src.api.app import app
 from src.api.dependencies import get_data_source
 
@@ -74,13 +74,14 @@ class _CsvMock(FinancialDataSource):
         return pd.DataFrame()
 
     def get_market_snapshot(self, ticker):
-        return {
-            "current_price":      30.0,
-            "avg_volume":         500000.0,
-            "shares_outstanding": 98.0,
-            "last_dividend":      {"date": "3/15/2024", "amount": 0.7},
-            "splits":             _series({2014: 2.0}),
-            "latest_quarter": {
+        return MarketSnapshot(
+            current_price=30.0,
+            avg_volume=500000.0,
+            shares_outstanding=98.0,
+            last_dividend_date="3/15/2024",
+            last_dividend_amount=0.7,
+            splits=_series({2014: 2.0}),
+            latest_quarter={
                 "as_of":               "2024-09-30",
                 "current_assets":      620,
                 "inventory":           155,
@@ -91,7 +92,11 @@ class _CsvMock(FinancialDataSource):
                 "equity":              2100,
                 "shares_outstanding":  98.0,
             },
-        }
+        )
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 class _NotFoundMock(FinancialDataSource):
@@ -103,6 +108,10 @@ class _NotFoundMock(FinancialDataSource):
     def get_price_history(self, t, p="1y"):    return pd.DataFrame()
     def get_market_snapshot(self, t):
         raise ValueError(f"Unknown ticker '{t}'")
+
+    def get_available_tickers(self): return []
+    def search_tickers(self, query, limit=10): return []  # pylint: disable=unused-argument
+    def get_data_source_name(self, ticker): return "edgar"
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +258,15 @@ def test_split_ratio_absent_renders_no(client):
     class _NoSplitMock(_CsvMock):
         def get_market_snapshot(self, ticker):
             snap = super().get_market_snapshot(ticker)
-            snap["splits"] = pd.Series(dtype=float)
-            return snap
+            return MarketSnapshot(
+                current_price=snap.current_price,
+                avg_volume=snap.avg_volume,
+                shares_outstanding=snap.shares_outstanding,
+                last_dividend_date=snap.last_dividend_date,
+                last_dividend_amount=snap.last_dividend_amount,
+                splits=pd.Series(dtype=float),
+                latest_quarter=snap.latest_quarter,
+            )
 
     app.dependency_overrides[get_data_source] = lambda: _NoSplitMock()
     with TestClient(app) as c:

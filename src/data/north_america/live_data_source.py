@@ -14,7 +14,7 @@ import pandas as pd
 
 from .local_edgar_fetcher import LocalEdgarFetcher
 from .local_price_fetcher import LocalPriceFetcher
-from ...analysis.gmr_data_source import FinancialDataSource
+from ...analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,25 @@ class LiveDataSource(FinancialDataSource):
     def get_price_history(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         return self._price.get_history(ticker, period=period)
 
-    def get_market_snapshot(self, ticker: str) -> dict:
-        return self._price.get_snapshot(ticker)
+    def get_market_snapshot(self, ticker: str) -> MarketSnapshot:
+        raw = self._price.get_snapshot(ticker)
+        last_div = raw.get("last_dividend") or {}
+        return MarketSnapshot(
+            current_price=raw.get("current_price"),
+            avg_volume=raw.get("avg_volume"),
+            shares_outstanding=raw.get("shares_outstanding"),
+            last_dividend_date=last_div.get("date"),
+            last_dividend_amount=last_div.get("amount"),
+            splits=raw.get("splits", pd.Series(dtype=float)),
+            latest_quarter=raw.get("latest_quarter") or {},
+            beta=raw.get("beta"),
+            week_52_high=raw.get("week_52_high"),
+            week_52_low=raw.get("week_52_low"),
+            market_cap=raw.get("market_cap"),
+        )
+
+    def get_data_source_name(self, ticker: str) -> str:  # pylint: disable=unused-argument
+        return "edgar"
 
     # ------------------------------------------------------------------
     # Ticker discovery
