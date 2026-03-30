@@ -63,6 +63,23 @@ spec:
             - name: GMR_ESEF_DATA_DIR
               value: "/esef-data/esef"
 
+            # Neo4j graph database connection (graph-backed data source).
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_URI
+            - name: NEO4J_USER
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_USER
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
+
           volumeMounts:
             - name: edgar-data
               mountPath: /edgar-data

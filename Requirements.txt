@@ -17,5 +17,8 @@ fastapi
 uvicorn[standard]
 httpx
 
+# Graph database
+neo4j
+
 # Observability
 prometheus-fastapi-instrumentator
