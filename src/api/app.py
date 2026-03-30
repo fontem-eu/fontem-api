@@ -23,6 +23,7 @@ from src.api.routers.health import router as health_router
 from src.api.routers.prices import router as prices_router
 from src.api.routers.tickers import router as tickers_router
 from src.api.routers.valuation import router as valuation_router
+from src.api.routers.contracts import router as contracts_router
 
 
 @asynccontextmanager
@@ -80,6 +81,7 @@ app.include_router(fundamentals_router)
 app.include_router(valuation_router)
 app.include_router(prices_router)
 app.include_router(health_router)
+app.include_router(contracts_router)
 
 # Expose Prometheus metrics at /metrics (scraped by ServiceMonitor)
 Instrumentator().instrument(app).expose(app)

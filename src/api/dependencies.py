@@ -44,12 +44,21 @@ def _graph_source() -> FinancialDataSource:
 
 def get_data_source() -> FinancialDataSource:
     """
-    Dependency injected into every endpoint.
-    Override in tests::
-
-        from src.api.dependencies import get_data_source
-        app.dependency_overrides[get_data_source] = lambda: MyMock()
+    Dependency injected into financial endpoints.
+    Override in tests via app.dependency_overrides[get_data_source].
     """
     if os.environ.get("GMR_DATA_SOURCE") == "graph":
         return _graph_source()
     return _routing_source()
+
+
+@lru_cache(maxsize=1)
+def _contract_source():
+    from src.data.graph.graph_contract_source import GraphContractSource  # pylint: disable=import-outside-toplevel
+    from src.data.graph.neo4j_client import Neo4jClient  # pylint: disable=import-outside-toplevel
+    return GraphContractSource(neo4j_client=Neo4jClient())
+
+
+def get_contract_source():
+    """Dependency injected into contract endpoints."""
+    return _contract_source()

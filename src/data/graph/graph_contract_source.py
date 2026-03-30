@@ -1,0 +1,208 @@
+"""
+Graph Contract Source
+======================
+ContractDataSource backed by Neo4j. Queries Contract, Authority,
+and CPV nodes via the graph.
+"""
+from __future__ import annotations
+
+import logging
+
+from ...analysis.contract_data_source import ContractDataSource
+from .neo4j_client import Neo4jClient
+
+logger = logging.getLogger(__name__)
+
+
+class GraphContractSource(ContractDataSource):
+    """Production contract data source backed by Neo4j."""
+
+    def __init__(self, neo4j_client: Neo4jClient) -> None:
+        self._neo4j = neo4j_client
+
+    def get_company_contracts(
+        self, gmr_id: str, years: int = 5, limit: int = 50,
+    ) -> dict:
+        """Return contracts awarded to a company."""
+        with self._neo4j.session() as session:
+            company = session.run(
+                "MATCH (c:Company {gmr_id: $gid}) "
+                "RETURN c.name AS name, c.country AS country",
+                gid=gmr_id,
+            ).single()
+            if not company:
+                return {"gmr_id": gmr_id, "contracts": [], "contract_count": 0}
+
+            rows = session.run(
+                "MATCH (a:Authority)-[:AWARDED]->(ct:Contract)"
+                "-[:AWARDED_TO]->(c:Company {gmr_id: $gid}) "
+                "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
+                "RETURN ct.ted_notice_id AS notice_id, "
+                "  ct.title AS title, ct.value_eur AS value_eur, "
+                "  ct.award_date AS award_date, ct.cpv_main AS cpv, "
+                "  ct.procedure_type AS procedure_type, "
+                "  ct.ted_url AS ted_url, "
+                "  a.name AS authority, a.country AS authority_country, "
+                "  cpv.description AS cpv_description "
+                "ORDER BY ct.award_date DESC LIMIT $limit",
+                gid=gmr_id, limit=limit,
+            ).data()
+
+            total_value = session.run(
+                "MATCH (ct:Contract)-[:AWARDED_TO]->"
+                "(c:Company {gmr_id: $gid}) "
+                "RETURN sum(ct.value_eur) AS total, count(ct) AS cnt",
+                gid=gmr_id,
+            ).single()
+
+        contracts = []
+        for r in rows:
+            cpv_label = r["cpv"] or ""
+            if r.get("cpv_description"):
+                cpv_label = f"{r['cpv']} - {r['cpv_description']}"
+            contracts.append({
+                "ted_notice_id": r["notice_id"],
+                "title": r["title"],
+                "value_eur": r["value_eur"],
+                "award_date": r["award_date"],
+                "cpv": cpv_label,
+                "procedure_type": r["procedure_type"],
+                "ted_url": r["ted_url"],
+                "authority": r["authority"],
+                "authority_country": r["authority_country"],
+            })
+
+        return {
+            "gmr_id": gmr_id,
+            "company_name": company["name"],
+            "country": company["country"],
+            "total_contract_value_eur": total_value["total"] if total_value else 0,
+            "contract_count": total_value["cnt"] if total_value else 0,
+            "contracts": contracts,
+        }
+
+    def get_authority_contracts(
+        self, authority_id: str, years: int = 5, limit: int = 50,
+    ) -> dict:
+        """Return contracts issued by an authority."""
+        with self._neo4j.session() as session:
+            authority = session.run(
+                "MATCH (a:Authority {authority_id: $aid}) "
+                "RETURN a.name AS name, a.country AS country",
+                aid=authority_id,
+            ).single()
+            if not authority:
+                return {"authority_id": authority_id, "contracts": [], "contract_count": 0}
+
+            rows = session.run(
+                "MATCH (a:Authority {authority_id: $aid})"
+                "-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company) "
+                "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
+                "RETURN ct.ted_notice_id AS notice_id, "
+                "  ct.title AS title, ct.value_eur AS value_eur, "
+                "  ct.award_date AS award_date, ct.cpv_main AS cpv, "
+                "  ct.procedure_type AS procedure_type, "
+                "  ct.ted_url AS ted_url, "
+                "  c.name AS contractor, c.country AS contractor_country, "
+                "  c.gmr_id AS contractor_gmr_id, "
+                "  cpv.description AS cpv_description "
+                "ORDER BY ct.award_date DESC LIMIT $limit",
+                aid=authority_id, limit=limit,
+            ).data()
+
+            total = session.run(
+                "MATCH (a:Authority {authority_id: $aid})"
+                "-[:AWARDED]->(ct:Contract) "
+                "RETURN sum(ct.value_eur) AS total, count(ct) AS cnt",
+                aid=authority_id,
+            ).single()
+
+        contracts = []
+        for r in rows:
+            cpv_label = r["cpv"] or ""
+            if r.get("cpv_description"):
+                cpv_label = f"{r['cpv']} - {r['cpv_description']}"
+            contracts.append({
+                "ted_notice_id": r["notice_id"],
+                "title": r["title"],
+                "value_eur": r["value_eur"],
+                "award_date": r["award_date"],
+                "cpv": cpv_label,
+                "procedure_type": r["procedure_type"],
+                "ted_url": r["ted_url"],
+                "contractor": r["contractor"],
+                "contractor_country": r["contractor_country"],
+                "contractor_gmr_id": r["contractor_gmr_id"],
+            })
+
+        return {
+            "authority_id": authority_id,
+            "authority_name": authority["name"],
+            "country": authority["country"],
+            "total_spend_eur": total["total"] if total else 0,
+            "contract_count": total["cnt"] if total else 0,
+            "contracts": contracts,
+        }
+
+    def get_contract_detail(self, notice_id: str) -> dict | None:
+        """Return full detail for a single contract."""
+        with self._neo4j.session() as session:
+            row = session.run(
+                "MATCH (a:Authority)-[:AWARDED]->(ct:Contract "
+                "{ted_notice_id: $nid})-[:AWARDED_TO]->(c:Company) "
+                "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
+                "RETURN ct, a, c, cpv",
+                nid=notice_id,
+            ).single()
+        if not row:
+            return None
+        ct = row["ct"]
+        return {
+            "ted_notice_id": ct["ted_notice_id"],
+            "ted_url": ct.get("ted_url"),
+            "title": ct.get("title"),
+            "description": ct.get("description"),
+            "value_eur": ct.get("value_eur"),
+            "cpv_main": ct.get("cpv_main"),
+            "procedure_type": ct.get("procedure_type"),
+            "award_date": ct.get("award_date"),
+            "authority": {
+                "name": row["a"]["name"],
+                "country": row["a"].get("country"),
+            },
+            "contractor": {
+                "gmr_id": row["c"]["gmr_id"],
+                "name": row["c"]["name"],
+                "country": row["c"].get("country"),
+            },
+        }
+
+    def get_sector_summary(
+        self, country: str | None = None, year: int | None = None,
+    ) -> list[dict]:
+        """Aggregated contract values by CPV division."""
+        where_parts = []
+        params: dict = {}
+        if country:
+            where_parts.append("ct.country = $country")
+            params["country"] = country
+        if year:
+            where_parts.append(
+                "ct.publication_date STARTS WITH $year_prefix"
+            )
+            params["year_prefix"] = str(year)
+
+        where_clause = "WHERE " + " AND ".join(where_parts) if where_parts else ""
+
+        with self._neo4j.session() as session:
+            rows = session.run(
+                f"MATCH (ct:Contract)-[:CATEGORIZED_AS]->(cpv:CPV) "
+                f"{where_clause} "
+                f"RETURN cpv.division AS division, "
+                f"  cpv.description AS description, "
+                f"  sum(ct.value_eur) AS total_value, "
+                f"  count(ct) AS contract_count "
+                f"ORDER BY total_value DESC LIMIT 20",
+                **params,
+            ).data()
+        return rows

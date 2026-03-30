@@ -182,7 +182,8 @@ class GraphDataSource(FinancialDataSource):
         with self._neo4j.session() as session:
             rows = session.run("""
                 MATCH (c:Company)-[:LISTED_AS]->(l:Listing)
-                RETURN l.ticker AS ticker, l.ticker AS symbol,
+                RETURN c.gmr_id AS gmr_id,
+                       l.ticker AS ticker, l.ticker AS symbol,
                        c.name AS name, l.exchange AS exchange,
                        c.country AS country, l.currency AS currency,
                        l.active AS is_active
@@ -212,7 +213,8 @@ class GraphDataSource(FinancialDataSource):
                 MATCH (c:Company)-[:LISTED_AS]->(l:Listing)
                 WHERE toLower(c.name) CONTAINS toLower($q)
                    OR toLower(l.ticker) CONTAINS toLower($q)
-                RETURN l.ticker AS ticker, l.ticker AS symbol,
+                RETURN c.gmr_id AS gmr_id,
+                       l.ticker AS ticker, l.ticker AS symbol,
                        c.name AS name, l.exchange AS exchange,
                        c.country AS country, l.currency AS currency,
                        l.active AS is_active
