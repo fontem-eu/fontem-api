@@ -1,10 +1,8 @@
 """
 FastAPI dependency that provides the application's FinancialDataSource.
 
-Always uses local files:
-  GMR_EDGAR_LOCAL_DATA_DIR  — path to EDGAR bulk data (default: /edgar-data/full)
-  GMR_PRICE_DATA_DIR        — path to EOD price CSVs (default: /edgar-data/prices)
-  GMR_ESEF_DATA_DIR         — path to ESEF summaries (default: /esef-data/esef)
+Set GMR_DATA_SOURCE=graph to use the Neo4j-backed GraphDataSource.
+Any other value (or unset) uses the legacy RoutingDataSource.
 
 In unit tests, override via app.dependency_overrides[get_data_source].
 """
@@ -33,6 +31,17 @@ def _routing_source() -> RoutingDataSource:
     )
 
 
+@lru_cache(maxsize=1)
+def _graph_source() -> FinancialDataSource:
+    from src.data.graph.graph_data_source import GraphDataSource  # pylint: disable=import-outside-toplevel
+    from src.data.graph.neo4j_client import Neo4jClient  # pylint: disable=import-outside-toplevel
+    return GraphDataSource(
+        neo4j_client=Neo4jClient(),
+        price_data_dir=os.environ.get("GMR_PRICE_DATA_DIR", "/edgar-data/prices"),
+        edgar_data_dir=os.environ.get("GMR_EDGAR_LOCAL_DATA_DIR", "/edgar-data/full"),
+    )
+
+
 def get_data_source() -> FinancialDataSource:
     """
     Dependency injected into every endpoint.
@@ -41,4 +50,6 @@ def get_data_source() -> FinancialDataSource:
         from src.api.dependencies import get_data_source
         app.dependency_overrides[get_data_source] = lambda: MyMock()
     """
+    if os.environ.get("GMR_DATA_SOURCE") == "graph":
+        return _graph_source()
     return _routing_source()
