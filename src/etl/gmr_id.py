@@ -22,3 +22,8 @@ def from_national_id(country: str, national_id: str) -> str:
 def from_name(country: str, name: str) -> str:
     """Generate a gmr_id from a normalised legal name (last resort)."""
     return str(uuid.uuid5(GMR_NAMESPACE, f"{country.upper()}:{name.strip().upper()}"))
+
+
+def from_vat(country: str, vat: str) -> str:
+    """Generate a gmr_id from a country + VAT number."""
+    return str(uuid.uuid5(GMR_NAMESPACE, f"{country.upper()}:{vat.strip()}"))
