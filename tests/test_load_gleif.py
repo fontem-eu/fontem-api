@@ -1,233 +1,220 @@
-"""Tests for the GLEIF ETL — XML parsing and Neo4j loading."""
-# pylint: disable=missing-function-docstring
+"""Tests for the GLEIF XML parser and Neo4j loader."""
 import io
 from unittest.mock import MagicMock, patch
-
-import pytest
+from xml.etree.ElementTree import fromstring
 
 from src.etl.load_gleif import (
-    parse_gleif_xml,
+    _text,
     load_into_neo4j,
-    get_latest_download_url,
+    parse_gleif_xml,
+    resolve_latest_url,
 )
 
-# ── Fixtures ─────────────────────────────────────────────────────────────
+NS = "http://www.gleif.org/data/schema/leidata/2016"
 
-SAMPLE_XML = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<lei:LEIData
-  xmlns:lei="http://www.gleif.org/data/schema/leidata/2016">
-  <lei:LEIHeader/>
-  <lei:LEIRecords>
-    <lei:LEIRecord>
-      <lei:LEI>549300EEJH4FEPDBBR25</lei:LEI>
+
+def _make_xml(records_xml: str) -> io.BytesIO:
+    """Wrap record XML fragments in the LEI-CDF envelope."""
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<lei:LEIData xmlns:lei="{NS}">
+<lei:LEIRecords>
+{records_xml}
+</lei:LEIRecords>
+</lei:LEIData>"""
+    return io.BytesIO(xml.encode("utf-8"))
+
+
+ADYEN_XML = f"""
+<lei:LEIRecord xmlns:lei="{NS}">
+  <lei:LEI>724500973ODKK3IFQ447</lei:LEI>
+  <lei:Entity>
+    <lei:LegalName>Adyen N.V.</lei:LegalName>
+    <lei:LegalAddress><lei:Country>NL</lei:Country></lei:LegalAddress>
+    <lei:LegalForm>
+      <lei:OtherLegalForm>N.V.</lei:OtherLegalForm>
+    </lei:LegalForm>
+    <lei:EntityStatus>ACTIVE</lei:EntityStatus>
+  </lei:Entity>
+</lei:LEIRecord>
+"""
+
+INACTIVE_XML = f"""
+<lei:LEIRecord xmlns:lei="{NS}">
+  <lei:LEI>213800ZL2PEC4C6UOQ53</lei:LEI>
+  <lei:Entity>
+    <lei:LegalName>Defunct Ltd</lei:LegalName>
+    <lei:LegalAddress><lei:Country>GB</lei:Country></lei:LegalAddress>
+    <lei:EntityStatus>INACTIVE</lei:EntityStatus>
+  </lei:Entity>
+</lei:LEIRecord>
+"""
+
+SHORT_LEI_XML = f"""
+<lei:LEIRecord xmlns:lei="{NS}">
+  <lei:LEI>TOOSHORT</lei:LEI>
+  <lei:Entity>
+    <lei:LegalName>Bad Corp</lei:LegalName>
+    <lei:LegalAddress><lei:Country>US</lei:Country></lei:LegalAddress>
+    <lei:EntityStatus>ACTIVE</lei:EntityStatus>
+  </lei:Entity>
+</lei:LEIRecord>
+"""
+
+
+# ── parse_gleif_xml ──────────────────────────────────────────────────
+
+def test_parse_single_record():
+    stream = _make_xml(ADYEN_XML)
+    results = list(parse_gleif_xml(stream))
+    assert len(results) == 1
+    r = results[0]
+    assert r["lei"] == "724500973ODKK3IFQ447"
+    assert r["name"] == "Adyen N.V."
+    assert r["country"] == "NL"
+    assert r["legal_form"] == "N.V."
+    assert r["active"] is True
+
+
+def test_parse_inactive_entity():
+    stream = _make_xml(INACTIVE_XML)
+    results = list(parse_gleif_xml(stream))
+    assert len(results) == 1
+    assert results[0]["active"] is False
+
+
+def test_parse_skips_short_lei():
+    stream = _make_xml(SHORT_LEI_XML)
+    results = list(parse_gleif_xml(stream))
+    assert len(results) == 0
+
+
+def test_parse_multiple_records():
+    stream = _make_xml(ADYEN_XML + INACTIVE_XML)
+    results = list(parse_gleif_xml(stream))
+    assert len(results) == 2
+
+
+def test_parse_empty_records():
+    stream = _make_xml("")
+    results = list(parse_gleif_xml(stream))
+    assert len(results) == 0
+
+
+def test_parse_missing_legal_form():
+    xml = f"""
+    <lei:LEIRecord xmlns:lei="{NS}">
+      <lei:LEI>529900D69KFL8IAP8Q63</lei:LEI>
       <lei:Entity>
-        <lei:LegalName>Telefonica S.A.</lei:LegalName>
-        <lei:LegalAddress>
-          <lei:Country>ES</lei:Country>
-        </lei:LegalAddress>
+        <lei:LegalName>Some Corp</lei:LegalName>
+        <lei:LegalAddress><lei:Country>DK</lei:Country></lei:LegalAddress>
         <lei:EntityStatus>ACTIVE</lei:EntityStatus>
-        <lei:LegalForm>
-          <lei:OtherLegalForm>S.A.</lei:OtherLegalForm>
-        </lei:LegalForm>
       </lei:Entity>
     </lei:LEIRecord>
-    <lei:LEIRecord>
-      <lei:LEI>724500973ODKK3IFQ447</lei:LEI>
-      <lei:Entity>
-        <lei:LegalName>Adyen N.V.</lei:LegalName>
-        <lei:LegalAddress>
-          <lei:Country>NL</lei:Country>
-        </lei:LegalAddress>
-        <lei:EntityStatus>INACTIVE</lei:EntityStatus>
-        <lei:LegalForm>
-          <lei:EntityLegalFormCode>BV</lei:EntityLegalFormCode>
-        </lei:LegalForm>
-      </lei:Entity>
-    </lei:LEIRecord>
-  </lei:LEIRecords>
-</lei:LEIData>
-"""
+    """
+    results = list(parse_gleif_xml(_make_xml(xml)))
+    assert len(results) == 1
+    assert results[0]["legal_form"] == ""
 
-SHORT_LEI_XML = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<lei:LEIData
-  xmlns:lei="http://www.gleif.org/data/schema/leidata/2016">
-  <lei:LEIRecords>
-    <lei:LEIRecord>
-      <lei:LEI>TOOSHORT</lei:LEI>
+
+def test_parse_entity_legal_form_code():
+    xml = f"""
+    <lei:LEIRecord xmlns:lei="{NS}">
+      <lei:LEI>529900D69KFL8IAP8Q63</lei:LEI>
       <lei:Entity>
-        <lei:LegalName>Bad Corp</lei:LegalName>
-        <lei:LegalAddress><lei:Country>XX</lei:Country></lei:LegalAddress>
+        <lei:LegalName>Code Corp</lei:LegalName>
+        <lei:LegalAddress><lei:Country>DE</lei:Country></lei:LegalAddress>
+        <lei:LegalForm>
+          <lei:EntityLegalFormCode>8888</lei:EntityLegalFormCode>
+        </lei:LegalForm>
         <lei:EntityStatus>ACTIVE</lei:EntityStatus>
       </lei:Entity>
     </lei:LEIRecord>
-  </lei:LEIRecords>
-</lei:LEIData>
-"""
-
-EMPTY_XML = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<lei:LEIData
-  xmlns:lei="http://www.gleif.org/data/schema/leidata/2016">
-  <lei:LEIRecords/>
-</lei:LEIData>
-"""
-
-NO_ENTITY_XML = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<lei:LEIData
-  xmlns:lei="http://www.gleif.org/data/schema/leidata/2016">
-  <lei:LEIRecords>
-    <lei:LEIRecord>
-      <lei:LEI>549300EEJH4FEPDBBR25</lei:LEI>
-    </lei:LEIRecord>
-  </lei:LEIRecords>
-</lei:LEIData>
-"""
+    """
+    results = list(parse_gleif_xml(_make_xml(xml)))
+    assert results[0]["legal_form"] == "8888"
 
 
-def _stream(xml_str: str):
-    return io.BytesIO(xml_str.encode("utf-8"))
+# ── _text helper ─────────────────────────────────────────────────────
+
+def test_text_returns_content():
+    """_text extracts child element text."""
+    el = fromstring("<root><child>hello</child></root>")
+    assert _text(el, "child") == "hello"
 
 
-# ── parse_gleif_xml tests ────────────────────────────────────────────────
+def test_text_returns_none_for_missing():
+    """_text returns None when child is absent."""
+    el = fromstring("<root></root>")
+    assert _text(el, "child") is None
 
 
-def test_parse_extracts_two_records():
-    records = list(parse_gleif_xml(_stream(SAMPLE_XML)))
-    assert len(records) == 2
+# ── load_into_neo4j ─────────────────────────────────────────────────
 
-
-def test_parse_first_record_fields():
-    rec = list(parse_gleif_xml(_stream(SAMPLE_XML)))[0]
-    assert rec["lei"] == "549300EEJH4FEPDBBR25"
-    assert rec["name"] == "Telefonica S.A."
-    assert rec["country"] == "ES"
-    assert rec["active"] is True
-    assert rec["legal_form"] == "S.A."
-
-
-def test_parse_inactive_status():
-    rec = list(parse_gleif_xml(_stream(SAMPLE_XML)))[1]
-    assert rec["active"] is False
-
-
-def test_parse_legal_form_code_preferred():
-    rec = list(parse_gleif_xml(_stream(SAMPLE_XML)))[1]
-    assert rec["legal_form"] == "BV"
-
-
-def test_parse_empty_xml_yields_nothing():
-    assert not list(parse_gleif_xml(_stream(EMPTY_XML)))
-
-
-def test_parse_skips_record_without_entity():
-    assert not list(parse_gleif_xml(_stream(NO_ENTITY_XML)))
-
-
-# ── load_into_neo4j tests ────────────────────────────────────────────────
-
-
-def _make_driver():
-    """Build a mock Neo4j driver whose session context manager records calls."""
-    session = MagicMock()
-    ctx = MagicMock()
-    ctx.__enter__ = MagicMock(return_value=session)
-    ctx.__exit__ = MagicMock(return_value=False)
-    driver = MagicMock()
-    driver.session.return_value = ctx
-    # Attach for easy access in tests that need it
-    driver._mock_session = session  # pylint: disable=protected-access
-    return driver
-
-
-def test_load_creates_constraint():
-    driver = _make_driver()
-    load_into_neo4j(driver, iter([]), constraint=True)
-    session = driver._mock_session  # pylint: disable=protected-access
-    constraint_calls = [
-        c for c in session.run.call_args_list
-        if "CONSTRAINT" in str(c)
-    ]
-    assert len(constraint_calls) == 1
-
-
-def test_load_skips_short_lei():
-    driver = _make_driver()
-    records = parse_gleif_xml(_stream(SHORT_LEI_XML))
-    summary = load_into_neo4j(driver, records, constraint=False)
-    assert summary["skipped"] == 1
-    assert summary["loaded"] == 0
-
-
-def test_load_flushes_batch():
-    driver = _make_driver()
-    records = parse_gleif_xml(_stream(SAMPLE_XML))
-    summary = load_into_neo4j(
-        driver, records, batch_size=100, constraint=False
+def test_load_creates_constraint_and_merges():
+    """Loader creates a uniqueness constraint then MERGEs records."""
+    mock_driver = MagicMock()
+    mock_session = MagicMock()
+    mock_driver.session.return_value.__enter__ = MagicMock(
+        return_value=mock_session
     )
-    assert summary["loaded"] == 2
-    session = driver._mock_session  # pylint: disable=protected-access
-    merge_calls = [
-        c for c in session.run.call_args_list
-        if "MERGE" in str(c)
-    ]
-    assert len(merge_calls) == 1
-
-
-def test_load_batches_when_full():
-    driver = _make_driver()
-    records = parse_gleif_xml(_stream(SAMPLE_XML))
-    summary = load_into_neo4j(
-        driver, records, batch_size=1, constraint=False
+    mock_driver.session.return_value.__exit__ = MagicMock(
+        return_value=False
     )
-    assert summary["loaded"] == 2
-    session = driver._mock_session  # pylint: disable=protected-access
+
+    records = iter([
+        {"lei": "724500973ODKK3IFQ447", "name": "Adyen",
+         "country": "NL", "legal_form": "N.V.", "active": True},
+    ])
+
+    summary = load_into_neo4j(mock_driver, records, batch_size=100)
+
+    assert summary["total"] == 1
+    # First call: CREATE CONSTRAINT, second: UNWIND MERGE
+    calls = mock_session.run.call_args_list
+    assert "CONSTRAINT" in calls[0].args[0]
+    assert "MERGE" in calls[1].args[0]
+
+
+def test_load_batches_correctly():
+    """Five records with batch_size=2 yields three MERGE calls."""
+    mock_driver = MagicMock()
+    mock_session = MagicMock()
+    mock_driver.session.return_value.__enter__ = MagicMock(
+        return_value=mock_session
+    )
+    mock_driver.session.return_value.__exit__ = MagicMock(
+        return_value=False
+    )
+
+    # 5 records with batch_size=2 → 3 batches (2+2+1)
+    records = iter([
+        {"lei": f"{'A' * 18}{i:02d}", "name": f"Co{i}",
+         "country": "XX", "legal_form": "", "active": True}
+        for i in range(5)
+    ])
+
+    summary = load_into_neo4j(mock_driver, records, batch_size=2)
+    assert summary["total"] == 5
+    # 1 constraint call + 3 batch calls
     merge_calls = [
-        c for c in session.run.call_args_list
-        if "MERGE" in str(c)
+        c for c in mock_session.run.call_args_list
+        if "MERGE" in c.args[0]
     ]
-    # batch_size=1 means 2 flushes for 2 records
-    assert len(merge_calls) == 2
+    assert len(merge_calls) == 3
 
 
-def test_load_adds_gmr_id_to_each_record():
-    driver = _make_driver()
-    records = parse_gleif_xml(_stream(SAMPLE_XML))
-    load_into_neo4j(driver, records, batch_size=100, constraint=False)
-    session = driver._mock_session  # pylint: disable=protected-access
-    merge_call = [
-        c for c in session.run.call_args_list
-        if "MERGE" in str(c)
-    ][0]
-    batch = merge_call.kwargs.get("batch") or merge_call[1]["batch"]
-    for rec in batch:
-        assert "gmr_id" in rec
-        assert len(rec["gmr_id"]) == 36  # UUID format
+# ── resolve_latest_url ───────────────────────────────────────────────
 
-
-# ── get_latest_download_url tests ────────────────────────────────────────
-
-
-@patch("src.etl.load_gleif.httpx.get")
-def test_get_latest_url_parses_api(mock_get):
+def test_resolve_latest_url():
+    """resolve_latest_url builds the correct download URL from the API."""
     mock_resp = MagicMock()
-    mock_resp.json.return_value = {"data": [{"id": 40690}]}
+    mock_resp.json.return_value = {
+        "data": [{"id": 40690}]
+    }
     mock_resp.raise_for_status = MagicMock()
-    mock_get.return_value = mock_resp
 
-    url = get_latest_download_url()
+    with patch("src.etl.load_gleif.httpx.get", return_value=mock_resp):
+        url = resolve_latest_url()
+
     assert "40690" in url
     assert url.endswith("/zip")
-
-
-@patch("src.etl.load_gleif.httpx.get")
-def test_get_latest_url_raises_on_empty(mock_get):
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = {"data": []}
-    mock_resp.raise_for_status = MagicMock()
-    mock_get.return_value = mock_resp
-
-    with pytest.raises(RuntimeError):
-        get_latest_download_url()

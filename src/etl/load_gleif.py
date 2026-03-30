@@ -1,25 +1,22 @@
 """
-GLEIF Level 1 ETL — load Company nodes into Neo4j from the concatenated file.
+GLEIF Full Dump → Neo4j Company Loader
+=======================================
+Downloads (or reads a local copy of) the GLEIF Level 1 concatenated
+ZIP, streams the XML with iterparse, and MERGEs Company nodes into
+Neo4j.
 
-Usage::
-
-    # From a local ZIP (already downloaded):
+Usage:
+    python -m src.etl.load_gleif --neo4j-uri bolt://localhost:7687
     python -m src.etl.load_gleif --file /tmp/gleif-lei2.zip
-
-    # Auto-download the latest file from GLEIF:
-    python -m src.etl.load_gleif
-
-The script is idempotent: ``MERGE`` on ``gmr_id`` prevents duplicates.
-Re-running refreshes names, status, country, and legal form.
 """
 from __future__ import annotations
 
 import argparse
 import io
 import logging
+import sys
 import time
 import zipfile
-from typing import Iterator
 from xml.etree.ElementTree import iterparse
 
 import httpx
@@ -29,60 +26,86 @@ from . import gmr_id
 
 logger = logging.getLogger(__name__)
 
-# LEI-CDF 3.1 XML namespace
-NS = "http://www.gleif.org/data/schema/leidata/2016"
-
-# GLEIF concatenated file API
 GLEIF_API = "https://leidata.gleif.org/api/v1/concatenated-files/lei2"
-
+NS = "http://www.gleif.org/data/schema/leidata/2016"
 BATCH_SIZE = 2000
 
-# ── XML parsing ──────────────────────────────────────────────────────────
+# XPath-style tag helpers using the GLEIF namespace
+_t = f"{{{NS}}}"
+TAG_RECORD = f"{_t}LEIRecord"
+TAG_LEI = f"{_t}LEI"
+TAG_ENTITY = f"{_t}Entity"
+TAG_LEGAL_NAME = f"{_t}LegalName"
+TAG_LEGAL_ADDRESS = f"{_t}LegalAddress"
+TAG_COUNTRY = f"{_t}Country"
+TAG_LEGAL_FORM = f"{_t}LegalForm"
+TAG_ENTITY_LEGAL_FORM_CODE = f"{_t}EntityLegalFormCode"
+TAG_OTHER_LEGAL_FORM = f"{_t}OtherLegalForm"
+TAG_ENTITY_STATUS = f"{_t}EntityStatus"
 
 
-def _find_text(element, path: str) -> str | None:
-    """Find text of a namespaced child element."""
-    node = element.find(path, {"lei": NS})
-    return node.text.strip() if node is not None and node.text else None
+def resolve_latest_url() -> str:
+    """Query the GLEIF API for the latest concatenated file URL."""
+    resp = httpx.get(f"{GLEIF_API}?page=0&pageSize=1", timeout=30)
+    resp.raise_for_status()
+    data = resp.json()["data"]
+    if not data:
+        raise RuntimeError("GLEIF API returned no concatenated files")
+    file_id = data[0]["id"]
+    return f"{GLEIF_API}/get/{file_id}/zip"
 
 
-def parse_gleif_xml(stream) -> Iterator[dict]:
+def download_zip(url: str) -> io.BytesIO:
+    """Download a ZIP file into memory."""
+    logger.info("Downloading %s ...", url)
+    buf = io.BytesIO()
+    with httpx.stream("GET", url, timeout=600, follow_redirects=True) as r:
+        r.raise_for_status()
+        total = 0
+        for chunk in r.iter_bytes(chunk_size=1024 * 256):
+            buf.write(chunk)
+            total += len(chunk)
+            if total % (50 * 1024 * 1024) < 1024 * 256:
+                logger.info("  downloaded %d MB", total // (1024 * 1024))
+    buf.seek(0)
+    logger.info("Download complete: %d MB", total // (1024 * 1024))
+    return buf
+
+
+def parse_gleif_xml(xml_stream):
     """
-    Stream-parse a GLEIF LEI-CDF XML file and yield one dict per record.
+    Streaming parser for LEI-CDF v3.1 XML.
 
-    Uses iterparse to keep memory constant regardless of file size.
+    Yields dicts with keys: lei, name, country, legal_form, active.
+    Memory-efficient: clears each element after processing.
     """
-    tag_record = f"{{{NS}}}LEIRecord"
-    tag_lei = f"{{{NS}}}LEI"
-
-    for _, elem in iterparse(stream, events=("end",)):
-        if elem.tag != tag_record:
+    for event, elem in iterparse(xml_stream, events=("end",)):
+        if elem.tag != TAG_RECORD:
             continue
 
-        lei_node = elem.find(tag_lei)
-        if lei_node is None or not lei_node.text:
+        lei = _text(elem, TAG_LEI)
+        entity = elem.find(TAG_ENTITY)
+        if entity is None or not lei:
             elem.clear()
             continue
 
-        lei = lei_node.text.strip()
-        entity = elem.find(f"{{{NS}}}Entity")
-        if entity is None:
-            elem.clear()
-            continue
+        name = _text(entity, TAG_LEGAL_NAME)
+        addr = entity.find(TAG_LEGAL_ADDRESS)
+        country = _text(addr, TAG_COUNTRY) if addr is not None else None
+        status = _text(entity, TAG_ENTITY_STATUS)
 
-        name = _find_text(entity, "lei:LegalName")
-        country = _find_text(entity, "lei:LegalAddress/lei:Country")
-        status = _find_text(entity, "lei:EntityStatus")
-
-        legal_form_node = entity.find(
-            f"{{{NS}}}LegalForm"
-        )
+        legal_form_el = entity.find(TAG_LEGAL_FORM)
         legal_form = None
-        if legal_form_node is not None:
+        if legal_form_el is not None:
             legal_form = (
-                _find_text(legal_form_node, "lei:EntityLegalFormCode")
-                or _find_text(legal_form_node, "lei:OtherLegalForm")
+                _text(legal_form_el, TAG_ENTITY_LEGAL_FORM_CODE)
+                or _text(legal_form_el, TAG_OTHER_LEGAL_FORM)
             )
+
+        elem.clear()
+
+        if not lei or len(lei) != 20:
+            continue
 
         yield {
             "lei": lei,
@@ -92,136 +115,85 @@ def parse_gleif_xml(stream) -> Iterator[dict]:
             "active": status == "ACTIVE",
         }
 
-        elem.clear()
+
+def _text(parent, tag):
+    """Get text content of a child element, or None."""
+    child = parent.find(tag)
+    return child.text.strip() if child is not None and child.text else None
 
 
-# ── File download ────────────────────────────────────────────────────────
-
-
-def get_latest_download_url() -> str:
-    """Query GLEIF API for the latest concatenated file download URL."""
-    resp = httpx.get(
-        GLEIF_API, params={"page": 0, "pageSize": 1}, timeout=30
-    )
-    resp.raise_for_status()
-    data = resp.json()["data"]
-    if not data:
-        raise RuntimeError("No GLEIF concatenated files found")
-    file_id = data[0]["id"]
-    return f"{GLEIF_API}/get/{file_id}/zip"
-
-
-def download_gleif_zip(url: str, dest: str) -> str:
-    """Download the GLEIF ZIP file to *dest*, showing progress."""
-    logger.info("Downloading %s -> %s", url, dest)
-    with httpx.stream("GET", url, timeout=600, follow_redirects=True) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        with open(dest, "wb") as f:
-            for chunk in r.iter_bytes(chunk_size=1_048_576):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    pct = downloaded * 100 // total
-                    print(
-                        f"\r  {downloaded // 1_048_576} / "
-                        f"{total // 1_048_576} MB ({pct}%)",
-                        end="", flush=True,
-                    )
-        print()
-    return dest
-
-
-def open_gleif_zip(path: str):
-    """Open the GLEIF ZIP and return a file-like object for the XML inside."""
-    zf = zipfile.ZipFile(path)  # pylint: disable=consider-using-with
-    names = zf.namelist()
-    xml_name = next((n for n in names if n.endswith(".xml")), names[0])
-    logger.info("Reading %s from ZIP", xml_name)
-    return io.BufferedReader(zf.open(xml_name))
-
-
-# ── Neo4j loading ────────────────────────────────────────────────────────
-
-MERGE_QUERY = """
-UNWIND $batch AS row
-MERGE (c:Company {gmr_id: row.gmr_id})
-SET c.lei        = row.lei,
-    c.name       = row.name,
-    c.country    = row.country,
-    c.legal_form = row.legal_form,
-    c.active     = row.active
-"""
-
-
-def load_into_neo4j(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    driver,
-    records: Iterator[dict],
-    batch_size: int = BATCH_SIZE,
-    constraint: bool = True,
-) -> dict:
+def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
     """
-    Load parsed GLEIF records into Neo4j in batches.
+    MERGE Company nodes into Neo4j in batches.
 
     Returns a summary dict with counts.
     """
-    if constraint:
-        with driver.session() as s:
-            s.run(
-                "CREATE CONSTRAINT company_gmr_id IF NOT EXISTS "
-                "FOR (c:Company) REQUIRE c.gmr_id IS UNIQUE"
-            )
+    query = """
+    UNWIND $batch AS row
+    MERGE (c:Company {gmr_id: row.gmr_id})
+    SET c.lei        = row.lei,
+        c.name       = row.name,
+        c.country    = row.country,
+        c.legal_form = row.legal_form,
+        c.active     = row.active
+    """
 
-    loaded = 0
-    skipped = 0
-    batch: list[dict] = []
+    total = 0
+    batched = 0
+    batch = []
+    t0 = time.time()
 
-    for rec in records:
-        lei = rec.get("lei", "")
-        if len(lei) != 20:
-            skipped += 1
-            continue
+    with driver.session() as session:
+        # Create constraint (idempotent)
+        session.run(
+            "CREATE CONSTRAINT company_gmr_id IF NOT EXISTS "
+            "FOR (c:Company) REQUIRE c.gmr_id IS UNIQUE"
+        )
 
-        rec["gmr_id"] = gmr_id.from_lei(lei)
-        batch.append(rec)
+        for rec in records:
+            rec["gmr_id"] = gmr_id.from_lei(rec["lei"])
+            batch.append(rec)
 
-        if len(batch) >= batch_size:
-            _flush(driver, batch)
-            loaded += len(batch)
-            if loaded % 50_000 == 0:
-                logger.info("  ... %d companies loaded", loaded)
-            batch = []
+            if len(batch) >= batch_size:
+                session.run(query, batch=batch)
+                batched += len(batch)
+                total += len(batch)
+                batch = []
+                if total % 50000 < batch_size:
+                    elapsed = time.time() - t0
+                    rate = total / elapsed if elapsed else 0
+                    logger.info(
+                        "  %d companies loaded (%.0f/s)", total, rate
+                    )
 
-    if batch:
-        _flush(driver, batch)
-        loaded += len(batch)
+        if batch:
+            session.run(query, batch=batch)
+            total += len(batch)
 
-    return {"loaded": loaded, "skipped": skipped}
-
-
-def _flush(driver, batch: list[dict]) -> None:
-    with driver.session() as s:
-        s.run(MERGE_QUERY, batch=batch)
-
-
-# ── CLI ──────────────────────────────────────────────────────────────────
+    elapsed = time.time() - t0
+    return {"total": total, "elapsed_s": round(elapsed, 1)}
 
 
-def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: download (or use local) GLEIF ZIP, parse, load into Neo4j."""
+def main(argv=None):
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Load GLEIF LEI data into Neo4j"
     )
     parser.add_argument(
-        "--file", help="Path to a local GLEIF ZIP file (skip download)"
+        "--file", help="Path to a local GLEIF ZIP file"
     )
-    parser.add_argument("--neo4j-uri", default="bolt://neo4j:7687")
-    parser.add_argument("--neo4j-user", default="neo4j")
-    parser.add_argument("--neo4j-password", default="")
     parser.add_argument(
-        "--batch-size", type=int, default=BATCH_SIZE,
-        help="Records per Neo4j transaction"
+        "--neo4j-uri",
+        default="bolt://neo4j:7687",
+        help="Neo4j bolt URI (default: bolt://neo4j:7687)",
+    )
+    parser.add_argument(
+        "--neo4j-user", default="neo4j",
+        help="Neo4j username",
+    )
+    parser.add_argument(
+        "--neo4j-password", default="gmr-neo4j-2026",
+        help="Neo4j password",
     )
     args = parser.parse_args(argv)
 
@@ -230,36 +202,40 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Resolve ZIP path
+    # Open the ZIP
     if args.file:
-        zip_path = args.file
+        logger.info("Reading local file: %s", args.file)
+        zf = zipfile.ZipFile(args.file)
     else:
-        url = get_latest_download_url()
-        zip_path = "/tmp/gleif-lei2.zip"
-        download_gleif_zip(url, zip_path)
+        url = resolve_latest_url()
+        buf = download_zip(url)
+        zf = zipfile.ZipFile(buf)
 
-    # Parse + load
-    logger.info("Opening ZIP: %s", zip_path)
-    xml_stream = open_gleif_zip(zip_path)
+    # Find the XML inside the ZIP
+    xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
+    if not xml_names:
+        logger.error("No XML file found in ZIP")
+        sys.exit(1)
 
-    driver = GraphDatabase.driver(
-        args.neo4j_uri,
-        auth=(args.neo4j_user, args.neo4j_password),
-    )
+    xml_name = xml_names[0]
+    logger.info("Parsing %s ...", xml_name)
 
-    t0 = time.time()
-    logger.info("Loading into Neo4j at %s ...", args.neo4j_uri)
-    summary = load_into_neo4j(
-        driver, parse_gleif_xml(xml_stream), args.batch_size
-    )
-    elapsed = time.time() - t0
+    with zf.open(xml_name) as xml_stream:
+        records = parse_gleif_xml(xml_stream)
 
-    driver.close()
-    xml_stream.close()
+        driver = GraphDatabase.driver(
+            args.neo4j_uri,
+            auth=(args.neo4j_user, args.neo4j_password),
+        )
+        try:
+            summary = load_into_neo4j(driver, records)
+        finally:
+            driver.close()
 
     logger.info(
-        "Done in %.1fs — %d companies loaded, %d skipped",
-        elapsed, summary["loaded"], summary["skipped"],
+        "Done: %d companies in %.1fs",
+        summary["total"],
+        summary["elapsed_s"],
     )
 
 
