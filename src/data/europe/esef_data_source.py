@@ -20,6 +20,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from ...analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
+from ..north_america.local_price_fetcher import LocalPriceFetcher
+
 
 def _fill_missing_shares_outstanding(result: dict) -> None:
     """Derive ``shares_outstanding = net_income / eps`` for years where it is missing.
@@ -48,8 +51,6 @@ def _fill_missing_shares_outstanding(result: dict) -> None:
             continue
         so[year] = ni_val / eps_val
 
-from ...analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
-from ..north_america.local_price_fetcher import LocalPriceFetcher
 
 logger = logging.getLogger(__name__)
 

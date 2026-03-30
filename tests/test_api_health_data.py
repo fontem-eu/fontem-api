@@ -7,8 +7,6 @@ directories required) and the ``collect_data_health`` helper directly.
 from __future__ import annotations
 # pylint: disable=missing-function-docstring,redefined-outer-name
 
-import os
-
 import pytest
 from starlette.testclient import TestClient
 
@@ -49,8 +47,10 @@ def data_dirs(tmp_path):
     prices = tmp_path / "prices"
     daily = prices / "daily"
     daily.mkdir(parents=True)
-    (daily / "AAPL.csv").write_text("Date,Open,High,Low,Close,Volume\n2025-01-10,220,225,219,222,50000000\n2025-01-13,222,230,221,228,48000000\n")
-    (daily / "MSFT.csv").write_text("Date,Open,High,Low,Close,Volume\n2025-01-10,410,415,409,413,20000000\n2025-01-13,413,420,412,418,18000000\n")
+    aapl_rows = "Date,Open,High,Low,Close,Volume\n2025-01-10,220,225,219,222,50000000\n2025-01-13,222,230,221,228,48000000\n"
+    msft_rows = "Date,Open,High,Low,Close,Volume\n2025-01-10,410,415,409,413,20000000\n2025-01-13,413,420,412,418,18000000\n"
+    (daily / "AAPL.csv").write_text(aapl_rows)
+    (daily / "MSFT.csv").write_text(msft_rows)
 
     return str(edgar), str(prices)
 
@@ -60,6 +60,8 @@ def data_dirs(tmp_path):
 # ---------------------------------------------------------------------------
 
 class TestCollectDataHealth:
+    """Unit tests for collect_data_health helper (no HTTP, no env vars)."""
+
     def test_ok_status_when_both_stores_populated(self, data_dirs):
         edgar_dir, price_dir = data_dirs
         result = collect_data_health(edgar_dir, price_dir)
@@ -123,6 +125,8 @@ class TestCollectDataHealth:
 # ---------------------------------------------------------------------------
 
 class TestDataHealthEndpoint:
+    """HTTP endpoint tests for GET /v1/health/data."""
+
     def test_returns_200(self, client, data_dirs, monkeypatch):
         edgar_dir, price_dir = data_dirs
         monkeypatch.setenv("GMR_EDGAR_LOCAL_DATA_DIR", edgar_dir)

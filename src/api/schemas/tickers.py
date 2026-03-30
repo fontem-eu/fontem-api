@@ -37,7 +37,9 @@ class TickerInfo(BaseModel):
 
     symbol: str = Field(..., description="Stock ticker symbol (e.g. ASML)")
     name: str = Field(..., description="Company name")
-    ticker: str | None = Field(None, description="Full ticker including exchange suffix (e.g. ASML.AS for ESEF)")
+    ticker: str | None = Field(
+        None, description="Full ticker including exchange suffix (e.g. ASML.AS for ESEF)"
+    )
     cik: str | None = Field(None, description="SEC Central Index Key (EDGAR only)")
     data_source: str | None = Field(None, description="Data source: 'edgar' or 'esef'")
     sic: str | None = Field(None, description="Standard Industrial Classification code")

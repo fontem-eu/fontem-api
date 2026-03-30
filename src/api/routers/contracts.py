@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..dependencies import get_contract_source, get_data_source
 
-router = APIRouter(prefix="/api", tags=["contracts"])
+router = APIRouter(tags=["contracts"])
 
 
 @router.get("/companies/{gmr_id}/contracts")
@@ -76,6 +76,16 @@ def authority_profile(
     }
 
 
+@router.get("/contracts/sectors")
+def sector_summary(
+    country: str | None = Query(None),
+    year: int | None = Query(None),
+    source=Depends(get_contract_source),
+):
+    """Aggregated contract values by CPV sector."""
+    return source.get_sector_summary(country=country, year=year)
+
+
 @router.get("/contracts/{notice_id}")
 def contract_detail(
     notice_id: str,
@@ -86,16 +96,6 @@ def contract_detail(
     if result is None:
         raise HTTPException(status_code=404, detail="Contract not found")
     return result
-
-
-@router.get("/contracts/sectors")
-def sector_summary(
-    country: str | None = Query(None),
-    year: int | None = Query(None),
-    source=Depends(get_contract_source),
-):
-    """Aggregated contract values by CPV sector."""
-    return source.get_sector_summary(country=country, year=year)
 
 
 @router.get("/search")

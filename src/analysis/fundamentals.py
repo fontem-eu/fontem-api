@@ -339,7 +339,9 @@ class Fundamentals:  # pylint: disable=too-few-public-methods
                 "amount": snapshot.last_dividend_amount,
             },
             beta=float(snapshot.beta) if snapshot.beta is not None else _NAN,
-            week_52_high=float(snapshot.week_52_high) if snapshot.week_52_high is not None else _NAN,
+            week_52_high=(
+                float(snapshot.week_52_high) if snapshot.week_52_high is not None else _NAN
+            ),
             week_52_low=float(snapshot.week_52_low) if snapshot.week_52_low is not None else _NAN,
         )
 

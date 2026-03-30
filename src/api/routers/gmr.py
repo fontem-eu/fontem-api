@@ -145,7 +145,10 @@ def gmr_long(
     last_div_raw = result.last_dividend or {}
     last_div = LastDividendSchema(
         date=last_div_raw.get("date"),
-        amount=nan_to_none(float(last_div_raw["amount"])) if last_div_raw.get("amount") is not None else None,
+        amount=(
+            nan_to_none(float(last_div_raw["amount"]))
+            if last_div_raw.get("amount") is not None else None
+        ),
     )
     snapshot = MarketSnapshotLongSchema(
         current_price=nan_to_none(result.current_price),
