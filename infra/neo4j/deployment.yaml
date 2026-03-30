@@ -27,6 +27,9 @@ spec:
             - containerPort: 7687
               name: bolt
           env:
+            # Install APOC plugin (needed for fuzzy matching + node merging)
+            - name: NEO4J_PLUGINS
+              value: '["apoc"]'
             - name: NEO4J_AUTH
               valueFrom:
                 secretKeyRef:

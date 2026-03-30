@@ -108,21 +108,25 @@ class TedMatcher:
                 self.stats.record(3)
                 return MatchResult(gmr_id=gid, layer=3, confidence=0.95)
 
-        # Layer 4: Fuzzy name match
+        # Layer 4: Fuzzy name match (requires full-text index)
         if name and country:
-            result = self._session.run(
-                "CALL db.index.fulltext.queryNodes("
-                "  'companyNameIndex', $name + '~'"
-                ") YIELD node, score "
-                "WHERE node.country = $country AND score > 0.3 "
-                "WITH node, apoc.text.sorensenDiceSimilarity("
-                "  toLower($name), toLower(node.name_normalized)"
-                ") AS dice "
-                "WHERE dice > 0.85 "
-                "RETURN node.gmr_id AS gid, dice "
-                "ORDER BY dice DESC LIMIT 1",
-                name=name, country=country,
-            ).single()
+            try:
+                result = self._session.run(
+                    "CALL db.index.fulltext.queryNodes("
+                    "  'companyNameIndex', $name + '~'"
+                    ") YIELD node, score "
+                    "WHERE node.country = $country AND score > 0.3 "
+                    "WITH node, apoc.text.sorensenDiceSimilarity("
+                    "  toLower($name), toLower(node.name_normalized)"
+                    ") AS dice "
+                    "WHERE dice > 0.85 "
+                    "RETURN node.gmr_id AS gid, dice "
+                    "ORDER BY dice DESC LIMIT 1",
+                    name=name, country=country,
+                ).single()
+            except Exception:  # pylint: disable=broad-exception-caught
+                # Full-text index may not exist yet — skip to Layer 5
+                result = None
             if result:
                 gid = result["gid"]
                 if vat:
