@@ -128,8 +128,8 @@ def load_directors(driver, limit: int | None = None):  # pylint: disable=too-man
                 for d in directors:
                     if d.get("type_dirigeant") != "personne physique":
                         continue
-                    nom = d.get("nom", "").strip()
-                    prenoms = d.get("prenoms", "").strip()
+                    nom = (d.get("nom") or "").strip()
+                    prenoms = (d.get("prenoms") or "").strip()
                     if not nom:
                         continue
                     batch.append({
