@@ -62,3 +62,47 @@ def _contract_source():
 def get_contract_source():
     """Dependency injected into contract endpoints."""
     return _contract_source()
+
+
+def resolve_company_id(identifier: str) -> dict:
+    """Resolve a ticker or gmr_id to company info.
+
+    Returns dict with gmr_id, ticker, name. Works for both listed
+    companies (by ticker) and procurement-only companies (by gmr_id).
+    """
+    import re  # pylint: disable=import-outside-toplevel
+    source = _graph_source() if os.environ.get("GMR_DATA_SOURCE") == "graph" else None
+    if not source:
+        return {"gmr_id": None, "ticker": identifier, "name": None}
+
+    uuid_re = re.compile(
+        r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+        re.IGNORECASE,
+    )
+
+    with source._neo4j.session() as session:  # pylint: disable=protected-access
+        if uuid_re.match(identifier):
+            # It's a gmr_id — look up directly
+            row = session.run(
+                "MATCH (c:Company {gmr_id: $gid}) "
+                "OPTIONAL MATCH (c)-[:LISTED_AS]->(l:Listing) "
+                "RETURN c.gmr_id AS gmr_id, c.name AS name, "
+                "  l.ticker AS ticker LIMIT 1",
+                gid=identifier,
+            ).single()
+        else:
+            # It's a ticker — resolve via Listing
+            row = session.run(
+                "MATCH (l:Listing {ticker: $t})<-[:LISTED_AS]-(c:Company) "
+                "RETURN c.gmr_id AS gmr_id, c.name AS name, "
+                "  l.ticker AS ticker",
+                t=identifier.upper(),
+            ).single()
+
+    if row:
+        return {
+            "gmr_id": row["gmr_id"],
+            "ticker": row["ticker"],
+            "name": row["name"],
+        }
+    return {"gmr_id": None, "ticker": identifier, "name": None}

@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.analysis.fundamentals import Fundamentals
 from src.analysis.gmr_data_source import FinancialDataSource
-from src.api.dependencies import get_data_source
+from src.api.dependencies import get_data_source, resolve_company_id
 from src.api.helpers import nan_to_none
 from src.api.schemas.fundamentals import (
     FundamentalsMarketSnapshot,
@@ -74,6 +74,7 @@ def fundamentals(
 ) -> FundamentalsResponse:
     """Return financial fundamentals for a given ticker."""
     ticker = ticker.upper()
+    company_info = resolve_company_id(ticker)
 
     try:
         result = Fundamentals(data_source).compute(ticker, years=years)
@@ -117,6 +118,8 @@ def fundamentals(
     if summarize:
         return FundamentalsResponse(
             ticker=result.ticker,
+            gmr_id=company_info.get("gmr_id"),
+            company_name=company_info.get("name"),
             data_source=data_source.get_data_source_name(ticker),
             ratios_summary=summary,
         )
@@ -182,6 +185,8 @@ def fundamentals(
 
     return FundamentalsResponse(
         ticker=result.ticker,
+        gmr_id=company_info.get("gmr_id"),
+        company_name=company_info.get("name"),
         data_source=data_source.get_data_source_name(ticker),
         market_snapshot=snapshot,
         ratios_summary=summary,
