@@ -76,6 +76,18 @@ def get_data_quality_source():
     return _data_quality_source()
 
 
+@lru_cache(maxsize=1)
+def _person_source():
+    from src.data.graph.graph_person_source import GraphPersonSource  # pylint: disable=import-outside-toplevel
+    from src.data.graph.neo4j_client import Neo4jClient  # pylint: disable=import-outside-toplevel
+    return GraphPersonSource(neo4j_client=Neo4jClient())
+
+
+def get_person_source():
+    """Dependency injected into person endpoints."""
+    return _person_source()
+
+
 def resolve_company_id(identifier: str) -> dict:
     """Resolve a ticker or gmr_id to company info.
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..dependencies import get_contract_source, get_data_source
+from ..dependencies import get_contract_source, get_data_source, get_person_source
 
 router = APIRouter(tags=["contracts"])
 
@@ -28,10 +28,11 @@ def company_contracts(
 def company_profile(
     gmr_id: str,
     source=Depends(get_contract_source),
-    financial=Depends(get_data_source),
+    person_source=Depends(get_person_source),
 ):
-    """Company profile with procurement summary."""
+    """Company profile with procurement summary and directors."""
     contracts = source.get_company_contracts(gmr_id, years=5, limit=5)
+    directors = person_source.get_company_directors(gmr_id)
     return {
         "gmr_id": gmr_id,
         "company_name": contracts.get("company_name"),
@@ -41,6 +42,7 @@ def company_profile(
             "total_contract_value_eur", 0
         ),
         "recent_contracts": contracts.get("contracts", [])[:5],
+        "directors": directors,
     }
 
 
@@ -166,8 +168,24 @@ def unified_search(  # pylint: disable=too-many-locals
             q=q, limit=limit,
         ).data()
 
+        # 4. Persons
+        person_rows = session.run(
+            "MATCH (p:Person) "
+            "WHERE toLower(p.first_name + ' ' + p.name) "
+            "  CONTAINS toLower($q) "
+            "OPTIONAL MATCH (p)-[r:DIRECTS {current: true}]->"
+            "  (c:Company) "
+            "RETURN DISTINCT p.person_id AS person_id, "
+            "  p.first_name AS first_name, p.name AS name, "
+            "  p.birth_year AS birth_year, "
+            "  collect(DISTINCT c.name)[0..2] AS companies "
+            "LIMIT $limit",
+            q=q, limit=limit,
+        ).data()
+
     return {
         "query": q,
         "companies": company_rows,
         "authorities": auth_rows,
+        "persons": person_rows,
     }
