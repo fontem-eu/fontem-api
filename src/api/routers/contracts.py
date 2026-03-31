@@ -99,28 +99,54 @@ def contract_detail(
 
 
 @router.get("/search")
-def unified_search(
+def unified_search(  # pylint: disable=too-many-locals
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=50),
     contract_source=Depends(get_contract_source),
 ):
-    """Unified search across all companies and authorities via Neo4j."""
+    """Unified search across companies and authorities.
+
+    Prioritizes: listed companies > companies with contracts > all others.
+    Matches on both company name AND ticker symbol.
+    Deduplicates by gmr_id (a company with multiple listings appears once).
+    """
     with contract_source._neo4j.session() as session:  # pylint: disable=protected-access
-        # Companies — search ALL companies (listed + procurement-only)
-        company_rows = session.run(
-            "MATCH (c:Company) "
-            "WHERE toLower(c.name) CONTAINS toLower($q) "
-            "OPTIONAL MATCH (c)-[:LISTED_AS]->(l:Listing) "
-            "RETURN c.gmr_id AS gmr_id, c.name AS name, "
-            "  c.country AS country, c.vat AS vat, "
-            "  l.ticker AS ticker, l.ticker AS symbol, "
-            "  l.exchange AS exchange, l.currency AS currency, "
-            "  l.active AS is_active "
+        # 1. Listed companies matching by ticker OR name (highest priority)
+        listed = session.run(
+            "MATCH (c:Company)-[:LISTED_AS]->(l:Listing) "
+            "WHERE toLower(l.ticker) STARTS WITH toLower($q) "
+            "   OR toLower(c.name) CONTAINS toLower($q) "
+            "RETURN DISTINCT c.gmr_id AS gmr_id, c.name AS name, "
+            "  c.country AS country, "
+            "  collect(l.ticker)[0] AS ticker, "
+            "  collect(l.exchange)[0] AS exchange, "
+            "  collect(l.currency)[0] AS currency, "
+            "  true AS is_active "
             "LIMIT $limit",
             q=q, limit=limit,
         ).data()
 
+        seen = {r["gmr_id"] for r in listed}
+
+        # 2. Companies with contracts (procurement-only, no listing)
+        remaining = max(0, limit - len(listed))
+        procurement = []
+        if remaining > 0:
+            procurement = session.run(
+                "MATCH (ct:Contract)-[:AWARDED_TO]->(c:Company) "
+                "WHERE NOT c.gmr_id IN $seen "
+                "  AND toLower(c.name) CONTAINS toLower($q) "
+                "RETURN DISTINCT c.gmr_id AS gmr_id, c.name AS name, "
+                "  c.country AS country, "
+                "  null AS ticker, null AS exchange, null AS currency, "
+                "  null AS is_active "
+                "LIMIT $remaining",
+                q=q, seen=list(seen), remaining=remaining,
+            ).data()
+
+        company_rows = listed + procurement
         for r in company_rows:
+            r["symbol"] = r.get("ticker")
             r["search_name"] = (
                 f"{r.get('name', '')} {r.get('ticker', '')}".lower()
             )
@@ -130,7 +156,7 @@ def unified_search(
                 else "edgar"
             )
 
-        # Authorities
+        # 3. Authorities
         auth_rows = session.run(
             "MATCH (a:Authority) "
             "WHERE toLower(a.name) CONTAINS toLower($q) "

@@ -157,17 +157,35 @@ class TestUnifiedSearch:
 
     def test_returns_companies_and_authorities(self):
         """Search returns both entity types."""
-        mock = _mock_contract_source(
-            search_companies=[
-                {"gmr_id": "gid-1", "name": "SOCOMEC", "country": "FR",
-                 "vat": None, "ticker": None, "symbol": None,
-                 "exchange": None, "currency": None, "is_active": None},
-            ],
-            search_authorities=[
-                {"authority_id": "aid-1", "name": "DB Netz AG",
-                 "country": "DE"},
-            ],
-        )
+        mock = _mock_contract_source()
+        # The new unified search makes 3 queries: listed, procurement, authorities
+        session = MagicMock()
+        call_count = {"n": 0}
+
+        def _run_side(*args, **kwargs):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                # Listed companies
+                result.data.return_value = [
+                    {"gmr_id": "gid-1", "name": "SOCOMEC", "country": "FR",
+                     "ticker": None, "exchange": None, "currency": None,
+                     "is_active": True},
+                ]
+            elif call_count["n"] == 2:
+                # Procurement-only companies
+                result.data.return_value = []
+            else:
+                # Authorities
+                result.data.return_value = [
+                    {"authority_id": "aid-1", "name": "DB Netz AG",
+                     "country": "DE"},
+                ]
+            return result
+
+        session.run = MagicMock(side_effect=_run_side)
+        mock._neo4j.session.return_value.__enter__.return_value = session
+
         app.dependency_overrides[get_contract_source] = lambda: mock
         try:
             client = TestClient(app)
