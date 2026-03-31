@@ -62,6 +62,8 @@ class GMRLongResponse(BaseModel):
     When ?summarize=false → all fields are present.
     """
     ticker: str
+    gmr_id: str | None = None
+    company_name: str | None = None
     data_source: str | None = None
     gmr_ratio: GMRLongRatioSchema
     market_snapshot: MarketSnapshotLongSchema | None = None

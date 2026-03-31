@@ -78,7 +78,9 @@ def valuation(
     data_source: FinancialDataSource = Depends(get_data_source),
 ) -> ValuationResponse:
     """Return enterprise valuation metrics for a given ticker."""
+    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
     ticker = ticker.upper()
+    company_info = resolve_company_id(ticker)
 
     try:
         result = Valuation(data_source).compute(ticker, years=years)
@@ -110,6 +112,8 @@ def valuation(
     if summarize:
         return ValuationResponse(
             ticker=result.ticker,
+            gmr_id=company_info.get("gmr_id"),
+            company_name=company_info.get("name"),
             data_source=data_source.get_data_source_name(ticker),
             summary=summary,
         )
@@ -146,6 +150,8 @@ def valuation(
 
     return ValuationResponse(
         ticker=result.ticker,
+        gmr_id=company_info.get("gmr_id"),
+        company_name=company_info.get("name"),
         data_source=data_source.get_data_source_name(ticker),
         valuation_snapshot=snap,
         summary=summary,

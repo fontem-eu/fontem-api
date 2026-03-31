@@ -100,7 +100,9 @@ def gmr_long(
     data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRLongResponse:
     """Run the GMR long-term value-investing screen for a given ticker."""
+    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
     ticker = ticker.upper()
+    company_info = resolve_company_id(ticker)
 
     try:
         result = GMRLong(data_source).compute(ticker, years=years)
@@ -137,6 +139,8 @@ def gmr_long(
     if summarize:
         return GMRLongResponse(
             ticker=result.ticker,
+            gmr_id=company_info.get("gmr_id"),
+            company_name=company_info.get("name"),
             data_source=data_source.get_data_source_name(ticker),
             gmr_ratio=ratio,
         )
@@ -180,6 +184,8 @@ def gmr_long(
 
     return GMRLongResponse(
         ticker=result.ticker,
+        gmr_id=company_info.get("gmr_id"),
+        company_name=company_info.get("name"),
         data_source=data_source.get_data_source_name(ticker),
         gmr_ratio=ratio,
         market_snapshot=snapshot,
@@ -209,7 +215,9 @@ def gmr_short(
     data_source: FinancialDataSource = Depends(get_data_source),
 ) -> GMRShortResponse:
     """Run the GMR short-term swing-trading screen for a given ticker."""
+    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
     ticker = ticker.upper()
+    company_info = resolve_company_id(ticker)
 
     try:
         result = GMRShort(data_source).compute(ticker)
@@ -244,6 +252,8 @@ def gmr_short(
     if summarize:
         return GMRShortResponse(
             ticker=result.ticker,
+            gmr_id=company_info.get("gmr_id"),
+            company_name=company_info.get("name"),
             data_source=data_source.get_data_source_name(ticker),
             gmr_ratio=ratio,
         )
@@ -263,6 +273,8 @@ def gmr_short(
 
     return GMRShortResponse(
         ticker=result.ticker,
+        gmr_id=company_info.get("gmr_id"),
+        company_name=company_info.get("name"),
         data_source=data_source.get_data_source_name(ticker),
         gmr_ratio=ratio,
         market_snapshot=snapshot,
@@ -280,6 +292,8 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
     data_source: FinancialDataSource,
 ) -> GMRDataResponse:
     """Fetch and assemble the GMR spreadsheet data for a ticker."""
+    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
+    company_info = resolve_company_id(ticker)
     try:
         fundamentals  = data_source.get_annual_fundamentals(ticker, years)
         annual_prices = data_source.get_annual_avg_prices(ticker, years)
@@ -370,6 +384,8 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
 
     return GMRDataResponse(
         ticker=ticker,
+        gmr_id=company_info.get("gmr_id"),
+        company_name=company_info.get("name"),
         data_source=data_source.get_data_source_name(ticker),
         current_snapshot=current_snapshot,
         annual_data=annual_data,

@@ -51,6 +51,8 @@ class ValuationSnapshot(BaseModel):
 class ValuationResponse(BaseModel):
     """Root response for the /valuation endpoint."""
     ticker: str
+    gmr_id: str | None = None
+    company_name: str | None = None
     data_source: str | None = None
     valuation_snapshot: ValuationSnapshot | None = None
     summary: ValuationSummary
