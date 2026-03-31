@@ -64,6 +64,18 @@ def get_contract_source():
     return _contract_source()
 
 
+@lru_cache(maxsize=1)
+def _data_quality_source():
+    from src.data.graph.graph_data_quality import GraphDataQualitySource  # pylint: disable=import-outside-toplevel
+    from src.data.graph.neo4j_client import Neo4jClient  # pylint: disable=import-outside-toplevel
+    return GraphDataQualitySource(neo4j_client=Neo4jClient())
+
+
+def get_data_quality_source():
+    """Dependency injected into data quality endpoints."""
+    return _data_quality_source()
+
+
 def resolve_company_id(identifier: str) -> dict:
     """Resolve a ticker or gmr_id to company info.
 
