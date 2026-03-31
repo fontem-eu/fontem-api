@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: neo4j-backup
+  namespace: gmr
+spec:
+  schedule: "0 1 * * *"   # Daily at 01:00 UTC (before other jobs)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: neo4j:5-community
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  cypher-shell -a bolt://neo4j:7687 -u neo4j -p $NEO4J_PASSWORD \
+                    "CALL apoc.export.json.all('/data/backups/full.json', {useTypes: true})"
+                  DATE=$(date +%Y%m%d)
+                  cp /data/backups/full.json /backup-nfs/neo4j-backups/${DATE}.json
+                  # Keep only last 7 days
+                  ls -t /backup-nfs/neo4j-backups/*.json | tail -n +8 | xargs rm -f 2>/dev/null || true
+                  echo "Backup ${DATE} complete"
+              env:
+                - name: NEO4J_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_PASSWORD
+              volumeMounts:
+                - name: neo4j-data
+                  mountPath: /data
+                - name: backup-nfs
+                  mountPath: /backup-nfs
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "512Mi"
+                limits:
+                  cpu: "1"
+                  memory: "2Gi"
+          volumes:
+            - name: neo4j-data
+              persistentVolumeClaim:
+                claimName: neo4j-data
+            - name: backup-nfs
+              persistentVolumeClaim:
+                claimName: esef-data

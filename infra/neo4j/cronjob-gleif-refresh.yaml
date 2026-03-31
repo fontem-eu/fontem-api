@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gleif-refresh
+  namespace: gmr
+spec:
+  schedule: "0 2 * * 0"   # Weekly: Sunday at 02:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 7200   # 2-hour timeout
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: gleif-refresh
+              image: contribute.void42.internal/golden/gmr-api:latest
+              command:
+                - python3
+                - -m
+                - src.etl.load_gleif
+              env:
+                - name: NEO4J_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_URI
+                - name: NEO4J_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_USER
+                - name: NEO4J_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_PASSWORD
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "1Gi"
+                limits:
+                  cpu: "2"
+                  memory: "4Gi"
