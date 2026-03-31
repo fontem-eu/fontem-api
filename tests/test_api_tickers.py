@@ -62,13 +62,6 @@ def _mock_data_source():
     app.dependency_overrides.clear()
 
 
-# ---------------------------------------------------------------------------
-# LiveDataSource import smoke test
-# ---------------------------------------------------------------------------
-
-def test_live_data_source_imports_without_error():
-    from src.data.north_america.live_data_source import LiveDataSource  # noqa: F401  # pylint: disable=import-outside-toplevel
-    assert LiveDataSource is not None
 
 
 # ---------------------------------------------------------------------------

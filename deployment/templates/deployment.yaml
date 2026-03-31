@@ -63,11 +63,7 @@ spec:
             - name: GMR_ESEF_DATA_DIR
               value: "/esef-data/esef"
 
-            # Use Neo4j-backed GraphDataSource instead of RoutingDataSource.
-            - name: GMR_DATA_SOURCE
-              value: "graph"
-
-            # Neo4j graph database connection (graph-backed data source).
+            # Neo4j graph database connection.
             - name: NEO4J_URI
               valueFrom:
                 secretKeyRef:
