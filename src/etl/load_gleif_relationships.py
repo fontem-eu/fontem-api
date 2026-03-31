@@ -120,6 +120,13 @@ def load_relationships(driver, records, batch_size=BATCH_SIZE):
     batch = []
     t0 = time.time()
 
+    # Ensure LEI index exists (critical for MATCH performance)
+    with driver.session() as session:
+        session.run(
+            "CREATE INDEX company_lei IF NOT EXISTS "
+            "FOR (c:Company) ON (c.lei)"
+        )
+
     with driver.session() as session:
         for child_lei, parent_lei, rel_type in records:
             batch.append({
