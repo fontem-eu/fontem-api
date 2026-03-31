@@ -35,6 +35,7 @@ class TickerInfo(BaseModel):
         },
     )
 
+    gmr_id: str | None = Field(None, description="Internal company UUID")
     symbol: str = Field(..., description="Stock ticker symbol (e.g. ASML)")
     name: str = Field(..., description="Company name")
     ticker: str | None = Field(
