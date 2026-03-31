@@ -40,13 +40,13 @@ spec:
               value: "0.0.0.0:7687"
             - name: NEO4J_dbms_connector_http_listen__address
               value: "0.0.0.0:7474"
-            # Memory sizing for a lightweight dataset
+            # Memory sizing — scaled for 3.5M+ nodes + procurement data
             - name: NEO4J_server_memory_heap_initial__size
-              value: "512m"
+              value: "4g"
             - name: NEO4J_server_memory_heap_max__size
-              value: "1g"
+              value: "6g"
             - name: NEO4J_server_memory_pagecache_size
-              value: "512m"
+              value: "3g"
           livenessProbe:
             httpGet:
               path: /
@@ -62,11 +62,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: "250m"
-              memory: "1Gi"
-            limits:
               cpu: "2"
               memory: "2Gi"
+            limits:
+              cpu: "8"
+              memory: "12Gi"
           volumeMounts:
             - name: data
               mountPath: /data
