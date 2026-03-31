@@ -59,8 +59,10 @@ class GraphDataSource(FinancialDataSource):
     Production data source backed by Neo4j (company/financial data)
     and NFS CSV files (price time series).
 
-    For US tickers with no FinancialYear nodes in the graph, falls back
-    to LocalEdgarFetcher to read bulk EDGAR data.
+    Neo4j is the primary and authoritative source for all financial data.
+    LocalEdgarFetcher is a degraded fallback for the ~3K listed companies
+    whose XBRL filings couldn't be bulk-loaded. This fallback will be
+    removed once all companies have FinancialYear nodes.
     """
 
     def __init__(
@@ -71,10 +73,18 @@ class GraphDataSource(FinancialDataSource):
     ) -> None:
         self._neo4j = neo4j_client
         self._prices = LocalPriceFetcher(price_data_dir)
-        self._edgar = (
-            LocalEdgarFetcher(edgar_data_dir) if edgar_data_dir else None
+        self._edgar = None
+        if edgar_data_dir:
+            try:
+                self._edgar = LocalEdgarFetcher(edgar_data_dir)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "EDGAR fallback unavailable: %s — Neo4j-only mode", exc,
+                )
+        logger.info(
+            "GraphDataSource ready (EDGAR fallback: %s)",
+            "enabled" if self._edgar else "disabled",
         )
-        logger.info("GraphDataSource ready")
 
     # ------------------------------------------------------------------
     # FinancialDataSource interface
@@ -83,16 +93,32 @@ class GraphDataSource(FinancialDataSource):
     def get_annual_fundamentals(  # pylint: disable=too-many-locals
         self, ticker: str, years: int = 10,
     ) -> dict:
-        """Fetch financials from Neo4j; fall back to EDGAR for US tickers."""
+        """Fetch financials from Neo4j; fall back to EDGAR for US tickers.
+
+        Accepts both ticker symbols and gmr_id UUIDs.
+        """
+        uuid_re = r'^[0-9a-f]{8}-[0-9a-f]{4}-'
+        import re  # pylint: disable=import-outside-toplevel
+
         with self._neo4j.session() as session:
-            rows = session.run(
-                """
-                MATCH (l:Listing {ticker: $ticker})<-[:LISTED_AS]-(c)
-                      -[:REPORTED]->(f:FinancialYear)
-                RETURN f ORDER BY f.year DESC LIMIT $years
-                """,
-                ticker=ticker, years=years,
-            ).data()
+            if re.match(uuid_re, ticker, re.IGNORECASE):
+                # Look up by gmr_id directly
+                rows = session.run(
+                    """
+                    MATCH (c:Company {gmr_id: $gid})-[:REPORTED]->(f:FinancialYear)
+                    RETURN f ORDER BY f.year DESC LIMIT $years
+                    """,
+                    gid=ticker, years=years,
+                ).data()
+            else:
+                rows = session.run(
+                    """
+                    MATCH (l:Listing {ticker: $ticker})<-[:LISTED_AS]-(c)
+                          -[:REPORTED]->(f:FinancialYear)
+                    RETURN f ORDER BY f.year DESC LIMIT $years
+                    """,
+                    ticker=ticker, years=years,
+                ).data()
 
         if rows:
             return self._rows_to_fundamentals(rows)
