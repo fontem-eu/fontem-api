@@ -136,7 +136,7 @@ REL_AWARDED_TO2 = FakeRelationship(CONTRACT_2, COMPANY_B, "AWARDED_TO")
 
 
 class FakeResult:
-    """Wraps a single record or None."""
+    """Wraps a single record or a list of records."""
 
     def __init__(self, record):
         self._record = record
@@ -150,6 +150,11 @@ class FakeResult:
         if isinstance(self._record, list):
             return self._record
         return [self._record]
+
+    def __iter__(self):
+        """Support `for record in result` iteration."""
+        items = self.data()
+        return iter(items)
 
 
 def _make_detect_handler(known_entities: dict):
@@ -240,11 +245,15 @@ def test_depth_1_returns_neighbors(_override_cleanup):
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
 
-    traversal_records = [
-        {"n": COMPANY_A, "rel": REL_AWARDED_TO},
-        {"n": CONTRACT_1, "rel": REL_AWARDED_TO},
-        {"n": AUTH_X, "rel": REL_AWARDED},
-    ]
+    # Two paths from center: Company → Contract → Authority
+    path1 = FakePath(
+        [COMPANY_A, CONTRACT_1],
+        [REL_AWARDED_TO],
+    )
+    path2 = FakePath(
+        [COMPANY_A, CONTRACT_1, AUTH_X],
+        [REL_AWARDED_TO, REL_AWARDED],
+    )
 
     def handler(query, **kwargs):
         if "labels(n)[0]" in query:
@@ -257,8 +266,8 @@ def test_depth_1_returns_neighbors(_override_cleanup):
             if eid in entities:
                 return FakeResult({"n": entities[eid][0]})
             return FakeResult(None)
-        if "UNWIND" in query:
-            return FakeResult(traversal_records)
+        if "RETURN path" in query:
+            return FakeResult([{"path": path1}, {"path": path2}])
         return FakeResult(None)
 
     app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
@@ -281,11 +290,15 @@ def test_type_filter_excludes_types(_override_cleanup):
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
 
-    traversal_records = [
-        {"n": COMPANY_A, "rel": REL_AWARDED_TO},
-        {"n": CONTRACT_1, "rel": REL_AWARDED_TO},
-        {"n": AUTH_X, "rel": REL_AWARDED},
-        {"n": PERSON_P, "rel": REL_DIRECTS},
+    paths = [
+        {"path": FakePath(
+            [COMPANY_A, CONTRACT_1, AUTH_X],
+            [REL_AWARDED_TO, REL_AWARDED],
+        )},
+        {"path": FakePath(
+            [COMPANY_A, PERSON_P],
+            [REL_DIRECTS],
+        )},
     ]
 
     def handler(query, **kwargs):
@@ -299,8 +312,8 @@ def test_type_filter_excludes_types(_override_cleanup):
             if eid in entities:
                 return FakeResult({"n": entities[eid][0]})
             return FakeResult(None)
-        if "UNWIND" in query:
-            return FakeResult(traversal_records)
+        if "RETURN path" in query:
+            return FakeResult(paths)
         return FakeResult(None)
 
     app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
@@ -322,13 +335,13 @@ def test_response_capped_at_500(_override_cleanup):
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
 
-    # Generate 600 fake contract nodes
-    big_records = []
+    # Generate 600 fake paths, each to a different contract node
+    big_paths = []
     for i in range(600):
         cid = f"con-{i:04d}"
         node = FakeNode(["Contract"], {"ted_notice_id": cid, "title": f"C{i}"})
         rel = FakeRelationship(node, COMPANY_A, "AWARDED_TO")
-        big_records.append({"n": node, "rel": rel})
+        big_paths.append({"path": FakePath([COMPANY_A, node], [rel])})
 
     def handler(query, **kwargs):
         if "labels(n)[0]" in query:
@@ -341,8 +354,8 @@ def test_response_capped_at_500(_override_cleanup):
             if eid in entities:
                 return FakeResult({"n": entities[eid][0]})
             return FakeResult(None)
-        if "UNWIND" in query:
-            return FakeResult(big_records)
+        if "RETURN path" in query:
+            return FakeResult(big_paths)
         return FakeResult(None)
 
     app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
@@ -395,10 +408,11 @@ def test_entry_from_authority(_override_cleanup):
         "auth-xxx": (AUTH_X, "Authority", "authority_id"),
     }
 
-    traversal_records = [
-        {"n": AUTH_X, "rel": REL_AWARDED},
-        {"n": CONTRACT_1, "rel": REL_AWARDED},
-        {"n": COMPANY_A, "rel": REL_AWARDED_TO},
+    paths = [
+        {"path": FakePath(
+            [AUTH_X, CONTRACT_1, COMPANY_A],
+            [REL_AWARDED, REL_AWARDED_TO],
+        )},
     ]
 
     def handler(query, **kwargs):
@@ -412,8 +426,8 @@ def test_entry_from_authority(_override_cleanup):
             if eid in entities:
                 return FakeResult({"n": entities[eid][0]})
             return FakeResult(None)
-        if "UNWIND" in query:
-            return FakeResult(traversal_records)
+        if "RETURN path" in query:
+            return FakeResult(paths)
         return FakeResult(None)
 
     app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
@@ -435,9 +449,11 @@ def test_entry_from_person(_override_cleanup):
         "per-ppp": (PERSON_P, "Person", "person_id"),
     }
 
-    traversal_records = [
-        {"n": PERSON_P, "rel": REL_DIRECTS},
-        {"n": COMPANY_A, "rel": REL_DIRECTS},
+    paths = [
+        {"path": FakePath(
+            [PERSON_P, COMPANY_A],
+            [REL_DIRECTS],
+        )},
     ]
 
     def handler(query, **kwargs):
@@ -451,8 +467,8 @@ def test_entry_from_person(_override_cleanup):
             if eid in entities:
                 return FakeResult({"n": entities[eid][0]})
             return FakeResult(None)
-        if "UNWIND" in query:
-            return FakeResult(traversal_records)
+        if "RETURN path" in query:
+            return FakeResult(paths)
         return FakeResult(None)
 
     app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)

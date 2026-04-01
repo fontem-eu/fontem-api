@@ -111,22 +111,24 @@ def _path_to_detail(path) -> PathDetail:
 # ── Traversal core ───────────────────────────────────────────
 
 
-def _collect_graph(records, center_node):
-    """Deduplicate nodes and edges from traversal records."""
+def _collect_paths(result, center_node):
+    """Extract deduplicated nodes and edges from path records."""
     nodes_map: dict[str, GraphNode] = {center_node.id: center_node}
     edges_set: set[tuple] = set()
     edges_list: list[GraphEdge] = []
 
-    for rec in records:
-        nd = _node_to_graph_node(rec["n"])
-        if nd.id not in nodes_map:
-            nodes_map[nd.id] = nd
-
-        ed = _edge_to_graph_edge(rec["rel"])
-        edge_key = (ed.source, ed.target, ed.type)
-        if edge_key not in edges_set:
-            edges_set.add(edge_key)
-            edges_list.append(ed)
+    for record in result:
+        path = record["path"]
+        for node in path.nodes:
+            nd = _node_to_graph_node(node)
+            if nd.id not in nodes_map:
+                nodes_map[nd.id] = nd
+        for rel in path.relationships:
+            ed = _edge_to_graph_edge(rel)
+            edge_key = (ed.source, ed.target, ed.type)
+            if edge_key not in edges_set:
+                edges_set.add(edge_key)
+                edges_list.append(ed)
 
     return nodes_map, edges_list
 
@@ -300,19 +302,17 @@ def graph_traverse(
                 truncated=False, total_available=1,
             )
 
-        records = session.run(
+        result = session.run(
             f"MATCH (start:{center_label} {{{center_id_prop}: $eid}}) "
             f"MATCH path = (start)-[*1..{depth}]-(neighbor) "
             f"WHERE NONE(r IN relationships(path) "
             f"  WHERE type(r) IN $excluded) "
-            f"UNWIND nodes(path) AS n "
-            f"UNWIND relationships(path) AS rel "
-            f"RETURN DISTINCT n, rel",
+            f"RETURN path",
             eid=entity_id,
             excluded=list(_EXCLUDED_RELS),
-        ).data()
+        )
 
-        nodes_map, edges_list = _collect_graph(records, center_node)
+        nodes_map, edges_list = _collect_paths(result, center_node)
         nodes_map, edges_list, truncated, total = _apply_filters(
             nodes_map, edges_list, type_filter, center_label,
         )
