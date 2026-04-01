@@ -30,9 +30,45 @@ def company_profile(
     source=Depends(get_contract_source),
     person_source=Depends(get_person_source),
 ):
-    """Company profile with procurement summary and directors."""
+    """Company profile with procurement summary, directors, and group."""
     contracts = source.get_company_contracts(gmr_id, years=5, limit=5)
     directors = person_source.get_company_directors(gmr_id)
+
+    # Corporate group (via SUBSIDIARY_OF)
+    group = None
+    with source._neo4j.session() as session:  # pylint: disable=protected-access
+        group_data = session.run(
+            "MATCH (member:Company {gmr_id: $gid}) "
+            "OPTIONAL MATCH (member)-[:SUBSIDIARY_OF*1..5]->(ancestor) "
+            "WHERE NOT (ancestor)-[:SUBSIDIARY_OF]->() "
+            "WITH COALESCE(ancestor, member) AS root "
+            "MATCH (root)<-[:SUBSIDIARY_OF*0..5]-(child) "
+            "OPTIONAL MATCH (ct:Contract)-[:AWARDED_TO]->(child) "
+            "RETURN root.gmr_id AS root_id, root.name AS root_name, "
+            "  root.country AS root_country, "
+            "  child.gmr_id AS child_id, child.name AS child_name, "
+            "  child.country AS child_country, "
+            "  count(ct) AS contracts "
+            "ORDER BY contracts DESC",
+            gid=gmr_id,
+        ).data()
+        if group_data and len(group_data) > 1:
+            group = {
+                "root_name": group_data[0]["root_name"],
+                "root_country": group_data[0]["root_country"],
+                "root_id": group_data[0]["root_id"],
+                "entity_count": len(group_data),
+                "members": [
+                    {
+                        "gmr_id": r["child_id"],
+                        "name": r["child_name"],
+                        "country": r["child_country"],
+                        "contracts": r["contracts"],
+                    }
+                    for r in group_data
+                ],
+            }
+
     return {
         "gmr_id": gmr_id,
         "company_name": contracts.get("company_name"),
@@ -43,6 +79,7 @@ def company_profile(
         ),
         "recent_contracts": contracts.get("contracts", [])[:5],
         "directors": directors,
+        "group": group,
     }
 
 
