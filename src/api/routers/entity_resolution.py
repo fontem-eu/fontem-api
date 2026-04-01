@@ -13,11 +13,21 @@ from ..dependencies import get_contract_source
 router = APIRouter(prefix="/entity-resolution", tags=["entity-resolution"])
 
 
+class MergedProperties(BaseModel):
+    """Operator-edited properties for the merged entity."""
+
+    name: str | None = None
+    country: str | None = None
+    lei: str | None = None
+    vat: str | None = None
+
+
 class MergeDecision(BaseModel):
     """Operator decision on a SAME_AS candidate."""
 
     action: str  # "approve" | "reject"
-    canonical_gmr_id: str | None = None  # which side wins (for approve)
+    canonical_gmr_id: str | None = None
+    merged_properties: MergedProperties | None = None
 
 
 @router.get("/candidates")
@@ -81,6 +91,35 @@ def find_similar(
     return {"results": rows}
 
 
+def _validate_merged_properties(props: MergedProperties) -> list[str]:
+    """Validate operator-edited properties. Returns list of error messages."""
+    import pycountry  # pylint: disable=import-outside-toplevel
+    errors = []
+    if props.name is not None:
+        name = props.name.strip()
+        if len(name) < 2:
+            errors.append("Name must be at least 2 characters")
+        if len(name) > 300:
+            errors.append("Name must be at most 300 characters")
+    if props.country is not None:
+        country = props.country.strip().upper()
+        if not pycountry.countries.get(alpha_3=country):
+            errors.append(f"Country '{country}' is not a valid ISO alpha-3 code")
+    if props.lei is not None and props.lei.strip():
+        lei = props.lei.strip()
+        if len(lei) != 20:
+            errors.append(f"LEI must be exactly 20 characters (got {len(lei)})")
+        if not lei.isalnum():
+            errors.append("LEI must be alphanumeric")
+    if props.vat is not None and props.vat.strip():
+        vat = props.vat.strip()
+        if len(vat) < 4:
+            errors.append(f"VAT too short ({len(vat)} chars)")
+        if len(vat) > 30:
+            errors.append(f"VAT too long ({len(vat)} chars)")
+    return errors
+
+
 @router.post("/resolve/{dup_id}/{canonical_id}")
 def resolve_candidate(
     dup_id: str,
@@ -88,9 +127,12 @@ def resolve_candidate(
     decision: MergeDecision,
     source=Depends(get_contract_source),
 ):
-    """Approve or reject a SAME_AS merge candidate."""
+    """Approve or reject a SAME_AS merge candidate.
+
+    When approving, merged_properties allows the operator to override
+    any field on the surviving entity. All edits are validated.
+    """
     with source._neo4j.session() as session:  # pylint: disable=protected-access
-        # Verify the SAME_AS relationship exists
         rel = session.run(
             "MATCH (dup:Company {gmr_id: $dup})"
             "-[r:SAME_AS]->(canonical:Company {gmr_id: $can}) "
@@ -112,7 +154,16 @@ def resolve_candidate(
             return {"status": "rejected"}
 
         if decision.action == "approve":
-            # Create audit node before merge
+            # Validate merged properties if provided
+            if decision.merged_properties:
+                errors = _validate_merged_properties(decision.merged_properties)
+                if errors:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"validation_errors": errors},
+                    )
+
+            # Create audit node
             session.run(
                 "MATCH (dup:Company {gmr_id: $dup}) "
                 "CREATE (:MergeEvent {"
@@ -122,7 +173,7 @@ def resolve_candidate(
                 "})",
                 dup=dup_id, can=canonical_id,
             )
-            # Merge: transfer all relationships from dup to canonical
+            # Merge nodes
             session.run(
                 "MATCH (dup:Company {gmr_id: $dup}), "
                 "  (canonical:Company {gmr_id: $can}) "
@@ -134,6 +185,31 @@ def resolve_candidate(
                 "RETURN node",
                 dup=dup_id, can=canonical_id,
             )
+            # Apply operator-edited properties on the surviving node
+            if decision.merged_properties:
+                props = decision.merged_properties
+                sets = []
+                params = {"can": canonical_id}
+                if props.name is not None:
+                    sets.append("c.name = $name")
+                    params["name"] = props.name.strip()
+                if props.country is not None:
+                    sets.append("c.country = $country")
+                    params["country"] = props.country.strip().upper()
+                if props.lei is not None:
+                    val = props.lei.strip() or None
+                    sets.append("c.lei = $lei")
+                    params["lei"] = val
+                if props.vat is not None:
+                    val = props.vat.strip() or None
+                    sets.append("c.vat = $vat")
+                    params["vat"] = val
+                if sets:
+                    session.run(
+                        f"MATCH (c:Company {{gmr_id: $can}}) SET {', '.join(sets)}",
+                        **params,
+                    )
+
             return {"status": "merged", "surviving_id": canonical_id}
 
         raise HTTPException(
