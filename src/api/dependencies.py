@@ -65,6 +65,11 @@ def get_person_source():
     return _person_source()
 
 
+def get_neo4j_client():
+    """Dependency injected into endpoints that need raw Neo4j access."""
+    return _graph_source()._neo4j  # pylint: disable=protected-access
+
+
 _UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE,
