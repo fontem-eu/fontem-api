@@ -19,7 +19,7 @@ class MergedProperties(BaseModel):
     name: str | None = None
     country: str | None = None
     lei: str | None = None
-    vat: str | None = None
+    vat: list[str] | None = None  # list of known VAT numbers
 
 
 class MergeDecision(BaseModel):
@@ -111,12 +111,15 @@ def _validate_merged_properties(props: MergedProperties) -> list[str]:
             errors.append(f"LEI must be exactly 20 characters (got {len(lei)})")
         if not lei.isalnum():
             errors.append("LEI must be alphanumeric")
-    if props.vat is not None and props.vat.strip():
-        vat = props.vat.strip()
-        if len(vat) < 4:
-            errors.append(f"VAT too short ({len(vat)} chars)")
-        if len(vat) > 30:
-            errors.append(f"VAT too long ({len(vat)} chars)")
+    if props.vat is not None:
+        for i, vat in enumerate(props.vat):
+            v = vat.strip()
+            if not v:
+                continue
+            if len(v) < 4:
+                errors.append(f"VAT #{i + 1} too short ({len(v)} chars)")
+            if len(v) > 50:
+                errors.append(f"VAT #{i + 1} too long ({len(v)} chars)")
     return errors
 
 
@@ -201,9 +204,9 @@ def resolve_candidate(
                     sets.append("c.lei = $lei")
                     params["lei"] = val
                 if props.vat is not None:
-                    val = props.vat.strip() or None
+                    cleaned = [v.strip() for v in props.vat if v.strip()]
                     sets.append("c.vat = $vat")
-                    params["vat"] = val
+                    params["vat"] = cleaned if cleaned else None
                 if sets:
                     session.run(
                         f"MATCH (c:Company {{gmr_id: $can}}) SET {', '.join(sets)}",
