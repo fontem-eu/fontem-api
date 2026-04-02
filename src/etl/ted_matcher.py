@@ -74,7 +74,14 @@ class TedMatcher:
             "RETURN c.vat AS vat, c.gmr_id AS gid"
         )
         for record in result:
-            self._vat_cache[record["vat"]] = record["gid"]
+            vat_val = record["vat"]
+            gid = record["gid"]
+            if isinstance(vat_val, list):
+                for v in vat_val:
+                    if v:
+                        self._vat_cache[v] = gid
+            elif vat_val:
+                self._vat_cache[vat_val] = gid
         logger.info(
             "TedMatcher: warmed VAT cache with %d entries",
             len(self._vat_cache),
