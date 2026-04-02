@@ -20,7 +20,12 @@ from ..schemas.graph import (
 router = APIRouter(prefix="/graph", tags=["graph"])
 
 NODE_CAP = 500
-_EXCLUDED_RELS = {"REPORTED", "LISTED_AS", "CATEGORIZED_AS", "SAME_AS"}
+# Always excluded (internal bookkeeping)
+_ALWAYS_EXCLUDED = {"REPORTED", "LISTED_AS", "CATEGORIZED_AS", "SAME_AS"}
+# Excluded by default but can be opted in via ?rels= parameter
+_DEFAULT_EXCLUDED = _ALWAYS_EXCLUDED | {"AWARDED", "AWARDED_TO"}
+# When summary mode is off, show contract-level edges instead
+_DETAIL_EXCLUDED = _ALWAYS_EXCLUDED | {"CLIENT_OF", "SUPPLIER_OF"}
 _LABEL_ID = {
     "Company": "gmr_id",
     "Authority": "authority_id",
@@ -205,7 +210,7 @@ def _find_shortest(session, endpoints, max_depth):
         f"  WHERE type(r) IN $excluded) "
         f"RETURN path",
         fid=endpoints["from_id"], tid=endpoints["to_id"],
-        excluded=list(_EXCLUDED_RELS),
+        excluded=list(_ALWAYS_EXCLUDED),
     ).single()
     if not result:
         return None, None
@@ -226,7 +231,7 @@ def _find_extra_paths(session, endpoints, shortest_len, search_depth):
         f"    WHERE single(x IN nodes(path) WHERE x = n)) "
         f"RETURN path ORDER BY length(path) LIMIT 9",
         fid=endpoints["from_id"], tid=endpoints["to_id"],
-        excluded=list(_EXCLUDED_RELS),
+        excluded=list(_ALWAYS_EXCLUDED),
     ).data()
     return [_path_to_detail(rec["path"]) for rec in results]
 
@@ -301,6 +306,11 @@ def graph_traverse(
         None,
         description="Filter contracts to those published on or after this date (YYYY-MM-DD)",
     ),
+    summary: bool = Query(
+        True,
+        description="Use CLIENT_OF/SUPPLIER_OF summary edges (true) "
+        "or individual AWARDED/AWARDED_TO edges (false)",
+    ),
     neo4j=Depends(get_neo4j_client),
 ):
     """Variable-depth graph traversal starting from any entity type."""
@@ -337,7 +347,7 @@ def graph_traverse(
             f"  WHERE type(r) IN $excluded) "
             f"RETURN path",
             eid=entity_id,
-            excluded=list(_EXCLUDED_RELS),
+            excluded=list(_DEFAULT_EXCLUDED if summary else _DETAIL_EXCLUDED),
         )
 
         nodes_map, edges_list = _collect_paths(result, center_node)

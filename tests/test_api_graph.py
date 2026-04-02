@@ -601,3 +601,67 @@ def test_since_filter_excludes_old_contracts(_override_cleanup):
     # New contract should be present, old one filtered out
     assert "con-new" in node_ids
     assert "con-old" not in node_ids
+
+
+# ── Summary mode toggles excluded rel types ───────────────────
+
+
+def test_summary_mode_excludes_awarded_rels(_override_cleanup):
+    """summary=true (default) should exclude AWARDED/AWARDED_TO rels."""
+    entities = {
+        "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
+    }
+
+    def handler(query, **kwargs):
+        if "labels(n)[0]" in query:
+            eid = kwargs.get("eid")
+            if eid in entities:
+                return FakeResult({"label": entities[eid][1]})
+            return FakeResult(None)
+        if "RETURN n LIMIT 1" in query:
+            eid = kwargs.get("eid")
+            if eid in entities:
+                return FakeResult({"n": entities[eid][0]})
+            return FakeResult(None)
+        if "RETURN path" in query:
+            # Verify excluded list contains AWARDED/AWARDED_TO
+            excluded = kwargs.get("excluded", [])
+            assert "AWARDED" in excluded
+            assert "AWARDED_TO" in excluded
+            return FakeResult([])
+        return FakeResult(None)
+
+    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
+    with TestClient(app) as client:
+        resp = client.get("/graph/comp-aaa?depth=1&summary=true")
+    assert resp.status_code == 200
+
+
+def test_detail_mode_excludes_summary_rels(_override_cleanup):
+    """summary=false should exclude CLIENT_OF/SUPPLIER_OF rels."""
+    entities = {
+        "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
+    }
+
+    def handler(query, **kwargs):
+        if "labels(n)[0]" in query:
+            eid = kwargs.get("eid")
+            if eid in entities:
+                return FakeResult({"label": entities[eid][1]})
+            return FakeResult(None)
+        if "RETURN n LIMIT 1" in query:
+            eid = kwargs.get("eid")
+            if eid in entities:
+                return FakeResult({"n": entities[eid][0]})
+            return FakeResult(None)
+        if "RETURN path" in query:
+            excluded = kwargs.get("excluded", [])
+            assert "CLIENT_OF" in excluded
+            assert "SUPPLIER_OF" in excluded
+            return FakeResult([])
+        return FakeResult(None)
+
+    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
+    with TestClient(app) as client:
+        resp = client.get("/graph/comp-aaa?depth=1&summary=false")
+    assert resp.status_code == 200
