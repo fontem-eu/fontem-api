@@ -121,8 +121,13 @@ def load_contracts(driver, archive_path: Path):  # pylint: disable=too-many-loca
                 if not contractor:
                     continue
 
+                # Normalize VAT (eforms may return a list in older formats)
+                raw_vat = contractor.legal_id
+                if isinstance(raw_vat, list):
+                    raw_vat = raw_vat[0] if raw_vat else None
+
                 match = matcher.match_company(
-                    contractor.name, contractor.country, contractor.legal_id,
+                    contractor.name, contractor.country, raw_vat,
                 )
 
                 pub_num = notice.publication_number or notice.notice_id
@@ -145,7 +150,7 @@ def load_contracts(driver, archive_path: Path):  # pylint: disable=too-many-loca
                     "company_gmr_id": match.gmr_id,
                     "company_name": contractor.name,
                     "company_country": contractor.country or "",
-                    "company_vat": contractor.legal_id,
+                    "company_vat": raw_vat,
                     "authority_id": authority_id,
                     "authority_name": buyer.name,
                     "authority_country": buyer.country or "",

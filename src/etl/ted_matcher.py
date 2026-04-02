@@ -88,9 +88,12 @@ class TedMatcher:
         )
 
     def match_company(
-        self, name: str, country: str, vat: str | None = None,
+        self, name: str, country: str, vat: str | list | None = None,
     ) -> MatchResult:
         """Resolve an organization to a gmr_id using the 5-layer strategy."""
+        # Normalize VAT: eforms may return a list in older formats
+        if isinstance(vat, list):
+            vat = vat[0] if vat else None
 
         # Layer 1: VAT direct match (cached)
         if vat and vat in self._vat_cache:
