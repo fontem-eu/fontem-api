@@ -133,6 +133,30 @@ def _collect_paths(result, center_node):
     return nodes_map, edges_list
 
 
+def _apply_date_filter(nodes_map, edges_list, since):
+    """Remove Contract nodes whose publication_date is before `since`."""
+    to_remove = set()
+    for nid, nd in nodes_map.items():
+        if nd.type != "Contract":
+            continue
+        pub = nd.properties.get("publication_date", "")
+        # publication_date can be "2024-06-13+02:00" — compare prefix
+        if pub and pub[:10] < since:
+            to_remove.add(nid)
+
+    if not to_remove:
+        return nodes_map, edges_list
+
+    nodes_map = {
+        nid: nd for nid, nd in nodes_map.items() if nid not in to_remove
+    }
+    edges_list = [
+        e for e in edges_list
+        if e.source in nodes_map and e.target in nodes_map
+    ]
+    return nodes_map, edges_list
+
+
 def _apply_filters(nodes_map, edges_list, type_filter, center_label):
     """Apply type filter and node cap, return final (nodes, edges, truncated, total)."""
     if type_filter:
@@ -273,6 +297,10 @@ def graph_traverse(
         None,
         description="Comma-separated node types to include",
     ),
+    since: str | None = Query(
+        None,
+        description="Filter contracts to those published on or after this date (YYYY-MM-DD)",
+    ),
     neo4j=Depends(get_neo4j_client),
 ):
     """Variable-depth graph traversal starting from any entity type."""
@@ -313,6 +341,13 @@ def graph_traverse(
         )
 
         nodes_map, edges_list = _collect_paths(result, center_node)
+
+        # Filter contracts by date if 'since' is provided
+        if since:
+            nodes_map, edges_list = _apply_date_filter(
+                nodes_map, edges_list, since,
+            )
+
         nodes_map, edges_list, truncated, total = _apply_filters(
             nodes_map, edges_list, type_filter, center_label,
         )

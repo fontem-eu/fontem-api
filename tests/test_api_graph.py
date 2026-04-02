@@ -550,3 +550,54 @@ def test_path_finding_extra_paths(_override_cleanup):
     # First path is shortest (3 hops), second is longer (4 hops)
     assert body["paths"][0]["length"] == 3
     assert body["paths"][1]["length"] == 4
+
+
+# ── GE-API-11: Since filter excludes old contracts ────────────
+
+
+def test_since_filter_excludes_old_contracts(_override_cleanup):
+    entities = {
+        "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
+    }
+
+    old_contract = FakeNode(["Contract"], {
+        "ted_notice_id": "con-old",
+        "title": "Old project",
+        "publication_date": "2020-06-15+02:00",
+    })
+    new_contract = FakeNode(["Contract"], {
+        "ted_notice_id": "con-new",
+        "title": "New project",
+        "publication_date": "2025-03-01+02:00",
+    })
+    rel_old = FakeRelationship(old_contract, COMPANY_A, "AWARDED_TO")
+    rel_new = FakeRelationship(new_contract, COMPANY_A, "AWARDED_TO")
+
+    paths = [
+        {"path": FakePath([COMPANY_A, old_contract], [rel_old])},
+        {"path": FakePath([COMPANY_A, new_contract], [rel_new])},
+    ]
+
+    def handler(query, **kwargs):
+        if "labels(n)[0]" in query:
+            eid = kwargs.get("eid")
+            if eid in entities:
+                return FakeResult({"label": entities[eid][1]})
+            return FakeResult(None)
+        if "RETURN n LIMIT 1" in query:
+            eid = kwargs.get("eid")
+            if eid in entities:
+                return FakeResult({"n": entities[eid][0]})
+            return FakeResult(None)
+        if "RETURN path" in query:
+            return FakeResult(paths)
+        return FakeResult(None)
+
+    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
+    with TestClient(app) as client:
+        resp = client.get("/graph/comp-aaa?depth=1&since=2024-01-01")
+    body = resp.json()
+    node_ids = {n["id"] for n in body["nodes"]}
+    # New contract should be present, old one filtered out
+    assert "con-new" in node_ids
+    assert "con-old" not in node_ids
