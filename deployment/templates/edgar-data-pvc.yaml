@@ -4,6 +4,7 @@ metadata:
   name: edgar-data
   namespace: gmr
 spec:
+  storageClassName: ""
   accessModes:
     - ReadWriteMany
   resources:
