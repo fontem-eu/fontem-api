@@ -20,6 +20,10 @@ WORKDIR /app
 COPY Requirements.txt .
 RUN pip install --no-cache-dir -r Requirements.txt && rm Requirements.txt
 
+# --- eforms-parser (TED contract loader dependency) ---------------------------
+COPY vendor/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
+
 # --- Application source -------------------------------------------------------
 COPY src/ ./src/
 COPY main.py .
