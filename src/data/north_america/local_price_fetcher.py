@@ -97,7 +97,7 @@ class LocalPriceFetcher:
         self,
         ticker: str,
         period: str = "3y",
-        interval: str = "1d",  # pylint: disable=unused-argument
+        _interval: str = "1d",
     ) -> pd.DataFrame:
         """Return OHLCV DataFrame for *ticker*.  Returns empty DataFrame if absent."""
         df = self._load_history(ticker)
@@ -202,14 +202,14 @@ class LocalPriceFetcher:
             "market_cap":         None,
         }
 
-    def get_info(self, ticker: str) -> dict:  # pylint: disable=unused-argument
+    def get_info(self, _ticker: str) -> dict:
         """Not available from local OHLCV files — returns empty dict."""
         return {}
 
-    def get_shares_outstanding(self, ticker: str) -> float | None:  # pylint: disable=unused-argument
+    def get_shares_outstanding(self, _ticker: str) -> float | None:
         """Not available from local OHLCV files — returns None."""
         return None
 
-    def get_splits(self, ticker: str) -> pd.Series:  # pylint: disable=unused-argument
+    def get_splits(self, _ticker: str) -> pd.Series:
         """Not available from local OHLCV files — returns empty Series."""
         return pd.Series(dtype=float)

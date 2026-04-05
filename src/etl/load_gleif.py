@@ -139,7 +139,6 @@ def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
     """
 
     total = 0
-    batched = 0
     batch = []
     t0 = time.time()
 
@@ -156,7 +155,6 @@ def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
 
             if len(batch) >= batch_size:
                 session.run(query, batch=batch)
-                batched += len(batch)
                 total += len(batch)
                 batch = []
                 if total % 50000 < batch_size:

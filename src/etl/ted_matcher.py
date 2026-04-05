@@ -166,7 +166,7 @@ class TedMatcher:
         )
 
     def match_authority(  # pylint: disable=unused-argument
-        self, name: str, country: str, vat: str | None = None,
+        self, name: str, country: str, _vat: str | None = None,
     ) -> str:
         """Resolve an authority to an authority_id.
 
