@@ -5,6 +5,9 @@ metadata:
   namespace: gmr
   labels:
     app: neo4j
+    managed-by: manual
+  annotations:
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
 spec:
   replicas: 1
   strategy:
@@ -27,7 +30,6 @@ spec:
             - containerPort: 7687
               name: bolt
           env:
-            # Install APOC plugin (needed for fuzzy matching + node merging)
             - name: NEO4J_PLUGINS
               value: '["apoc"]'
             - name: NEO4J_AUTH
@@ -35,12 +37,10 @@ spec:
                 secretKeyRef:
                   name: neo4j-credentials
                   key: NEO4J_AUTH
-            # Allow connections from any origin (API pod is in-cluster)
             - name: NEO4J_dbms_connector_bolt_listen__address
               value: "0.0.0.0:7687"
             - name: NEO4J_dbms_connector_http_listen__address
               value: "0.0.0.0:7474"
-            # Memory sizing — scaled for 3.5M+ nodes + procurement data
             - name: NEO4J_server_memory_heap_initial__size
               value: "4g"
             - name: NEO4J_server_memory_heap_max__size
@@ -70,7 +70,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: backup
+              mountPath: /backup
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: neo4j-data
+        - name: backup
+          persistentVolumeClaim:
+            claimName: neo4j-backup

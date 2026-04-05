@@ -5,6 +5,9 @@ metadata:
   namespace: gmr
   labels:
     app: neo4j
+    managed-by: manual
+  annotations:
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
 spec:
   selector:
     app: neo4j

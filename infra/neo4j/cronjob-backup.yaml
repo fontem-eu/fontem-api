@@ -4,13 +4,14 @@ metadata:
   name: neo4j-backup
   namespace: gmr
 spec:
-  schedule: "0 1 * * *"   # Daily at 01:00 UTC (before other jobs)
+  schedule: "0 1 * * *"   # Daily at 01:00 UTC
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      activeDeadlineSeconds: 1800
+      activeDeadlineSeconds: 3600
+      backoffLimit: 1
       template:
         spec:
           restartPolicy: Never
@@ -21,13 +22,25 @@ spec:
                 - /bin/sh
                 - -c
                 - |
-                  cypher-shell -a bolt://neo4j:7687 -u neo4j -p $NEO4J_PASSWORD \
-                    "CALL apoc.export.json.all('/data/backups/full.json', {useTypes: true})"
-                  DATE=$(date +%Y%m%d)
-                  cp /data/backups/full.json /backup-nfs/neo4j-backups/${DATE}.json
+                  set -e
+                  DATE=$(date +%Y%m%d-%H%M)
+                  echo "Starting Neo4j backup ${DATE}..."
+
+                  # Use cypher-shell to export via APOC (works on community edition)
+                  cypher-shell -a bolt://neo4j.gmr.svc.cluster.local:7687 \
+                    -u neo4j -p "$NEO4J_PASSWORD" \
+                    "CALL apoc.export.cypher.all(null, {streamStatements:true, format:'cypher-shell'})" \
+                    > /backup/${DATE}-full.cypher
+
+                  # Compress
+                  gzip /backup/${DATE}-full.cypher
+                  SIZE=$(du -sh /backup/${DATE}-full.cypher.gz | cut -f1)
+                  echo "Backup saved: ${DATE}-full.cypher.gz (${SIZE})"
+
                   # Keep only last 7 days
-                  ls -t /backup-nfs/neo4j-backups/*.json | tail -n +8 | xargs rm -f 2>/dev/null || true
-                  echo "Backup ${DATE} complete"
+                  ls -t /backup/*.cypher.gz 2>/dev/null | tail -n +8 | xargs rm -f 2>/dev/null || true
+                  echo "Backup complete. Files:"
+                  ls -lh /backup/*.cypher.gz 2>/dev/null
               env:
                 - name: NEO4J_PASSWORD
                   valueFrom:
@@ -35,21 +48,16 @@ spec:
                       name: neo4j-credentials
                       key: NEO4J_PASSWORD
               volumeMounts:
-                - name: neo4j-data
-                  mountPath: /data
-                - name: backup-nfs
-                  mountPath: /backup-nfs
+                - name: backup
+                  mountPath: /backup
               resources:
                 requests:
-                  cpu: "250m"
-                  memory: "512Mi"
+                  cpu: 250m
+                  memory: 512Mi
                 limits:
-                  cpu: "1"
-                  memory: "2Gi"
+                  cpu: "2"
+                  memory: 4Gi
           volumes:
-            - name: neo4j-data
+            - name: backup
               persistentVolumeClaim:
-                claimName: neo4j-data
-            - name: backup-nfs
-              persistentVolumeClaim:
-                claimName: esef-data
+                claimName: neo4j-backup
