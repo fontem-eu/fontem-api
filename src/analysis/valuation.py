@@ -203,10 +203,10 @@ class Valuation:  # pylint: disable=too-few-public-methods
 
             rows.append({
                 "year":               yr,
-                "da":                 da_v if da_v != 0.0 else nan,
+                "da":                 da_v if abs(da_v) > 1e-9 else nan,
                 "interest_expense":   int_exp,
-                "cash_and_equivalents": cash_v if cash_v != 0.0 else nan,
-                "long_term_debt":     ltd if ltd != 0.0 else nan,
+                "cash_and_equivalents": cash_v if abs(cash_v) > 1e-9 else nan,
+                "long_term_debt":     ltd if abs(ltd) > 1e-9 else nan,
                 "ebitda":             ebitda,
                 "ebitda_margin":      ebitda_margin,
                 "net_debt":           net_debt,
