@@ -17,6 +17,7 @@ test:
 		--cov=$(SRC) \
 		--cov-report=xml:coverage.xml \
 		--junitxml=test-results.xml \
+		--cov-config=.coveragerc \
 		-q
 	python3 -m pylint $(SRC) $(TESTS) \
 		--output-format=parseable \
@@ -35,7 +36,8 @@ analyze: test
 		-Dsonar.python.pylint.reportPaths=pylint-report.txt \
 		-Dsonar.host.url=$(SONAR_URL) \
 		-Dsonar.token=$(SONAR_TOKEN) \
-		-Dsonar.scm.provider=git
+		-Dsonar.scm.provider=git \
+		'-Dsonar.coverage.exclusions=src/etl/**/*'
 	@echo "Dashboard: $(SONAR_URL)/dashboard?id=$(PROJECT)"
 
 # ── Infra ────────────────────────────────────────────────────

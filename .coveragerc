@@ -1,0 +1,10 @@
+[run]
+omit =
+    src/etl/*
+    src/api/run.py
+    src/logging_config.py
+    src/data/graph/graph_data_quality.py
+    src/data/graph/graph_person_source.py
+    src/data/graph/graph_contract_source.py
+    src/analysis/contract_data_source.py
+    src/analysis/entity_resolver.py
