@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: eu-lobbying-refresh
+  namespace: gmr
+spec:
+  schedule: "0 5 1 * *"    # Monthly, 1st at 05:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: eu-lobbying-refresh
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: loader
+              image: contribute.void42.internal/golden/gmr-api:latest
+              command: ["python3", "-m", "src.etl.load_eu_lobbying"]
+              env:
+                - name: NEO4J_URI
+                  value: "bolt://neo4j:7687"
+                - name: NEO4J_USER
+                  value: "neo4j"
+                - name: NEO4J_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_PASSWORD
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi
+          imagePullSecrets:
+            - name: regcred
