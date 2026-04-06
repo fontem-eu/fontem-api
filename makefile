@@ -66,3 +66,23 @@ deploy:
 	@echo "Deployment is ready!"
 
 .PHONY: all test analyze neo4j build release deploy
+
+# ── Security & SBOM ─────────────────────────────────────────
+audit:
+	pip-audit -r requirements.txt --desc 2>&1 || true
+	@echo ""
+	@echo "=== Renovate Dependency Report ==="
+	LOG_LEVEL=warn npx renovate --platform=local --dry-run 2>&1 | grep -E "dependency|update|→|->|current|new" | head -30 || true
+
+sbom:
+	cyclonedx-py requirements requirements.txt --of json -o sbom.json
+	curl -s -X POST "$(DTRACK_URL)/api/v1/bom" \
+		-H "X-Api-Key: $(DTRACK_KEY)" \
+		-H "Content-Type: multipart/form-data" \
+		-F "autoCreate=true" \
+		-F "projectName=$(PROJECT)" \
+		-F "projectVersion=main" \
+		-F "bom=@sbom.json" > /dev/null
+	@echo "SBOM uploaded to Dependency-Track"
+
+.PHONY: audit sbom
