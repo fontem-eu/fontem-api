@@ -97,3 +97,17 @@ def test_text_helper_missing_path():
 
 def test_text_helper_none_element():
     assert _text(None, "anything") == ""
+
+
+def test_parse_entity_country_iso():
+    elem = ET.fromstring(SAMPLE_XML)
+    result = _parse_entity(elem)
+    assert result["country_iso"] == "BEL"
+
+
+def test_parse_entity_country_iso_unknown():
+    """Unknown country keeps the original name."""
+    xml = SAMPLE_XML.replace("BELGIUM", "MORDOR")
+    elem = ET.fromstring(xml)
+    result = _parse_entity(elem)
+    assert result["country_iso"] == "MORDOR"

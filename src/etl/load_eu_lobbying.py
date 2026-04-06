@@ -40,6 +40,7 @@ MERGE (l:Lobbyist {tr_id: row.tr_id})
 SET l.name            = row.name,
     l.acronym         = row.acronym,
     l.country         = row.country,
+    l.country_iso     = row.country_iso,
     l.city            = row.city,
     l.category        = row.category,
     l.entity_form     = row.entity_form,
@@ -53,16 +54,30 @@ SET l.name            = row.name,
     l.last_updated    = row.last_updated
 """
 
-# Match lobbyist to existing Company by name+country (fuzzy)
+# Match lobbyist to existing Company by name (case-insensitive)
 MATCH_COMPANY = """
 UNWIND $batch AS row
 MATCH (l:Lobbyist {tr_id: row.tr_id})
 WITH l, row
 OPTIONAL MATCH (c:Company)
-WHERE c.name = l.name AND c.country = l.country
+WHERE toUpper(c.name) = toUpper(l.name)
 WITH l, c WHERE c IS NOT NULL
 MERGE (l)-[:REPRESENTS]->(c)
 """
+
+# Country name normalization (TR uses full names, Company nodes use ISO)
+_COUNTRY_MAP = {
+    "UNITED STATES": "US", "UNITED KINGDOM": "GB", "GERMANY": "DEU",
+    "FRANCE": "FRA", "SPAIN": "ESP", "ITALY": "ITA", "NETHERLANDS": "NLD",
+    "BELGIUM": "BEL", "SWEDEN": "SWE", "AUSTRIA": "AUT", "DENMARK": "DNK",
+    "FINLAND": "FIN", "IRELAND": "IRL", "POLAND": "POL", "PORTUGAL": "PRT",
+    "CZECH REPUBLIC": "CZE", "ROMANIA": "ROU", "HUNGARY": "HUN",
+    "GREECE": "GRC", "LUXEMBOURG": "LUX", "CROATIA": "HRV", "BULGARIA": "BGR",
+    "SLOVAKIA": "SVK", "SLOVENIA": "SVN", "LITHUANIA": "LTU", "LATVIA": "LVA",
+    "ESTONIA": "EST", "MALTA": "MLT", "CYPRUS": "CYP", "SWITZERLAND": "CHE",
+    "NORWAY": "NOR", "JAPAN": "JPN", "CANADA": "CAN", "AUSTRALIA": "AUS",
+    "CHINA": "CHN", "INDIA": "IND", "BRAZIL": "BRA",
+}
 
 # Create interest relationships
 MERGE_INTERESTS = """
@@ -143,6 +158,7 @@ def _parse_entity(elem: ET.Element) -> dict[str, Any]:
         "name": name,
         "acronym": _text(elem, "acronym"),
         "country": country,
+        "country_iso": _COUNTRY_MAP.get(country.upper(), country),
         "city": city,
         "category": _text(elem, "registrationCategory"),
         "entity_form": _text(elem, "entityForm"),

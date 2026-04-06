@@ -31,6 +31,7 @@ _LABEL_ID = {
     "Authority": "authority_id",
     "Person": "person_id",
     "Contract": "ted_notice_id",
+    "Lobbyist": "tr_id",
 }
 
 
@@ -67,13 +68,14 @@ def _node_id(node) -> str:
         or props.get("authority_id")
         or props.get("person_id")
         or props.get("ted_notice_id")
+        or props.get("tr_id")
         or str(node.element_id)
     )
 
 
 def _clean_props(props: dict) -> dict:
     """Remove None values and internal IDs from properties."""
-    skip = {"gmr_id", "authority_id", "person_id", "ted_notice_id"}
+    skip = {"gmr_id", "authority_id", "person_id", "ted_notice_id", "tr_id"}
     return {
         k: v for k, v in props.items()
         if v is not None and k not in skip

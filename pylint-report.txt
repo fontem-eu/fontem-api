@@ -1,0 +1,90 @@
+************* Module src.api.routers.entity_resolution
+src/api/routers/entity_resolution.py:96: [E0401(import-error), _validate_merged_properties] Unable to import 'pycountry'
+src/api/routers/entity_resolution.py:94: [R0912(too-many-branches), _validate_merged_properties] Too many branches (13/12)
+************* Module src.api.routers.graph
+src/api/routers/graph.py:298: [R0913(too-many-arguments), graph_traverse] Too many arguments (6/5)
+src/api/routers/graph.py:298: [R0917(too-many-positional-arguments), graph_traverse] Too many positional arguments (6/5)
+src/api/routers/graph.py:298: [R0914(too-many-locals), graph_traverse] Too many local variables (17/15)
+************* Module src.api.routers.contracts
+src/api/routers/contracts.py:11: [W0611(unused-import), ] Unused get_data_source imported from dependencies
+************* Module src.etl.load_eu_lobbying
+src/etl/load_eu_lobbying.py:210: [C0301(line-too-long), ] Line too long (104/100)
+src/etl/load_eu_lobbying.py:220: [C0301(line-too-long), ] Line too long (104/100)
+src/etl/load_eu_lobbying.py:86: [R0914(too-many-locals), _parse_entity] Too many local variables (20/15)
+src/etl/load_eu_lobbying.py:161: [R0914(too-many-locals), load_eu_lobbying] Too many local variables (19/15)
+************* Module src.etl.load_cpv
+src/etl/load_cpv.py:98: [C0301(line-too-long), ] Line too long (103/100)
+src/etl/load_cpv.py:15: [W0611(unused-import), ] Unused import time
+************* Module src.etl.load_fr_directors
+src/etl/load_fr_directors.py:195: [C0301(line-too-long), ] Line too long (103/100)
+src/etl/load_fr_directors.py:17: [W0611(unused-import), ] Unused import hashlib
+src/etl/load_fr_directors.py:18: [W0611(unused-import), ] Unused import json
+************* Module src.etl.load_gleif
+src/etl/load_gleif.py:34: [C0103(invalid-name), ] Constant name "_t" doesn't conform to UPPER_CASE naming style
+src/etl/load_gleif.py:82: [W0612(unused-variable), parse_gleif_xml] Unused variable 'event'
+src/etl/load_gleif.py:210: [R1732(consider-using-with), main] Consider using 'with' for resource-allocating operations
+************* Module src.etl.normalize_countries
+src/etl/normalize_countries.py:73: [C0301(line-too-long), ] Line too long (103/100)
+src/etl/normalize_countries.py:17: [E0401(import-error), ] Unable to import 'pycountry'
+************* Module src.etl.load_us_financials
+src/etl/load_us_financials.py:228: [C0301(line-too-long), ] Line too long (103/100)
+src/etl/load_us_financials.py:64: [R0914(too-many-locals), _extract_annual] Too many local variables (20/15)
+src/etl/load_us_financials.py:64: [R0912(too-many-branches), _extract_annual] Too many branches (15/12)
+src/etl/load_us_financials.py:76: [W0612(unused-variable), _extract_annual] Unused variable 'unit_key'
+************* Module src.etl.dedup_companies
+src/etl/dedup_companies.py:142: [C0301(line-too-long), ] Line too long (103/100)
+************* Module src.etl.load_gleif_relationships
+src/etl/load_gleif_relationships.py:165: [C0301(line-too-long), ] Line too long (103/100)
+src/etl/load_gleif_relationships.py:31: [C0103(invalid-name), ] Constant name "_t" doesn't conform to UPPER_CASE naming style
+src/etl/load_gleif_relationships.py:76: [W0612(unused-variable), parse_relationships] Unused variable 'event'
+src/etl/load_gleif_relationships.py:176: [R1732(consider-using-with), main] Consider using 'with' for resource-allocating operations
+************* Module tests.test_eu_lobbying
+tests/test_eu_lobbying.py:40: [C0116(missing-function-docstring), test_parse_entity_basic_fields] Missing function or method docstring
+tests/test_eu_lobbying.py:52: [C0116(missing-function-docstring), test_parse_entity_dates] Missing function or method docstring
+tests/test_eu_lobbying.py:59: [C0116(missing-function-docstring), test_parse_entity_ep_passes] Missing function or method docstring
+tests/test_eu_lobbying.py:65: [C0116(missing-function-docstring), test_parse_entity_members_fte] Missing function or method docstring
+tests/test_eu_lobbying.py:71: [C0116(missing-function-docstring), test_parse_entity_financial_data] Missing function or method docstring
+tests/test_eu_lobbying.py:78: [C0116(missing-function-docstring), test_parse_entity_interests] Missing function or method docstring
+tests/test_eu_lobbying.py:86: [C0116(missing-function-docstring), test_parse_entity_goals_truncated] Missing function or method docstring
+tests/test_eu_lobbying.py:92: [C0116(missing-function-docstring), test_text_helper_missing_path] Missing function or method docstring
+tests/test_eu_lobbying.py:98: [C0116(missing-function-docstring), test_text_helper_none_element] Missing function or method docstring
+************* Module tests.test_contracts_api
+tests/test_contracts_api.py:68: [W0212(protected-access), _mock_contract_source] Access to a protected member _neo4j of a client class
+tests/test_contracts_api.py:69: [W0212(protected-access), _mock_contract_source] Access to a protected member _neo4j of a client class
+tests/test_contracts_api.py:72: [W0212(protected-access), _mock_contract_source] Access to a protected member _neo4j of a client class
+tests/test_contracts_api.py:79: [W0613(unused-argument), _mock_contract_source._run_side] Unused argument 'args'
+tests/test_contracts_api.py:79: [W0613(unused-argument), _mock_contract_source._run_side] Unused argument 'kwargs'
+tests/test_contracts_api.py:165: [W0613(unused-argument), TestUnifiedSearch.test_returns_companies_and_authorities._run_side] Unused argument 'args'
+tests/test_contracts_api.py:165: [W0613(unused-argument), TestUnifiedSearch.test_returns_companies_and_authorities._run_side] Unused argument 'kwargs'
+tests/test_contracts_api.py:187: [W0212(protected-access), TestUnifiedSearch.test_returns_companies_and_authorities] Access to a protected member _neo4j of a client class
+tests/test_contracts_api.py:214: [R0903(too-few-public-methods), TestSectorSummary] Too few public methods (1/2)
+tests/test_contracts_api.py:7: [W0611(unused-import), ] Unused get_data_source imported from src.api.dependencies
+************* Module tests.test_graph_data_source
+tests/test_graph_data_source.py:22: [W0124(confusing-with-statement), _make_source] Following "as" with another context manager looks like a tuple.
+tests/test_graph_data_source.py:62: [W0612(unused-variable), test_fundamentals_fallback_to_edgar] Unused variable 'session'
+************* Module tests.test_load_gleif
+tests/test_load_gleif.py:66: [C0116(missing-function-docstring), test_parse_single_record] Missing function or method docstring
+tests/test_load_gleif.py:78: [C0116(missing-function-docstring), test_parse_inactive_entity] Missing function or method docstring
+tests/test_load_gleif.py:85: [C0116(missing-function-docstring), test_parse_skips_short_lei] Missing function or method docstring
+tests/test_load_gleif.py:91: [C0116(missing-function-docstring), test_parse_multiple_records] Missing function or method docstring
+tests/test_load_gleif.py:97: [C0116(missing-function-docstring), test_parse_empty_records] Missing function or method docstring
+tests/test_load_gleif.py:103: [C0116(missing-function-docstring), test_parse_missing_legal_form] Missing function or method docstring
+tests/test_load_gleif.py:119: [C0116(missing-function-docstring), test_parse_entity_legal_form_code] Missing function or method docstring
+************* Module tests.test_load_us_companies
+tests/test_load_us_companies.py:31: [W0612(unused-variable), test_batches_multiple_companies] Unused variable 'session'
+tests/test_load_us_companies.py:42: [W0612(unused-variable), test_skips_entries_without_ticker] Unused variable 'session'
+************* Module tests.test_load_eu_listings
+tests/test_load_eu_listings.py:44: [W0612(unused-variable), test_listings_batches_multiple_entities] Unused variable 'session'
+tests/test_load_eu_listings.py:114: [W0612(unused-variable), test_financials_skips_filing_without_year] Unused variable 'session'
+tests/test_load_eu_listings.py:135: [W0612(unused-variable), test_financials_skips_bad_json] Unused variable 'session'
+************* Module tests.test_api_health_data
+tests/test_api_health_data.py:50: [C0301(line-too-long), ] Line too long (125/100)
+tests/test_api_health_data.py:51: [C0301(line-too-long), ] Line too long (125/100)
+************* Module tests.test_data_quality
+tests/test_data_quality.py:2: [W0611(unused-import), ] Unused MagicMock imported from unittest.mock
+************* Module tests.test_persons
+tests/test_persons.py:2: [W0611(unused-import), ] Unused MagicMock imported from unittest.mock
+
+------------------------------------------------------------------
+Your code has been rated at 9.88/10 (previous run: 8.35/10, +1.53)
+

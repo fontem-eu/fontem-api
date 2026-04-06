@@ -1,0 +1,6 @@
+projectKey=edgar-gmr-etl
+serverUrl=http://sonarqube.sonarqube.svc.cluster.local:9000
+serverVersion=10.7.0.96327
+dashboardUrl=http://sonarqube.sonarqube.svc.cluster.local:9000/dashboard?id=edgar-gmr-etl
+ceTaskId=3f834e85-7cd6-4ac7-a4f6-ffc6cb0ff44a
+ceTaskUrl=http://sonarqube.sonarqube.svc.cluster.local:9000/api/ce/task?id=3f834e85-7cd6-4ac7-a4f6-ffc6cb0ff44a

@@ -220,9 +220,23 @@ def unified_search(  # pylint: disable=too-many-locals
             q=q, limit=limit,
         ).data()
 
+        # 5. Lobbyists
+        lobbyist_rows = session.run(
+            "MATCH (l:Lobbyist) "
+            "WHERE toLower(l.name) CONTAINS toLower($q) "
+            "   OR toLower(l.acronym) CONTAINS toLower($q) "
+            "RETURN l.tr_id AS tr_id, l.name AS name, "
+            "  l.acronym AS acronym, l.country AS country, "
+            "  l.category AS category, l.ep_passes AS ep_passes, "
+            "  l.cost_max AS cost_max "
+            "LIMIT $limit",
+            q=q, limit=limit,
+        ).data()
+
     return {
         "query": q,
         "companies": company_rows,
         "authorities": auth_rows,
         "persons": person_rows,
+        "lobbyists": lobbyist_rows,
     }
