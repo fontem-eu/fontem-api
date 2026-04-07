@@ -40,63 +40,88 @@ COUNTRY_CURRENCY = {
 
 
 def load_listings(driver, entities: dict):
-    """Create Listing nodes and LISTED_AS relationships."""
-    query = """
+    """Create Company nodes (always) and Listing nodes (only when ticker is not null)."""
+    company_query = """
     UNWIND $batch AS row
     MERGE (c:Company {gmr_id: row.gmr_id})
     ON CREATE SET c.lei = row.lei, c.name = row.name,
                   c.country = row.country, c.active = true
+    """
+    listing_query = """
+    UNWIND $batch AS row
+    MATCH (c:Company {gmr_id: row.gmr_id})
     MERGE (l:Listing {ticker: row.ticker})
     SET l.exchange = row.exchange,
         l.currency = row.currency,
         l.active   = true
     MERGE (c)-[:LISTED_AS]->(l)
     """
-    batch = []
-    total = 0
+    company_batch = []
+    listing_batch = []
+    total_companies = 0
+    total_listings = 0
 
     with driver.session() as session:
         session.run(
             "CREATE CONSTRAINT listing_ticker IF NOT EXISTS "
             "FOR (l:Listing) REQUIRE l.ticker IS UNIQUE"
         )
-        for _ticker, meta in entities.items():
+        for _key, meta in entities.items():
             lei = meta.get("lei", "")
             gid = gmr_id.from_lei(lei) if len(lei) == 20 else (
                 gmr_id.from_name(
                     meta.get("country", "XX"),
-                    meta.get("name", _ticker),
+                    meta.get("name", _key),
                 )
             )
-            batch.append({
+            company_batch.append({
                 "gmr_id": gid,
                 "lei": lei if len(lei) == 20 else None,
                 "name": meta.get("name", ""),
                 "country": meta.get("country", ""),
-                "ticker": meta.get("ticker", _ticker),
-                "exchange": meta.get("exchange", ""),
-                "currency": COUNTRY_CURRENCY.get(
-                    meta.get("country", ""), "EUR"
-                ),
             })
-            if len(batch) >= BATCH_SIZE:
-                session.run(query, batch=batch)
-                total += len(batch)
-                batch = []
-        if batch:
-            session.run(query, batch=batch)
-            total += len(batch)
 
-    logger.info("Listings: %d created/updated", total)
-    return total
+            ticker = meta.get("ticker")
+            if ticker is not None:
+                listing_batch.append({
+                    "gmr_id": gid,
+                    "ticker": ticker,
+                    "exchange": meta.get("exchange", ""),
+                    "currency": COUNTRY_CURRENCY.get(
+                        meta.get("country", ""), "EUR"
+                    ),
+                })
+
+            if len(company_batch) >= BATCH_SIZE:
+                session.run(company_query, batch=company_batch)
+                total_companies += len(company_batch)
+                company_batch = []
+            if len(listing_batch) >= BATCH_SIZE:
+                session.run(listing_query, batch=listing_batch)
+                total_listings += len(listing_batch)
+                listing_batch = []
+
+        if company_batch:
+            session.run(company_query, batch=company_batch)
+            total_companies += len(company_batch)
+        if listing_batch:
+            session.run(listing_query, batch=listing_batch)
+            total_listings += len(listing_batch)
+
+    logger.info("Companies: %d created/updated, Listings: %d (skipped %d without ticker)",
+                total_companies, total_listings, total_companies - total_listings)
+    return total_companies
 
 
 def load_financials(driver, summaries_dir: Path):
-    """Read summary JSON files and create FinancialYear nodes."""
+    """Read summary JSON files and create FinancialYear nodes.
+
+    Matches companies by LEI (not by Listing ticker) so financial data
+    is preserved even for entities without a resolved ticker.
+    """
     query = """
     UNWIND $batch AS row
-    MATCH (l:Listing {ticker: row.ticker})
-    MATCH (c:Company)-[:LISTED_AS]->(l)
+    MATCH (c:Company {lei: row.lei})
     MERGE (f:FinancialYear {gmr_id: c.gmr_id, year: row.year})
     SET f.source             = 'ESEF',
         f.revenue            = row.revenue,
@@ -130,6 +155,7 @@ def load_financials(driver, summaries_dir: Path):
     batch = []
     total_filings = 0
     files_processed = 0
+    skipped_no_lei = 0
 
     with driver.session() as session:
         for path in sorted(summaries_dir.glob("*.json")):
@@ -139,12 +165,16 @@ def load_financials(driver, summaries_dir: Path):
                 logger.warning("Skipping %s: %s", path.name, exc)
                 continue
 
-            ticker = doc.get("ticker", path.stem)
+            lei = doc.get("lei")
+            if not lei or len(lei) != 20:
+                skipped_no_lei += 1
+                continue
+
             for filing in doc.get("filings", []):
                 year = filing.get("year")
                 if year is None:
                     continue
-                row = {"ticker": ticker, "year": int(year)}
+                row = {"lei": lei, "year": int(year)}
                 for key in (
                     "filing_date", "revenue", "gross_profit",
                     "operating_income", "net_income", "eps",
@@ -176,8 +206,8 @@ def load_financials(driver, summaries_dir: Path):
             total_filings += len(batch)
 
     logger.info(
-        "Financials: %d filings from %d files",
-        total_filings, files_processed,
+        "Financials: %d filings from %d files (skipped %d without LEI)",
+        total_filings, files_processed, skipped_no_lei,
     )
     return total_filings
 

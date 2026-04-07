@@ -89,6 +89,7 @@ def test_financials_reads_summary_and_merges(tmp_path):
     summaries = tmp_path / "summaries"
     summaries.mkdir()
     (summaries / "ADYEN.AS.json").write_text(json.dumps({
+        "lei": "7Z46009YA1DNEUQBVR42",
         "ticker": "ADYEN.AS",
         "filings": [
             {"year": 2024, "revenue": 2225601000.0, "net_income": 925163000.0,
@@ -104,7 +105,7 @@ def test_financials_reads_summary_and_merges(tmp_path):
     merge_call = session.run.call_args_list[0]
     assert "FinancialYear" in merge_call.args[0]
     batch = merge_call.kwargs["batch"]
-    assert batch[0]["ticker"] == "ADYEN.AS"
+    assert batch[0]["lei"] == "7Z46009YA1DNEUQBVR42"
     assert batch[0]["year"] == 2024
     assert batch[0]["revenue"] == 2225601000.0
 
