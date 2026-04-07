@@ -21,8 +21,15 @@ spec:
           containers:
             - name: loader
               image: contribute.void42.internal/golden/gmr-api:latest
-              command: ["python3", "-m", "src.etl.load_eu_lobbying"]
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  python3 -m src.etl.load_eu_lobbying
+                  curl -fsS "${KUMA_PUSH_URL}" > /dev/null || true
               env:
+                - name: KUMA_PUSH_URL
+                  value: "http://uptime-kuma.uptime-kuma.svc.cluster.local:3001/api/push/f6df3bb6-224d-b154-b34e-cac4c8e9d8b5?status=up&msg=lobbying-ok"
                 - name: NEO4J_URI
                   value: "bolt://neo4j:7687"
                 - name: NEO4J_USER
