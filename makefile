@@ -65,7 +65,7 @@ deploy:
 	kubectl -n gmr rollout status deployment/gmr-api --timeout=300s
 	@echo "Deployment is ready!"
 
-.PHONY: all test analyze neo4j build release deploy
+.PHONY: all test analyze neo4j build release deploy security
 
 # ── Security & SBOM ─────────────────────────────────────────
 audit:
@@ -85,4 +85,7 @@ sbom:
 		-F "bom=@sbom.json" > /dev/null
 	@echo "SBOM uploaded to Dependency-Track"
 
-.PHONY: audit sbom
+.PHONY: audit sbom security
+
+security:
+	pip-audit -r $(firstword $(wildcard requirements.txt Requirements.txt)) --desc
