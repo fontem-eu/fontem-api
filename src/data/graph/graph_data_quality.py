@@ -22,6 +22,7 @@ class GraphDataQualitySource(DataQualitySource):
             for label in [
                 "Company", "Listing", "FinancialYear",
                 "Contract", "Authority", "CPV",
+                "Person", "Lobbyist", "LobbyInterest",
             ]:
                 n = session.run(
                     f"MATCH (n:{label}) RETURN count(n) AS n"
@@ -146,9 +147,34 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (a:Authority) RETURN count(a) AS n"
             ).single()["n"]
 
+            # Lobbying stats
+            lobbyist_count = session.run(
+                "MATCH (l:Lobbyist) RETURN count(l) AS n"
+            ).single()["n"]
+
+            lobbyists_with_ep = session.run(
+                "MATCH (l:Lobbyist) WHERE l.ep_passes > 0 "
+                "RETURN count(l) AS n"
+            ).single()["n"]
+
+            lobby_interests = session.run(
+                "MATCH (i:LobbyInterest)<-[:INTERESTED_IN]-(l) "
+                "RETURN i.name AS topic, count(l) AS lobbyists "
+                "ORDER BY lobbyists DESC LIMIT 10"
+            ).data()
+
+            # Person/director stats
+            person_count = session.run(
+                "MATCH (p:Person) RETURN count(p) AS n"
+            ).single()["n"]
+
         return {
             "companies_with_contracts": companies_with_contracts,
             "contracts_by_country": by_country,
             "top_cpv_sectors": top_cpv,
             "authority_count": authority_count,
+            "lobbyist_count": lobbyist_count,
+            "lobbyists_with_ep_passes": lobbyists_with_ep,
+            "top_lobby_interests": lobby_interests,
+            "person_count": person_count,
         }

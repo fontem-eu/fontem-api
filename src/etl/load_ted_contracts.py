@@ -31,6 +31,26 @@ from .ted_matcher import TedMatcher
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500
+
+# Approximate EUR exchange rates for non-EUR currencies (ECB mid-2025 ballpark).
+# Used to normalize contract values to EUR for aggregation.
+_EUR_RATES = {
+    "EUR": 1.0, "USD": 0.92, "GBP": 1.17, "CHF": 1.05, "JPY": 0.0061,
+    "PLN": 0.23, "CZK": 0.040, "HUF": 0.0025, "RON": 0.20, "BGN": 0.51,
+    "SEK": 0.088, "DKK": 0.134, "NOK": 0.086, "ISK": 0.0067,
+    "HRK": 0.133, "TRY": 0.027, "RSD": 0.0085, "MKD": 0.016,
+    "MDL": 0.051, "ALL": 0.0097, "GEL": 0.34, "CAD": 0.68, "AUD": 0.60,
+}
+
+
+def _to_eur(value, currency: str) -> float | None:
+    """Convert a contract value to EUR. Returns None if unknown currency."""
+    if value is None:
+        return None
+    rate = _EUR_RATES.get(currency or "EUR")
+    if rate is None:
+        return None
+    return round(value * rate, 2)
 TED_MONTHLY_URL = "https://ted.europa.eu/packages/monthly/{year}-{month}"
 
 
@@ -139,7 +159,10 @@ def load_contracts(driver, archive_path: Path):  # pylint: disable=too-many-loca
                     ),
                     "title": notice.title or "",
                     "description": notice.description,
-                    "value": award.value or notice.total_value,
+                    "value": _to_eur(
+                        award.value or notice.total_value,
+                        award.currency or notice.currency,
+                    ),
                     "currency": award.currency or notice.currency,
                     "cpv": notice.cpv_main,
                     "procedure_type": notice.procedure_type,
