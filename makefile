@@ -65,7 +65,20 @@ deploy:
 	kubectl -n gmr rollout status deployment/gmr-api --timeout=300s
 	@echo "Deployment is ready!"
 
-.PHONY: all test analyze neo4j build release deploy security
+# Run mutation tests in an isolated temp copy to avoid source contamination.
+# mutmut modifies files on disk during its run -- never run it in the real tree.
+mutation:
+	@MUTDIR=$$(mktemp -d) && \
+	echo "Running mutmut in isolated copy: $$MUTDIR" && \
+	cp -a . "$$MUTDIR/" && \
+	cd "$$MUTDIR" && rm -f .mutmut-cache && \
+	python3 -m mutmut run --paths-to-mutate=src/analysis/,src/etl/ ; \
+	STATUS=$$? ; \
+	python3 -m mutmut results 2>/dev/null ; \
+	rm -rf "$$MUTDIR" ; \
+	exit $$STATUS
+
+.PHONY: all test analyze mutation neo4j build release deploy security
 
 # ── Security & SBOM ─────────────────────────────────────────
 audit:
