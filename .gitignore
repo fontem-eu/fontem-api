@@ -201,6 +201,10 @@ cython_debug/
 #   you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 
+# Mutation testing
+.mutmut-cache
+mutants/
+
 # Ruff stuff:
 .ruff_cache/
 
