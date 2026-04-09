@@ -209,7 +209,7 @@ class GraphDataQualitySource(DataQualitySource):
             ).single()["n"]
             by_year = session.run(
                 "MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {source: 'EDGAR'}) "
-                "RETURN f.year AS date, count(f) AS value ORDER BY date"
+                "RETURN toString(f.year) + '-01-01' AS date, count(f) AS value ORDER BY date"
             ).data()
             # Field coverage
             fields_coverage = {}
@@ -224,31 +224,40 @@ class GraphDataQualitySource(DataQualitySource):
                 "by_year": by_year, "field_coverage": fields_coverage,
             }
 
+    _EU_MEMBERS = (
+        "'AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR',"
+        "'HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK',"
+        "'SI','ES','SE'"
+    )
+
     def get_esef_stats(self) -> dict:
-        """EU ESEF financial data stats."""
+        """EU ESEF financial data stats (EU members only)."""
+        eu_filter = f"WHERE c.country IN [{self._EU_MEMBERS}]"
         with self._neo4j.session() as session:
             companies = session.run(
-                "MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {source: 'ESEF'}) "
-                "RETURN count(DISTINCT c) AS n"
+                f"MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {{source: 'ESEF'}}) "
+                f"{eu_filter} RETURN count(DISTINCT c) AS n"
             ).single()["n"]
             fin_years = session.run(
-                "MATCH (f:FinancialYear {source: 'ESEF'}) RETURN count(f) AS n"
+                f"MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {{source: 'ESEF'}}) "
+                f"{eu_filter} RETURN count(f) AS n"
             ).single()["n"]
             by_year = session.run(
-                "MATCH (f:FinancialYear {source: 'ESEF'}) "
-                "RETURN f.year AS date, count(f) AS value ORDER BY date"
+                f"MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {{source: 'ESEF'}}) "
+                f"{eu_filter} "
+                "RETURN toString(f.year) + '-01-01' AS date, count(f) AS value ORDER BY date"
             ).data()
             by_country = session.run(
-                "MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {source: 'ESEF'}) "
-                "WHERE c.country IS NOT NULL "
+                f"MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {{source: 'ESEF'}}) "
+                f"{eu_filter} "
                 "RETURN c.country AS country, count(f) AS count "
                 "ORDER BY count DESC LIMIT 20"
             ).data()
             fields_coverage = {}
             for field in ["revenue", "net_income", "total_assets", "equity", "operating_cashflow"]:
                 n = session.run(
-                    f"MATCH (f:FinancialYear {{source: 'ESEF'}}) "
-                    f"WHERE f.{field} IS NOT NULL RETURN count(f) AS n"
+                    f"MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {{source: 'ESEF'}}) "
+                    f"{eu_filter} AND f.{field} IS NOT NULL RETURN count(f) AS n"
                 ).single()["n"]
                 fields_coverage[field] = round(n / max(fin_years, 1) * 100, 1)
             return {
@@ -274,7 +283,7 @@ class GraphDataQualitySource(DataQualitySource):
             ).data()
             registrations = session.run(
                 "MATCH (l:Lobbyist) WHERE l.registration_date IS NOT NULL "
-                "RETURN left(l.registration_date, 7) AS date, count(l) AS value "
+                "RETURN left(l.registration_date, 7) + '-01' AS date, count(l) AS value "
                 "ORDER BY date"
             ).data()
             cost_ranges = session.run(

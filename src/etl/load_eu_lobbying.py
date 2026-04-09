@@ -54,15 +54,22 @@ SET l.name            = row.name,
     l.last_updated    = row.last_updated
 """
 
-# Match lobbyist to existing Company by name (case-insensitive)
+# Match lobbyist to existing Company using full-text index (fuzzy).
+# Requires: CREATE FULLTEXT INDEX company_name_ft IF NOT EXISTS FOR (c:Company) ON EACH [c.name]
 MATCH_COMPANY = """
 UNWIND $batch AS row
 MATCH (l:Lobbyist {tr_id: row.tr_id})
-WITH l, row
-OPTIONAL MATCH (c:Company)
-WHERE toUpper(c.name) = toUpper(l.name)
-WITH l, c WHERE c IS NOT NULL
+WITH l
+WHERE l.name IS NOT NULL AND size(l.name) > 2
+CALL db.index.fulltext.queryNodes('company_name_ft', l.name) YIELD node AS c, score
+WHERE score > 2.0
+WITH l, c ORDER BY score DESC LIMIT 1
 MERGE (l)-[:REPRESENTS]->(c)
+"""
+
+# Ensure full-text index exists
+CREATE_FT_INDEX = """
+CREATE FULLTEXT INDEX company_name_ft IF NOT EXISTS FOR (c:Company) ON EACH [c.name]
 """
 
 # Country name normalization (TR uses full names, Company nodes use ISO)
@@ -225,11 +232,22 @@ def load_eu_lobbying(neo4j_uri: str, neo4j_user: str, neo4j_password: str) -> No
             session.run(MERGE_INTERESTS, batch=batch)
             logger.info("  %d / %d lobbyists loaded", min(i + BATCH_SIZE, len(entities)), len(entities))
 
-        # Try to match to existing companies
+        # Create full-text index for fuzzy company matching
+        logger.info("Ensuring full-text index on Company.name...")
+        session.run(CREATE_FT_INDEX)
+
+        # Try to match to existing companies (full-text fuzzy search)
         logger.info("Matching lobbyists to existing Company nodes...")
+        matched = 0
         for i in range(0, len(entities), BATCH_SIZE):
             batch = entities[i : i + BATCH_SIZE]
-            session.run(MATCH_COMPANY, batch=batch)
+            result = session.run(MATCH_COMPANY, batch=batch)
+            summary = result.consume()
+            matched += summary.counters.relationships_created
+            if (i + BATCH_SIZE) % 2000 < BATCH_SIZE:
+                logger.info("  %d / %d checked, %d matches so far",
+                            min(i + BATCH_SIZE, len(entities)), len(entities), matched)
+        logger.info("Company matching done: %d REPRESENTS relationships created", matched)
 
     driver.close()
 
