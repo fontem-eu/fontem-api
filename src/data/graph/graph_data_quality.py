@@ -116,6 +116,236 @@ class GraphDataQualitySource(DataQualitySource):
             "financial_sources": financial_sources,
         }
 
+    # ── Per-pipeline queries ──────────────────────────────────────
+
+    def get_contracts_timeline(self) -> list[dict]:
+        """Daily contract counts by publication_date."""
+        with self._neo4j.session() as session:
+            return session.run(
+                "MATCH (ct:Contract) "
+                "WHERE ct.publication_date IS NOT NULL "
+                "RETURN ct.publication_date AS date, count(ct) AS value "
+                "ORDER BY date"
+            ).data()
+
+    def get_contracts_by_country(self) -> list[dict]:
+        """Contract count and total EUR per country."""
+        with self._neo4j.session() as session:
+            return session.run(
+                "MATCH (ct:Contract) "
+                "WHERE ct.country IS NOT NULL "
+                "RETURN ct.country AS country, count(ct) AS contracts, "
+                "  sum(ct.value_eur) AS total_eur "
+                "ORDER BY contracts DESC"
+            ).data()
+
+    def get_contracts_nulls(self) -> dict:
+        """Count of contracts missing key fields."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (ct:Contract) RETURN count(ct) AS n"
+            ).single()["n"]
+            fields = {}
+            for field in ["value_eur", "cpv_main", "award_date", "description", "country"]:
+                n = session.run(
+                    f"MATCH (ct:Contract) WHERE ct.{field} IS NULL "
+                    "RETURN count(ct) AS n"
+                ).single()["n"]
+                fields[field] = n
+            return {"total": total, "missing": fields}
+
+    def get_contracts_value_timeline(self) -> list[dict]:
+        """Daily total EUR value of contracts."""
+        with self._neo4j.session() as session:
+            return session.run(
+                "MATCH (ct:Contract) "
+                "WHERE ct.publication_date IS NOT NULL AND ct.value_eur IS NOT NULL "
+                "RETURN ct.publication_date AS date, sum(ct.value_eur) AS value "
+                "ORDER BY date"
+            ).data()
+
+    def get_gleif_stats(self) -> dict:
+        """GLEIF-specific stats: active/inactive, LEI coverage, relationships."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (c:Company) RETURN count(c) AS n"
+            ).single()["n"]
+            with_lei = session.run(
+                "MATCH (c:Company) WHERE c.lei IS NOT NULL RETURN count(c) AS n"
+            ).single()["n"]
+            active = session.run(
+                "MATCH (c:Company {active: true}) RETURN count(c) AS n"
+            ).single()["n"]
+            subsidiaries = session.run(
+                "MATCH ()-[r:SUBSIDIARY_OF]->() RETURN count(r) AS n"
+            ).single()["n"]
+            orphan_subs = session.run(
+                "MATCH (c:Company)-[r:SUBSIDIARY_OF]->(p) "
+                "WHERE NOT exists((p)-[:LISTED_AS]->()) AND p.lei IS NULL "
+                "RETURN count(r) AS n"
+            ).single()["n"]
+            by_country = session.run(
+                "MATCH (c:Company) WHERE c.country IS NOT NULL "
+                "RETURN c.country AS country, count(c) AS count "
+                "ORDER BY count DESC LIMIT 30"
+            ).data()
+            return {
+                "total": total, "with_lei": with_lei, "active": active,
+                "inactive": total - active,
+                "subsidiary_links": subsidiaries,
+                "orphan_subsidiaries": orphan_subs,
+                "by_country": by_country,
+            }
+
+    def get_edgar_stats(self) -> dict:
+        """US EDGAR financial data stats."""
+        with self._neo4j.session() as session:
+            companies = session.run(
+                "MATCH (c:Company)-[:LISTED_AS]->(l:Listing {exchange: 'US'}) "
+                "RETURN count(DISTINCT c) AS n"
+            ).single()["n"]
+            fin_years = session.run(
+                "MATCH (f:FinancialYear {source: 'EDGAR'}) RETURN count(f) AS n"
+            ).single()["n"]
+            by_year = session.run(
+                "MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {source: 'EDGAR'}) "
+                "RETURN f.year AS date, count(f) AS value ORDER BY date"
+            ).data()
+            # Field coverage
+            fields_coverage = {}
+            for field in ["revenue", "net_income", "total_assets", "equity", "operating_cashflow"]:
+                n = session.run(
+                    f"MATCH (f:FinancialYear {{source: 'EDGAR'}}) "
+                    f"WHERE f.{field} IS NOT NULL RETURN count(f) AS n"
+                ).single()["n"]
+                fields_coverage[field] = round(n / max(fin_years, 1) * 100, 1)
+            return {
+                "companies": companies, "financial_years": fin_years,
+                "by_year": by_year, "field_coverage": fields_coverage,
+            }
+
+    def get_esef_stats(self) -> dict:
+        """EU ESEF financial data stats."""
+        with self._neo4j.session() as session:
+            companies = session.run(
+                "MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {source: 'ESEF'}) "
+                "RETURN count(DISTINCT c) AS n"
+            ).single()["n"]
+            fin_years = session.run(
+                "MATCH (f:FinancialYear {source: 'ESEF'}) RETURN count(f) AS n"
+            ).single()["n"]
+            by_year = session.run(
+                "MATCH (f:FinancialYear {source: 'ESEF'}) "
+                "RETURN f.year AS date, count(f) AS value ORDER BY date"
+            ).data()
+            by_country = session.run(
+                "MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {source: 'ESEF'}) "
+                "WHERE c.country IS NOT NULL "
+                "RETURN c.country AS country, count(f) AS count "
+                "ORDER BY count DESC LIMIT 20"
+            ).data()
+            fields_coverage = {}
+            for field in ["revenue", "net_income", "total_assets", "equity", "operating_cashflow"]:
+                n = session.run(
+                    f"MATCH (f:FinancialYear {{source: 'ESEF'}}) "
+                    f"WHERE f.{field} IS NOT NULL RETURN count(f) AS n"
+                ).single()["n"]
+                fields_coverage[field] = round(n / max(fin_years, 1) * 100, 1)
+            return {
+                "companies": companies, "financial_years": fin_years,
+                "by_year": by_year, "by_country": by_country,
+                "field_coverage": fields_coverage,
+            }
+
+    def get_lobbying_stats(self) -> dict:
+        """EU Transparency Register stats."""
+        with self._neo4j.session() as session:
+            total = session.run("MATCH (l:Lobbyist) RETURN count(l) AS n").single()["n"]
+            with_ep = session.run(
+                "MATCH (l:Lobbyist) WHERE l.ep_passes > 0 RETURN count(l) AS n"
+            ).single()["n"]
+            matched = session.run(
+                "MATCH (l:Lobbyist)-[:REPRESENTS]->() RETURN count(DISTINCT l) AS n"
+            ).single()["n"]
+            by_country = session.run(
+                "MATCH (l:Lobbyist) WHERE l.country_iso IS NOT NULL "
+                "RETURN l.country_iso AS country, count(l) AS count "
+                "ORDER BY count DESC LIMIT 20"
+            ).data()
+            registrations = session.run(
+                "MATCH (l:Lobbyist) WHERE l.registration_date IS NOT NULL "
+                "RETURN left(l.registration_date, 7) AS date, count(l) AS value "
+                "ORDER BY date"
+            ).data()
+            cost_ranges = session.run(
+                "MATCH (l:Lobbyist) WHERE l.cost_max IS NOT NULL "
+                "RETURN CASE "
+                "  WHEN l.cost_max < 10000 THEN '<10K' "
+                "  WHEN l.cost_max < 100000 THEN '10K-100K' "
+                "  WHEN l.cost_max < 1000000 THEN '100K-1M' "
+                "  ELSE '>1M' END AS bucket, count(l) AS count "
+                "ORDER BY count DESC"
+            ).data()
+            return {
+                "total": total, "with_ep_passes": with_ep,
+                "matched_to_company": matched,
+                "match_rate": round(matched / max(total, 1) * 100, 1),
+                "by_country": by_country,
+                "registrations_timeline": registrations,
+                "cost_distribution": cost_ranges,
+            }
+
+    def get_directors_stats(self) -> dict:
+        """French directors / person data stats."""
+        with self._neo4j.session() as session:
+            persons = session.run("MATCH (p:Person) RETURN count(p) AS n").single()["n"]
+            links = session.run(
+                "MATCH ()-[r:DIRECTS]->() RETURN count(r) AS n"
+            ).single()["n"]
+            companies_with = session.run(
+                "MATCH (p:Person)-[:DIRECTS]->(c:Company) "
+                "RETURN count(DISTINCT c) AS n"
+            ).single()["n"]
+            roles = session.run(
+                "MATCH ()-[r:DIRECTS]->() WHERE r.role IS NOT NULL "
+                "RETURN r.role AS label, count(r) AS value "
+                "ORDER BY value DESC LIMIT 10"
+            ).data()
+            with_birth = session.run(
+                "MATCH (p:Person) WHERE p.birth_year IS NOT NULL RETURN count(p) AS n"
+            ).single()["n"]
+            return {
+                "persons": persons, "director_links": links,
+                "companies_with_directors": companies_with,
+                "birth_year_coverage": round(with_birth / max(persons, 1) * 100, 1),
+                "roles": roles,
+            }
+
+    def get_trade_edges_stats(self) -> dict:
+        """Materialized trade edge stats."""
+        with self._neo4j.session() as session:
+            client_of = session.run(
+                "MATCH ()-[r:CLIENT_OF]->() "
+                "RETURN count(r) AS pairs, sum(r.total_eur) AS total_eur, "
+                "  sum(r.contracts) AS total_contracts"
+            ).single()
+            return {
+                "trade_pairs": client_of["pairs"],
+                "total_eur": client_of["total_eur"],
+                "total_contracts": client_of["total_contracts"],
+            }
+
+    def get_dedup_stats(self) -> dict:
+        """Deduplication queue stats."""
+        with self._neo4j.session() as session:
+            pending = session.run(
+                "MATCH ()-[r:SAME_AS {reviewed: false}]->() RETURN count(r) AS n"
+            ).single()["n"]
+            reviewed = session.run(
+                "MATCH ()-[r:SAME_AS {reviewed: true}]->() RETURN count(r) AS n"
+            ).single()["n"]
+            return {"pending": pending, "reviewed": reviewed, "total": pending + reviewed}
+
     def get_coverage_stats(self) -> dict:
         """Return coverage metrics."""
         with self._neo4j.session() as session:

@@ -26,3 +26,17 @@ class DataQualitySource(ABC):
     @abstractmethod
     def get_coverage_stats(self) -> dict:
         """Return coverage metrics (companies with contracts, by country, etc.)."""
+
+    # Per-pipeline methods — default implementations return empty dicts
+    # so existing mocks/tests don't break.
+    def get_contracts_timeline(self) -> list[dict]: return []
+    def get_contracts_by_country(self) -> list[dict]: return []
+    def get_contracts_nulls(self) -> dict: return {"total": 0, "missing": {}}
+    def get_contracts_value_timeline(self) -> list[dict]: return []
+    def get_gleif_stats(self) -> dict: return {}
+    def get_edgar_stats(self) -> dict: return {}
+    def get_esef_stats(self) -> dict: return {}
+    def get_lobbying_stats(self) -> dict: return {}
+    def get_directors_stats(self) -> dict: return {}
+    def get_trade_edges_stats(self) -> dict: return {}
+    def get_dedup_stats(self) -> dict: return {}
