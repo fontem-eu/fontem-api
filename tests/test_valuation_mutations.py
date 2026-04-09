@@ -1,20 +1,17 @@
 """
-Mutation-killing tests for Valuation — targets surviving mutants in valuation.py.
-
-Covers: _DEFAULT_TAX_RATE, EBITDA/ROIC/EV calculations, NaN guards,
-boundary conditions, empty result structure, dataclass defaults.
+Tests for Valuation — verify EBITDA, ROIC, EV computations, NaN handling,
+and empty-result behavior through the public compute() API.
 """
-# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,unused-argument,multiple-statements,too-few-public-methods,unused-import
+# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,unused-argument,multiple-statements,too-few-public-methods
 from __future__ import annotations
 
 import math
 
-import numpy as np
 import pytest
 import pandas as pd
 
 from src.analysis.gmr_data_source import GMRDataSource, MarketSnapshot
-from src.analysis.valuation import Valuation, ValuationResult, _DEFAULT_TAX_RATE
+from src.analysis.valuation import Valuation, ValuationResult
 
 
 YEARS = [2023, 2022, 2021]
@@ -65,13 +62,6 @@ def _make_ds(**overrides):
 @pytest.fixture
 def result():
     return Valuation(_make_ds()).compute("TEST", years=3)
-
-
-# ── Constants ──────────────────────────────────────────────────
-
-class TestConstants:
-    def test_default_tax_rate_is_0_21(self):
-        assert _DEFAULT_TAX_RATE == 0.21
 
 
 # ── Result structure ───────────────────────────────────────────
