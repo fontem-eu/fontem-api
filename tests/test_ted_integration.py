@@ -13,7 +13,11 @@ and validate against the live Neo4j database.
 """
 from __future__ import annotations
 
+import json
 import os
+import tempfile
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -21,7 +25,7 @@ import pytest
 from eforms.stream import stream_notices
 from eforms.filters import awards_and_modifications
 
-from src.etl.load_exchange_rates import to_eur
+from src.services.currency import CurrencyService
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ted"
 SAMPLE_ARCHIVE = FIXTURE_DIR / "sample-2025-10.tar.gz"
@@ -59,6 +63,21 @@ SAMPLE_RATES = {
     "USD": {"2025-10-01": 1.10, "2025-10-02": 1.11, "2025-10-03": 1.10,
             "2025-10-06": 1.10, "2025-10-07": 1.10},
 }
+
+
+@pytest.fixture(scope="module")
+def currency_svc():
+    """Build a temp CurrencyService with the SAMPLE_RATES."""
+    tmp = tempfile.mkdtemp()
+    rates_dir = Path(tmp) / "rates"
+    rates_dir.mkdir(parents=True)
+    for ccy, daily in SAMPLE_RATES.items():
+        with open(rates_dir / f"{ccy}.json", "w") as f:
+            json.dump({k: str(v) for k, v in daily.items()}, f)
+    svc = CurrencyService.load(tmp)
+    yield svc
+    import shutil
+    shutil.rmtree(tmp)
 
 
 def _parse_all_notices():
@@ -170,27 +189,40 @@ class TestDateCoalescing:
 class TestCurrencyConversion:
     """Validate EUR conversion produces reasonable values."""
 
-    def test_eur_values_are_reasonable(self):
+    def test_eur_values_are_reasonable(self, currency_svc):
         """No contract should exceed €10B after conversion."""
         for notice in _parse_all_notices():
             for award in notice.awards:
                 if award.value is None:
                     continue
                 currency = award.currency or notice.currency or "EUR"
-                date = award.award_date or notice.issue_date
-                eur = to_eur(award.value, currency, date, SAMPLE_RATES)
+                date_str = award.award_date or notice.issue_date
+                if not date_str:
+                    continue
+                try:
+                    date_obj = date.fromisoformat(date_str[:10])
+                except ValueError:
+                    continue
+                eur = currency_svc.to_eur(Decimal(str(award.value)), currency, date_obj)
                 if eur is not None:
-                    assert eur < 10_000_000_000, \
+                    assert eur < Decimal("10000000000"), \
                         f"Unreasonable EUR value {eur} for {notice.notice_id} " \
                         f"(original: {award.value} {currency})"
 
-    def test_eur_passthrough(self):
+    def test_eur_passthrough(self, currency_svc):
         """EUR-denominated awards should pass through unchanged."""
         for notice in _parse_all_notices():
             for award in notice.awards:
                 if award.value and (award.currency or notice.currency) == "EUR":
-                    eur = to_eur(award.value, "EUR", notice.issue_date, SAMPLE_RATES)
-                    assert eur == round(award.value, 2)
+                    if not notice.issue_date:
+                        continue
+                    try:
+                        date_obj = date.fromisoformat(notice.issue_date[:10])
+                    except ValueError:
+                        continue
+                    eur = currency_svc.to_eur(Decimal(str(award.value)), "EUR", date_obj)
+                    expected = Decimal(str(award.value)).quantize(Decimal("0.01"))
+                    assert eur == expected
 
 
 class TestCompanyMatching:

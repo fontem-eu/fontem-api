@@ -139,6 +139,39 @@ class GraphDataQualitySource(DataQualitySource):
                 "ORDER BY contracts DESC"
             ).data()
 
+    def get_contracts_currency_quality(self) -> dict:
+        """Currency-related data quality metrics."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (ct:Contract) RETURN count(ct) AS n"
+            ).single()["n"]
+            undisclosed = session.run(
+                "MATCH (ct:Contract) WHERE ct.value_undisclosed = true RETURN count(ct) AS n"
+            ).single()["n"]
+            inferred = session.run(
+                "MATCH (ct:Contract) WHERE ct.currency_inferred = true RETURN count(ct) AS n"
+            ).single()["n"]
+            converted = session.run(
+                "MATCH (ct:Contract) WHERE ct.value_eur IS NOT NULL RETURN count(ct) AS n"
+            ).single()["n"]
+            with_currency = session.run(
+                "MATCH (ct:Contract) WHERE ct.value_currency IS NOT NULL RETURN count(ct) AS n"
+            ).single()["n"]
+            by_currency = session.run(
+                "MATCH (ct:Contract) WHERE ct.value_currency IS NOT NULL "
+                "RETURN ct.value_currency AS currency, count(ct) AS contracts, "
+                "  sum(ct.value_eur) AS total_eur "
+                "ORDER BY contracts DESC LIMIT 25"
+            ).data()
+            return {
+                "total": total,
+                "value_undisclosed": undisclosed,
+                "currency_inferred": inferred,
+                "converted_to_eur": converted,
+                "with_currency": with_currency,
+                "by_currency": by_currency,
+            }
+
     def get_contracts_nulls(self) -> dict:
         """Count of contracts missing key fields."""
         with self._neo4j.session() as session:

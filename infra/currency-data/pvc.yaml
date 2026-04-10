@@ -1,0 +1,39 @@
+---
+# Currency data — NFS-backed, ReadWriteMany so all pods can mount it.
+# Stores per-currency historical exchange rate JSON files.
+# Apply manually: kubectl apply -f infra/currency-data/pvc.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: currency-data-pv
+  labels:
+    app: currency-service
+    managed-by: manual
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 10.44.0.6
+    path: /srv/nfs/currency-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: currency-data
+  namespace: gmr
+  labels:
+    app: currency-service
+    managed-by: manual
+  annotations:
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+spec:
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  volumeName: currency-data-pv

@@ -32,6 +32,7 @@ class DataQualitySource(ABC):
     def get_contracts_timeline(self) -> list[dict]: return []
     def get_contracts_by_country(self) -> list[dict]: return []
     def get_contracts_nulls(self) -> dict: return {"total": 0, "missing": {}}
+    def get_contracts_currency_quality(self) -> dict: return {}
     def get_contracts_value_timeline(self) -> list[dict]: return []
     def get_gleif_stats(self) -> dict: return {}
     def get_edgar_stats(self) -> dict: return {}

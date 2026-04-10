@@ -69,6 +69,12 @@ def contracts_nulls(source=Depends(get_data_quality_source)):
     return source.get_contracts_nulls()
 
 
+@router.get("/contracts/currency-quality")
+def contracts_currency_quality(source=Depends(get_data_quality_source)):
+    """Currency-related data quality: undisclosed, inferred, conversion success."""
+    return source.get_contracts_currency_quality()
+
+
 @router.get("/contracts/value-timeline")
 def contracts_value_timeline(source=Depends(get_data_quality_source)):
     """Daily total EUR value of contracts."""

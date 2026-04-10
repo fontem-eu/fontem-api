@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: currency-refresh
+  namespace: gmr
+spec:
+  schedule: "0 4 1 * *"   # Monthly: 1st of month at 04:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800   # 30 min
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: currency-refresh
+              image: contribute.void42.internal/golden/gmr-api:latest
+              command:
+                - python3
+                - -m
+                - src.etl.load_exchange_rates
+                - --rates-dir
+                - /currency-data
+                - --start
+                - "2000-01-01"
+              volumeMounts:
+                - name: currency-data
+                  mountPath: /currency-data
+              resources:
+                requests:
+                  cpu: "200m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"
+          volumes:
+            - name: currency-data
+              persistentVolumeClaim:
+                claimName: currency-data
