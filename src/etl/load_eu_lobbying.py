@@ -56,13 +56,16 @@ SET l.name            = row.name,
 
 # Match lobbyist to existing Company using full-text index (fuzzy).
 # Requires: CREATE FULLTEXT INDEX company_name_ft IF NOT EXISTS FOR (c:Company) ON EACH [c.name]
+# Sanitize name: strip Lucene special chars that break full-text queries.
 MATCH_COMPANY = """
 UNWIND $batch AS row
 MATCH (l:Lobbyist {tr_id: row.tr_id})
 WITH l
-WHERE l.name IS NOT NULL AND size(l.name) > 2
-CALL db.index.fulltext.queryNodes('company_name_ft', l.name) YIELD node AS c, score
-WHERE score > 2.0
+WHERE l.name IS NOT NULL AND size(l.name) > 3
+WITH l, reduce(s = l.name, c IN ['+','-','&&','||','!','(',')','{','}','[',']','^','"','~','*','?',':','\\\\','/'] | replace(s, c, ' ')) AS clean_name
+WHERE size(trim(clean_name)) > 3
+CALL db.index.fulltext.queryNodes('company_name_ft', clean_name) YIELD node AS c, score
+WHERE score > 2.0 AND (c.country IS NULL OR l.country_iso IS NULL OR c.country = l.country_iso)
 WITH l, c ORDER BY score DESC LIMIT 1
 MERGE (l)-[:REPRESENTS]->(c)
 """
