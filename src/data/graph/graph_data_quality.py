@@ -209,6 +209,7 @@ class GraphDataQualitySource(DataQualitySource):
             ).single()["n"]
             by_year = session.run(
                 "MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {source: 'EDGAR'}) "
+                "WHERE f.year >= 1990 AND f.year <= 2030 "
                 "RETURN toString(f.year) + '-01-01' AS date, count(f) AS value ORDER BY date"
             ).data()
             # Field coverage
@@ -244,7 +245,7 @@ class GraphDataQualitySource(DataQualitySource):
             ).single()["n"]
             by_year = session.run(
                 f"MATCH (c:Company)-[:REPORTED]->(f:FinancialYear {{source: 'ESEF'}}) "
-                f"{eu_filter} "
+                f"{eu_filter} AND f.year >= 1990 AND f.year <= 2030 "
                 "RETURN toString(f.year) + '-01-01' AS date, count(f) AS value ORDER BY date"
             ).data()
             by_country = session.run(
