@@ -277,12 +277,13 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (l:Lobbyist)-[:REPRESENTS]->() RETURN count(DISTINCT l) AS n"
             ).single()["n"]
             by_country = session.run(
-                "MATCH (l:Lobbyist) WHERE l.country_iso IS NOT NULL "
-                "RETURN l.country_iso AS country, count(l) AS count "
+                "MATCH (l:Lobbyist) WHERE l.country IS NOT NULL "
+                "RETURN l.country AS country, count(l) AS count "
                 "ORDER BY count DESC LIMIT 20"
             ).data()
             registrations = session.run(
-                "MATCH (l:Lobbyist) WHERE l.registration_date IS NOT NULL "
+                "MATCH (l:Lobbyist) "
+                "WHERE l.registration_date IS NOT NULL AND size(l.registration_date) >= 7 "
                 "RETURN left(l.registration_date, 7) + '-01' AS date, count(l) AS value "
                 "ORDER BY date"
             ).data()
