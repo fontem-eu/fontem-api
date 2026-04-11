@@ -124,7 +124,7 @@ class GraphDataQualitySource(DataQualitySource):
             return session.run(
                 "MATCH (ct:Contract) "
                 "WHERE ct.publication_date IS NOT NULL "
-                "RETURN ct.publication_date AS date, count(ct) AS value "
+                "RETURN left(ct.publication_date, 10) AS date, count(ct) AS value "
                 "ORDER BY date"
             ).data()
 
@@ -193,7 +193,7 @@ class GraphDataQualitySource(DataQualitySource):
             return session.run(
                 "MATCH (ct:Contract) "
                 "WHERE ct.publication_date IS NOT NULL AND ct.value_eur IS NOT NULL "
-                "RETURN ct.publication_date AS date, sum(ct.value_eur) AS value "
+                "RETURN left(ct.publication_date, 10) AS date, sum(ct.value_eur) AS value "
                 "ORDER BY date"
             ).data()
 
