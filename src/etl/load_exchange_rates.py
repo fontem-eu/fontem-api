@@ -124,7 +124,7 @@ def save_currency_file(rates_dir: Path, ccy: str, daily: dict[str, str]) -> None
     rates_subdir = rates_dir / "rates"
     rates_subdir.mkdir(parents=True, exist_ok=True)
     out = rates_subdir / f"{ccy}.json"
-    with open(out, "w") as f:
+    with open(out, "w", encoding="utf-8") as f:
         json.dump(daily, f, separators=(",", ":"), sort_keys=True)
     logger.info("  %s: %d rates saved (%s to %s)",
                 ccy, len(daily),
@@ -182,11 +182,12 @@ def load_all(
         "non_ecb_currencies": non_ecb_list,
         "sources": ["ecb", "frankfurter"],
     }
-    with open(rates_dir / "metadata.json", "w") as f:
+    with open(rates_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
 
 def main(argv=None):
+    """CLI entry point — fetch all currency rates and write to disk."""
     parser = argparse.ArgumentParser(description="Fetch all exchange rates")
     parser.add_argument(
         "--rates-dir",

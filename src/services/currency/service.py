@@ -19,12 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_EVEN, getcontext
 from pathlib import Path
-from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +75,13 @@ class CurrencyService:
                 if f.parent.name == "legacy":
                     continue
                 ccy = f.stem.upper()
-                with open(f) as fh:
+                with open(f, encoding="utf-8") as fh:
                     raw = json.load(fh)
                 rates[ccy] = {k: Decimal(str(v)) for k, v in raw.items()}
                 logger.debug("Loaded %d %s rates", len(rates[ccy]), ccy)
 
         # Static reference data shipped with the package
-        with open(data_dir / "locked_rates.json") as fh:
+        with open(data_dir / "locked_rates.json", encoding="utf-8") as fh:
             locked_raw = json.load(fh)
         locked = {
             k: {**v, "locked_rate": Decimal(v["locked_rate"])}
@@ -91,11 +89,11 @@ class CurrencyService:
             if not k.startswith("_")
         }
 
-        with open(data_dir / "country_currencies.json") as fh:
+        with open(data_dir / "country_currencies.json", encoding="utf-8") as fh:
             country_raw = json.load(fh)
         country_history = {k: v for k, v in country_raw.items() if not k.startswith("_")}
 
-        with open(data_dir / "aliases.json") as fh:
+        with open(data_dir / "aliases.json", encoding="utf-8") as fh:
             aliases = json.load(fh)
         aliases = {k: v for k, v in aliases.items() if not k.startswith("_")}
 
@@ -224,37 +222,35 @@ class CurrencyService:
         result = self.convert_detailed(value, currency, on)
         return result.eur
 
-    def convert_detailed(
+    def convert_detailed(  # pylint: disable=too-many-return-statements
         self,
         value: Decimal | float | int | str | None,
         currency: str | None,
         on: date | None,
     ) -> ConversionResult:
         """Convert with full provenance info."""
+        unknown = ConversionResult(None, None, None, "unknown")
         if value is None:
-            return ConversionResult(None, None, None, "unknown")
+            return unknown
         if not isinstance(value, Decimal):
             try:
                 value = Decimal(str(value))
             except (ValueError, ArithmeticError):
-                return ConversionResult(None, None, None, "unknown")
+                return unknown
 
         ccy = self.normalize_currency(currency)
         if ccy is None:
-            return ConversionResult(None, None, None, "unknown")
-
+            return unknown
         if ccy == "EUR":
             return ConversionResult(
                 value.quantize(Decimal("0.01")), Decimal("1"), on, "identity",
             )
-
         if on is None:
-            return ConversionResult(None, None, None, "unknown")
+            return unknown
 
         rate, rate_date, source = self._rate_on(ccy, on)
         if rate is None:
-            return ConversionResult(None, None, None, "unknown")
-
+            return unknown
         eur = (value / rate).quantize(Decimal("0.01"))
         return ConversionResult(eur, rate, rate_date, source)
 

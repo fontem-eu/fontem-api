@@ -17,7 +17,8 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import date as _date, datetime
+from decimal import Decimal as _Decimal
 from pathlib import Path
 
 import httpx
@@ -26,16 +27,12 @@ from neo4j import GraphDatabase
 from eforms.filters import awards_and_modifications
 from eforms.stream import stream_notices
 
+from ..services.currency import CurrencyService
 from .ted_matcher import TedMatcher
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500
-
-from datetime import date as _date
-from decimal import Decimal as _Decimal
-
-from ..services.currency import CurrencyService
 
 # Path to currency data directory (per-currency JSON files)
 _DEFAULT_CURRENCY_DIR = os.environ.get(
@@ -81,7 +78,11 @@ def _download_monthly(year: int, month: int, dest: Path) -> Path:
     return out
 
 
-def load_contracts(driver, archive_path: Path, currency_svc: CurrencyService | None = None):  # pylint: disable=too-many-locals
+def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    driver,
+    archive_path: Path,
+    currency_svc: CurrencyService | None = None,
+):
     """Parse a TED archive and load contracts into Neo4j."""
     merge_contract = """
     UNWIND $batch AS row
