@@ -24,7 +24,7 @@ from pathlib import Path
 import httpx
 from neo4j import GraphDatabase
 
-from eforms.filters import awards_and_modifications
+from eforms.filters import awards_only
 from eforms.stream import stream_notices
 
 from ..services.currency import CurrencyService
@@ -140,7 +140,7 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
 
         matcher = TedMatcher(session)
 
-        for notice in awards_and_modifications(
+        for notice in awards_only(
             stream_notices(archive_path)
         ):
             buyer = notice.buyer()

@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from eforms.stream import stream_notices
-from eforms.filters import awards_and_modifications
+from eforms.filters import awards_only
 
 from src.services.currency import CurrencyService
 
@@ -82,7 +82,7 @@ def currency_svc():
 
 def _parse_all_notices():
     """Parse all notices from the test fixture."""
-    return list(awards_and_modifications(stream_notices(SAMPLE_ARCHIVE)))
+    return list(awards_only(stream_notices(SAMPLE_ARCHIVE)))
 
 
 class TestTedParsing:
