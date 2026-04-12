@@ -19,6 +19,11 @@ spec:
     metadata:
       labels:
         app: neo4j
+        kube-monkey/enabled: enabled
+        kube-monkey/identifier: neo4j
+        kube-monkey/mtbf: "3"
+        kube-monkey/kill-mode: fixed
+        kube-monkey/kill-value: "1"
     spec:
       enableServiceLinks: false   # prevent k8s service env vars conflicting with Neo4j config
       containers:

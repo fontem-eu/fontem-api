@@ -36,6 +36,11 @@ spec:
     metadata:
       labels:
         app: postgresql
+        kube-monkey/enabled: enabled
+        kube-monkey/identifier: postgresql
+        kube-monkey/mtbf: "3"
+        kube-monkey/kill-mode: fixed
+        kube-monkey/kill-value: "1"
     spec:
       containers:
         - name: postgres
