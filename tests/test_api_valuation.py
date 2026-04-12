@@ -18,13 +18,12 @@ from __future__ import annotations
 # pylint: disable=missing-function-docstring,redefined-outer-name,unnecessary-lambda,multiple-statements,unused-argument
 
 import pytest
-from starlette.testclient import TestClient
 
 import pandas as pd
 
 from src.analysis.gmr_data_source import GMRDataSource, MarketSnapshot
 from src.api.app import app
-from src.api.dependencies import get_data_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 # ---------------------------------------------------------------------------
 # Mock data
@@ -128,26 +127,20 @@ class _EmptyMock(GMRDataSource):
 
 @pytest.fixture
 def client_good():
-    app.dependency_overrides[get_data_source] = lambda: _GoodMock()
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(_GoodMock)
+    cleanup_dishka()
 
 
 @pytest.fixture
 def client_not_found():
-    app.dependency_overrides[get_data_source] = lambda: _NotFoundMock()
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(_NotFoundMock)
+    cleanup_dishka()
 
 
 @pytest.fixture
 def client_empty():
-    app.dependency_overrides[get_data_source] = lambda: _EmptyMock()
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(_EmptyMock)
+    cleanup_dishka()
 
 
 @pytest.fixture

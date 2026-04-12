@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import pytest
 import pandas as pd
-from starlette.testclient import TestClient
 
 from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 from src.api.app import app
-from src.api.dependencies import get_data_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
+from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # EU mock data source
@@ -108,10 +108,8 @@ class EUMockDataSource(FinancialDataSource):
 
 @pytest.fixture()
 def client():
-    app.dependency_overrides[get_data_source] = EUMockDataSource
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(EUMockDataSource)
+    cleanup_dishka()
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +280,8 @@ class SparseEUMockDataSource(EUMockDataSource):
 
 @pytest.fixture()
 def sparse_client():
-    app.dependency_overrides[get_data_source] = SparseEUMockDataSource
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(SparseEUMockDataSource)
+    cleanup_dishka()
 
 
 def test_sparse_fundamentals_200(sparse_client: TestClient):

@@ -12,11 +12,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-from starlette.testclient import TestClient
-
-from src.api.app import app
-from src.api.dependencies import get_neo4j_client
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 
 # ── Fake Neo4j objects ─────────────────────────────────────────
@@ -201,16 +197,10 @@ class FakeNeo4jClient:  # pylint: disable=too-few-public-methods
         return sess
 
 
-@pytest.fixture()
-def _override_cleanup():
-    yield
-    app.dependency_overrides.clear()
-
-
 # ── GE-API-01: Depth 0 returns only center node ──────────────
 
 
-def test_depth_0_returns_center_only(_override_cleanup):
+def test_depth_0_returns_center_only():
     entities = {"comp-aaa": (COMPANY_A, "Company", "gmr_id")}
 
     def handler(query, **kwargs):
@@ -226,9 +216,9 @@ def test_depth_0_returns_center_only(_override_cleanup):
             return FakeResult(None)
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=0")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=0")
+    cleanup_dishka()
     assert resp.status_code == 200
     body = resp.json()
     assert body["center"]["id"] == "comp-aaa"
@@ -240,7 +230,7 @@ def test_depth_0_returns_center_only(_override_cleanup):
 # ── GE-API-02: Depth 1 returns direct relationships ──────────
 
 
-def test_depth_1_returns_neighbors(_override_cleanup):
+def test_depth_1_returns_neighbors():
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
@@ -270,9 +260,9 @@ def test_depth_1_returns_neighbors(_override_cleanup):
             return FakeResult([{"path": path1}, {"path": path2}])
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=1")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=1")
+    cleanup_dishka()
     assert resp.status_code == 200
     body = resp.json()
     node_ids = {n["id"] for n in body["nodes"]}
@@ -285,7 +275,7 @@ def test_depth_1_returns_neighbors(_override_cleanup):
 # ── GE-API-03: Type filter excludes unwanted types ────────────
 
 
-def test_type_filter_excludes_types(_override_cleanup):
+def test_type_filter_excludes_types():
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
@@ -316,9 +306,9 @@ def test_type_filter_excludes_types(_override_cleanup):
             return FakeResult(paths)
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=1&types=Company,Contract")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=1&types=Company,Contract")
+    cleanup_dishka()
     body = resp.json()
     types_in_result = {n["type"] for n in body["nodes"]}
     assert "Company" in types_in_result
@@ -330,7 +320,7 @@ def test_type_filter_excludes_types(_override_cleanup):
 # ── GE-API-04: Response capped at 500 nodes ──────────────────
 
 
-def test_response_capped_at_500(_override_cleanup):
+def test_response_capped_at_500():
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
@@ -358,9 +348,9 @@ def test_response_capped_at_500(_override_cleanup):
             return FakeResult(big_paths)
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=1")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=1")
+    cleanup_dishka()
     body = resp.json()
     assert body["truncated"] is True
     assert len(body["nodes"]) <= 500
@@ -372,13 +362,13 @@ def test_response_capped_at_500(_override_cleanup):
 # ── GE-API-05: Unknown entity returns empty graph ─────────────
 
 
-def test_unknown_entity_returns_empty(_override_cleanup):
+def test_unknown_entity_returns_empty():
     def handler(_query, **_kwargs):
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/no-such-id?depth=1")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/no-such-id?depth=1")
+    cleanup_dishka()
     assert resp.status_code == 200
     body = resp.json()
     assert body["center"]["type"] == "Unknown"
@@ -390,20 +380,20 @@ def test_unknown_entity_returns_empty(_override_cleanup):
 # ── GE-API-06: Depth > 3 returns 422 ─────────────────────────
 
 
-def test_depth_over_3_returns_422(_override_cleanup):
+def test_depth_over_3_returns_422():
     def handler(_query, **_kwargs):
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=4")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=4")
+    cleanup_dishka()
     assert resp.status_code == 422
 
 
 # ── GE-API-07: Entry from Authority ───────────────────────────
 
 
-def test_entry_from_authority(_override_cleanup):
+def test_entry_from_authority():
     entities = {
         "auth-xxx": (AUTH_X, "Authority", "authority_id"),
     }
@@ -430,9 +420,9 @@ def test_entry_from_authority(_override_cleanup):
             return FakeResult(paths)
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/auth-xxx?depth=1")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/auth-xxx?depth=1")
+    cleanup_dishka()
     body = resp.json()
     assert body["center"]["id"] == "auth-xxx"
     assert body["center"]["type"] == "Authority"
@@ -444,7 +434,7 @@ def test_entry_from_authority(_override_cleanup):
 # ── GE-API-08: Entry from Person ──────────────────────────────
 
 
-def test_entry_from_person(_override_cleanup):
+def test_entry_from_person():
     entities = {
         "per-ppp": (PERSON_P, "Person", "person_id"),
     }
@@ -471,9 +461,9 @@ def test_entry_from_person(_override_cleanup):
             return FakeResult(paths)
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/per-ppp?depth=1")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/per-ppp?depth=1")
+    cleanup_dishka()
     body = resp.json()
     assert body["center"]["id"] == "per-ppp"
     assert body["center"]["type"] == "Person"
@@ -500,7 +490,7 @@ def _make_path_handler(entities, shortest, extra_paths=None):
     return handler
 
 
-def test_path_finding_shortest(_override_cleanup):
+def test_path_finding_shortest():
     entities = {
         "per-ppp": (PERSON_P, "Person", "person_id"),
         "auth-xxx": (AUTH_X, "Authority", "authority_id"),
@@ -511,9 +501,9 @@ def test_path_finding_shortest(_override_cleanup):
     )
 
     handler = _make_path_handler(entities, shortest)
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/paths/find?from=per-ppp&to=auth-xxx")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/paths/find?from=per-ppp&to=auth-xxx")
+    cleanup_dishka()
     assert resp.status_code == 200
     body = resp.json()
     assert body["from_node"]["id"] == "per-ppp"
@@ -526,7 +516,7 @@ def test_path_finding_shortest(_override_cleanup):
 # ── GE-API-10: Path finding — extra paths within shortest+2 ──
 
 
-def test_path_finding_extra_paths(_override_cleanup):
+def test_path_finding_extra_paths():
     entities = {
         "per-ppp": (PERSON_P, "Person", "person_id"),
         "auth-xxx": (AUTH_X, "Authority", "authority_id"),
@@ -541,9 +531,9 @@ def test_path_finding_extra_paths(_override_cleanup):
     )
 
     handler = _make_path_handler(entities, shortest, extra_paths=[alt_path])
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/paths/find?from=per-ppp&to=auth-xxx&extra=2")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/paths/find?from=per-ppp&to=auth-xxx&extra=2")
+    cleanup_dishka()
     body = resp.json()
     assert body["shortest_length"] == 3
     assert len(body["paths"]) == 2
@@ -555,7 +545,7 @@ def test_path_finding_extra_paths(_override_cleanup):
 # ── GE-API-11: Since filter excludes old contracts ────────────
 
 
-def test_since_filter_excludes_old_contracts(_override_cleanup):
+def test_since_filter_excludes_old_contracts():
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
@@ -593,9 +583,9 @@ def test_since_filter_excludes_old_contracts(_override_cleanup):
             return FakeResult(paths)
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=1&since=2024-01-01")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=1&since=2024-01-01")
+    cleanup_dishka()
     body = resp.json()
     node_ids = {n["id"] for n in body["nodes"]}
     # New contract should be present, old one filtered out
@@ -606,7 +596,7 @@ def test_since_filter_excludes_old_contracts(_override_cleanup):
 # ── Summary mode toggles excluded rel types ───────────────────
 
 
-def test_summary_mode_excludes_awarded_rels(_override_cleanup):
+def test_summary_mode_excludes_awarded_rels():
     """summary=true (default) should exclude AWARDED/AWARDED_TO rels."""
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
@@ -631,13 +621,13 @@ def test_summary_mode_excludes_awarded_rels(_override_cleanup):
             return FakeResult([])
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=1&summary=true")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=1&summary=true")
+    cleanup_dishka()
     assert resp.status_code == 200
 
 
-def test_detail_mode_excludes_summary_rels(_override_cleanup):
+def test_detail_mode_excludes_summary_rels():
     """summary=false should exclude CLIENT_OF/SUPPLIER_OF rels."""
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
@@ -661,7 +651,7 @@ def test_detail_mode_excludes_summary_rels(_override_cleanup):
             return FakeResult([])
         return FakeResult(None)
 
-    app.dependency_overrides[get_neo4j_client] = lambda: FakeNeo4jClient(handler)
-    with TestClient(app) as client:
-        resp = client.get("/graph/comp-aaa?depth=1&summary=false")
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-aaa?depth=1&summary=false")
+    cleanup_dishka()
     assert resp.status_code == 200

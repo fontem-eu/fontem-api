@@ -1,10 +1,5 @@
 """Tests for the data quality API and source."""
-from unittest.mock import MagicMock
-
-from fastapi.testclient import TestClient
-
-from src.api.app import app
-from src.api.dependencies import get_data_quality_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 from src.analysis.data_quality_source import DataQualitySource
 
 
@@ -55,44 +50,35 @@ class MockDataQualitySource(DataQualitySource):
 
 def test_overview_returns_all_sections():
     """GET /data-quality returns all four sections."""
-    app.dependency_overrides[get_data_quality_source] = MockDataQualitySource
-    try:
-        client = TestClient(app)
-        resp = client.get("/data-quality")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "graph" in data
-        assert "matching" in data
-        assert "freshness" in data
-        assert "coverage" in data
-        assert data["graph"]["nodes"]["Company"] == 100
-        assert data["matching"]["same_as_pending"] == 5
-    finally:
-        app.dependency_overrides.clear()
+    client = make_test_client(data_quality_source=MockDataQualitySource())
+    resp = client.get("/data-quality")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "graph" in data
+    assert "matching" in data
+    assert "freshness" in data
+    assert "coverage" in data
+    assert data["graph"]["nodes"]["Company"] == 100
+    assert data["matching"]["same_as_pending"] == 5
 
 
 def test_graph_stats_endpoint():
     """GET /data-quality/graph returns node counts."""
-    app.dependency_overrides[get_data_quality_source] = MockDataQualitySource
-    try:
-        client = TestClient(app)
-        resp = client.get("/data-quality/graph")
-        assert resp.status_code == 200
-        assert resp.json()["nodes"]["Contract"] == 50
-    finally:
-        app.dependency_overrides.clear()
+    client = make_test_client(data_quality_source=MockDataQualitySource())
+    resp = client.get("/data-quality/graph")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    assert resp.json()["nodes"]["Contract"] == 50
 
 
 def test_coverage_endpoint():
     """GET /data-quality/coverage returns country + sector breakdown."""
-    app.dependency_overrides[get_data_quality_source] = MockDataQualitySource
-    try:
-        client = TestClient(app)
-        resp = client.get("/data-quality/coverage")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["companies_with_contracts"] == 25
-        assert len(data["contracts_by_country"]) == 1
-        assert data["contracts_by_country"][0]["country"] == "DEU"
-    finally:
-        app.dependency_overrides.clear()
+    client = make_test_client(data_quality_source=MockDataQualitySource())
+    resp = client.get("/data-quality/coverage")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["companies_with_contracts"] == 25
+    assert len(data["contracts_by_country"]) == 1
+    assert data["contracts_by_country"][0]["country"] == "DEU"

@@ -5,10 +5,8 @@ Tests for GET /{ticker}/fundamentals
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
-from src.api.app import app
-from src.api.dependencies import get_data_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 from tests.mock_data_source import EmptyDataSource, ErrorDataSource, MockDataSource
 
 
@@ -18,24 +16,20 @@ from tests.mock_data_source import EmptyDataSource, ErrorDataSource, MockDataSou
 
 @pytest.fixture()
 def client():
-    """TestClient with the mock data source injected."""
-    app.dependency_overrides[get_data_source] = MockDataSource
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+    yield make_test_client(MockDataSource)
+    cleanup_dishka()
 
 
 @pytest.fixture()
 def empty_client():
-    app.dependency_overrides[get_data_source] = EmptyDataSource
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+    yield make_test_client(EmptyDataSource)
+    cleanup_dishka()
 
 
 @pytest.fixture()
 def error_client():
-    app.dependency_overrides[get_data_source] = ErrorDataSource
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+    yield make_test_client(ErrorDataSource)
+    cleanup_dishka()
 
 
 # ---------------------------------------------------------------------------

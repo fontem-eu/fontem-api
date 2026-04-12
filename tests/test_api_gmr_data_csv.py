@@ -25,11 +25,8 @@ from __future__ import annotations
 import pytest
 import pandas as pd
 
-from starlette.testclient import TestClient
-
 from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
-from src.api.app import app
-from src.api.dependencies import get_data_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 
 # ---------------------------------------------------------------------------
@@ -150,18 +147,14 @@ EXPECTED_CSV = (
 
 @pytest.fixture
 def client():
-    app.dependency_overrides[get_data_source] = lambda: _CsvMock()
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(_CsvMock)
+    cleanup_dishka()
 
 
 @pytest.fixture
 def client_404():
-    app.dependency_overrides[get_data_source] = lambda: _NotFoundMock()
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(_NotFoundMock)
+    cleanup_dishka()
 
 
 @pytest.fixture
@@ -268,10 +261,9 @@ def test_split_ratio_absent_renders_no(client):
                 latest_quarter=snap.latest_quarter,
             )
 
-    app.dependency_overrides[get_data_source] = lambda: _NoSplitMock()
-    with TestClient(app) as c:
-        body = c.get("/TEST/gmr_data_csv").text
-    app.dependency_overrides.clear()
+    c = make_test_client(_NoSplitMock)
+    body = c.get("/TEST/gmr_data_csv").text
+    cleanup_dishka()
 
     row3 = body.splitlines()[2]
     assert row3.endswith(",Split Ratio,No")

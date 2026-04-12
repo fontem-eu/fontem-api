@@ -6,29 +6,36 @@ contract detail, sector summary, and unified search.
 """
 from __future__ import annotations
 
+from dishka.integrations.fastapi import FromDishka, inject
+from src.analysis.person_data_source import PersonDataSource
+from src.analysis.gmr_data_source import FinancialDataSource
+from src.analysis.contract_data_source import ContractDataSource
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..dependencies import get_contract_source, get_data_source, get_person_source
 
 router = APIRouter(tags=["contracts"])
 
 
 @router.get("/companies/{gmr_id}/contracts")
+@inject
 def company_contracts(
     gmr_id: str,
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
-    source=Depends(get_contract_source),
+    *,
+    source: FromDishka[ContractDataSource],
 ):
     """Contracts awarded to a company."""
     return source.get_company_contracts(gmr_id, years=years, limit=limit)
 
 
 @router.get("/companies/{gmr_id}")
+@inject
 def company_profile(
     gmr_id: str,
-    source=Depends(get_contract_source),
-    person_source=Depends(get_person_source),
+    source: FromDishka[ContractDataSource],
+    person_source: FromDishka[PersonDataSource],
 ):
     """Company profile with procurement summary, directors, and group."""
     contracts = source.get_company_contracts(gmr_id, years=5, limit=5)
@@ -84,11 +91,13 @@ def company_profile(
 
 
 @router.get("/authorities/{authority_id}/contracts")
+@inject
 def authority_contracts(
     authority_id: str,
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
-    source=Depends(get_contract_source),
+    *,
+    source: FromDishka[ContractDataSource],
 ):
     """Contracts issued by an authority."""
     return source.get_authority_contracts(
@@ -97,9 +106,10 @@ def authority_contracts(
 
 
 @router.get("/authorities/{authority_id}")
+@inject
 def authority_profile(
     authority_id: str,
-    source=Depends(get_contract_source),
+    source: FromDishka[ContractDataSource],
 ):
     """Authority profile with spending summary."""
     contracts = source.get_authority_contracts(
@@ -116,19 +126,22 @@ def authority_profile(
 
 
 @router.get("/contracts/sectors")
+@inject
 def sector_summary(
     country: str | None = Query(None),
     year: int | None = Query(None),
-    source=Depends(get_contract_source),
+    *,
+    source: FromDishka[ContractDataSource],
 ):
     """Aggregated contract values by CPV sector."""
     return source.get_sector_summary(country=country, year=year)
 
 
 @router.get("/contracts/{notice_id}")
+@inject
 def contract_detail(
     notice_id: str,
-    source=Depends(get_contract_source),
+    source: FromDishka[ContractDataSource],
 ):
     """Full detail for a single contract."""
     result = source.get_contract_detail(notice_id)
@@ -138,10 +151,12 @@ def contract_detail(
 
 
 @router.get("/search")
+@inject
 def unified_search(  # pylint: disable=too-many-locals
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=50),
-    contract_source=Depends(get_contract_source),
+    *,
+    contract_source: FromDishka[ContractDataSource],
 ):
     """Unified search across companies and authorities.
 

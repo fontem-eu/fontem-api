@@ -23,13 +23,16 @@ A 404 is returned when:
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
+from dishka.integrations.fastapi import FromDishka, inject
+from src.data.graph.neo4j_client import Neo4jClient
+from src.api.di import resolve_company_id
+
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from src.analysis.fundamentals import Fundamentals
 from src.analysis.gmr_data_source import FinancialDataSource
-from src.api.dependencies import get_data_source, resolve_company_id
 from src.api.helpers import nan_to_none
 from src.api.schemas.fundamentals import (
     FundamentalsMarketSnapshot,
@@ -63,6 +66,7 @@ router = APIRouter(tags=["Fundamentals"])
         "the per-year table."
     ),
 )
+@inject
 def fundamentals(
     ticker: str,
     years: int = Query(default=10, ge=1, le=20, description="Number of historical fiscal years"),
@@ -70,11 +74,13 @@ def fundamentals(
         default=False,
         description="Return only ratios_summary (no per_year table)",
     ),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ) -> FundamentalsResponse:
     """Return financial fundamentals for a given ticker."""
     ticker = ticker.upper()
-    company_info = resolve_company_id(ticker)
+    company_info = resolve_company_id(ticker, neo4j)
 
     try:
         result = Fundamentals(data_source).compute(ticker, years=years)

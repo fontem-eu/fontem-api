@@ -21,12 +21,14 @@ from __future__ import annotations
 import logging
 import math
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.gmr_long import GMRLong
 from src.analysis.gmr_short import GMRShort
-from src.api.dependencies import get_data_source
+from dishka.integrations.fastapi import FromDishka, inject
+from src.api.di import resolve_company_id
+from src.data.graph.neo4j_client import Neo4jClient
 from src.api.schemas.gmr_long import (
     GMRLongResponse,
     GMRLongRatioSchema,
@@ -93,16 +95,18 @@ def _fmt(val) -> str:
         "Add **?summarize=true** to receive only the `gmr_ratio` object."
     ),
 )
+@inject
 def gmr_long(
     ticker: str,
     years: int = Query(default=10, ge=1, le=20, description="Number of historical fiscal years"),
     summarize: bool = Query(default=False, description="Return only the gmr_ratio object"),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ) -> GMRLongResponse:
     """Run the GMR long-term value-investing screen for a given ticker."""
-    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
     ticker = ticker.upper()
-    company_info = resolve_company_id(ticker)
+    company_info = resolve_company_id(ticker, neo4j)
 
     try:
         result = GMRLong(data_source).compute(ticker, years=years)
@@ -209,15 +213,17 @@ def gmr_long(
         "Add **?summarize=true** to receive only the `gmr_ratio` object."
     ),
 )
+@inject
 def gmr_short(
     ticker: str,
     summarize: bool = Query(default=False, description="Return only the gmr_ratio object"),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ) -> GMRShortResponse:
     """Run the GMR short-term swing-trading screen for a given ticker."""
-    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
     ticker = ticker.upper()
-    company_info = resolve_company_id(ticker)
+    company_info = resolve_company_id(ticker, neo4j)
 
     try:
         result = GMRShort(data_source).compute(ticker)
@@ -290,10 +296,10 @@ def _build_gmr_data(  # pylint: disable=too-many-locals
     ticker: str,
     years: int,
     data_source: FinancialDataSource,
+    neo4j: Neo4jClient,
 ) -> GMRDataResponse:
     """Fetch and assemble the GMR spreadsheet data for a ticker."""
-    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
-    company_info = resolve_company_id(ticker)
+    company_info = resolve_company_id(ticker, neo4j)
     try:
         fundamentals  = data_source.get_annual_fundamentals(ticker, years)
         annual_prices = data_source.get_annual_avg_prices(ticker, years)
@@ -467,13 +473,16 @@ def _gmr_data_to_csv(resp: GMRDataResponse) -> str:
         "Use `?years=N` (default 10) to control how many historical years are returned."
     ),
 )
+@inject
 def gmr_data(
     ticker: str,
     years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ) -> GMRDataResponse:
     """Return raw annual financial data for a given ticker."""
-    return _build_gmr_data(ticker.upper(), years, data_source)
+    return _build_gmr_data(ticker.upper(), years, data_source, neo4j)
 
 
 @router.get(
@@ -487,14 +496,17 @@ def gmr_data(
     ),
     response_class=Response,
 )
+@inject
 def gmr_data_csv(
     ticker: str,
     years: int = Query(default=10, ge=1, le=30, description="Number of historical years"),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ) -> Response:
     """Return GMR spreadsheet data as a downloadable CSV file."""
     ticker = ticker.upper()
-    data = _build_gmr_data(ticker, years, data_source)
+    data = _build_gmr_data(ticker, years, data_source, neo4j)
     return Response(
         content=_gmr_data_to_csv(data),
         media_type="text/csv",

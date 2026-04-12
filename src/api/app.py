@@ -10,12 +10,16 @@ ReDoc:       http://localhost:8000/redoc
 """
 from __future__ import annotations
 
+import os
 import time
 from contextlib import asynccontextmanager
 
+from dishka.integrations.fastapi import setup_dishka
 from fastapi import FastAPI, Request
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
+
+from src.api.di import make_container
 
 from src.api.routers.fundamentals import router as fundamentals_router
 from src.api.routers.gmr import router
@@ -93,6 +97,12 @@ app.include_router(graph_router)
 
 # Expose Prometheus metrics at /metrics (scraped by ServiceMonitor)
 Instrumentator().instrument(app).expose(app)
+
+# Wire dishka DI — single Neo4jClient shared by all data sources.
+# Skipped during test imports (tests supply their own mock container).
+if os.environ.get("NEO4J_URI") or os.environ.get("GMR_PRODUCTION"):
+    _container = make_container()
+    setup_dishka(_container, app)
 
 
 @app.get("/health", tags=["Health"], include_in_schema=False)

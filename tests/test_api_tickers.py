@@ -10,10 +10,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from starlette.testclient import TestClient
 
-from src.api.app import app
-from src.api.dependencies import get_data_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 # ---------------------------------------------------------------------------
 # Shared fake data
@@ -44,22 +42,15 @@ _FAKE_TICKERS = [
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def client():
-    with TestClient(app) as c:
-        yield c
-
-
 @pytest.fixture(autouse=True)
-def _mock_data_source():
+def client():
     mock_ds = MagicMock()
     mock_ds.get_available_tickers.return_value = _FAKE_TICKERS
     mock_ds.search_tickers.side_effect = lambda q, limit=10: [
         t for t in _FAKE_TICKERS if q.lower() in t["search_name"]
     ][:limit]
-    app.dependency_overrides[get_data_source] = lambda: mock_ds
-    yield
-    app.dependency_overrides.clear()
+    yield make_test_client(data_source=mock_ds)
+    cleanup_dishka()
 
 
 

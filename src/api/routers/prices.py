@@ -20,12 +20,13 @@ A 404 is returned when no local price data exists for the ticker.
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
+from dishka.integrations.fastapi import FromDishka, inject
+
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from src.analysis.gmr_data_source import FinancialDataSource
-from src.api.dependencies import get_data_source
 from src.api.schemas.prices import PriceBar, PricesResponse
 
 logger = logging.getLogger(__name__)
@@ -71,13 +72,15 @@ def _lookup_company(
         "exists for the requested ticker."
     ),
 )
+@inject
 def get_prices(
     ticker: str,
     period: str = Query(
         default="1y",
         description="Look-back period: 1m, 6m, 1y, 3y, 5y, all",
     ),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
 ) -> PricesResponse:
     """Return OHLCV price bars for a given ticker."""
     ticker = ticker.upper()

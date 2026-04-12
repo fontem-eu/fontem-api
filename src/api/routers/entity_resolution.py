@@ -5,10 +5,12 @@ Endpoints for reviewing and resolving SAME_AS merge candidates.
 """
 from __future__ import annotations
 
+from dishka.integrations.fastapi import FromDishka, inject
+from src.analysis.contract_data_source import ContractDataSource
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from ..dependencies import get_contract_source
 
 router = APIRouter(prefix="/entity-resolution", tags=["entity-resolution"])
 
@@ -31,9 +33,11 @@ class MergeDecision(BaseModel):
 
 
 @router.get("/candidates")
+@inject
 def list_candidates(
     limit: int = Query(50, ge=1, le=200),
-    source=Depends(get_contract_source),
+    *,
+    source: FromDishka[ContractDataSource],
 ):
     """List unreviewed SAME_AS merge candidates."""
     with source._neo4j.session() as session:  # pylint: disable=protected-access
@@ -57,12 +61,14 @@ def list_candidates(
 
 
 @router.get("/similar")
+@inject
 def find_similar(
     name: str = Query(..., min_length=1),
     entity_type: str = Query("company"),
     country: str | None = Query(None),
     limit: int = Query(10, ge=1, le=50),
-    source=Depends(get_contract_source),
+    *,
+    source: FromDishka[ContractDataSource],
 ):
     """Find similar entities (for manual matching / operator review)."""
     with source._neo4j.session() as session:  # pylint: disable=protected-access
@@ -124,11 +130,12 @@ def _validate_merged_properties(props: MergedProperties) -> list[str]:
 
 
 @router.post("/resolve/{dup_id}/{canonical_id}")
+@inject
 def resolve_candidate(
     dup_id: str,
     canonical_id: str,
     decision: MergeDecision,
-    source=Depends(get_contract_source),
+    source: FromDishka[ContractDataSource],
 ):
     """Approve or reject a SAME_AS merge candidate.
 

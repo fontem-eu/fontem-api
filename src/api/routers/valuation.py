@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.valuation import Valuation
-from src.api.dependencies import get_data_source
+from dishka.integrations.fastapi import FromDishka, inject
+from src.api.di import resolve_company_id
+from src.data.graph.neo4j_client import Neo4jClient
 from src.api.helpers import nan_to_none
 from src.api.schemas.valuation import (
     ValuationPerYearRow,
@@ -68,6 +70,7 @@ router = APIRouter(tags=["Valuation"])
         "Add `?summarize=true` to receive only the `summary` object without the per-year table."
     ),
 )
+@inject
 def valuation(
     ticker: str,
     years: int = Query(default=10, ge=1, le=20, description="Number of historical fiscal years"),
@@ -75,12 +78,13 @@ def valuation(
         default=False,
         description="Return only summary (no per_year table)",
     ),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ) -> ValuationResponse:
     """Return enterprise valuation metrics for a given ticker."""
-    from src.api.dependencies import resolve_company_id  # pylint: disable=import-outside-toplevel
     ticker = ticker.upper()
-    company_info = resolve_company_id(ticker)
+    company_info = resolve_company_id(ticker, neo4j)
 
     try:
         result = Valuation(data_source).compute(ticker, years=years)

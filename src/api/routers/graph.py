@@ -6,9 +6,11 @@ between entities. Used by the Cytoscape.js graph explorer UI.
 """
 from __future__ import annotations
 
+from dishka.integrations.fastapi import FromDishka, inject
+from src.data.graph.neo4j_client import Neo4jClient
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..dependencies import get_neo4j_client
 from ..schemas.graph import (
     GraphEdge,
     GraphNode,
@@ -246,12 +248,14 @@ def _find_extra_paths(session, endpoints, shortest_len, search_depth):
     response_model=PathResponse,
     summary="Find paths between two entities",
 )
+@inject
 def graph_paths(
     from_id: str = Query(..., alias="from", description="Source entity ID"),
     to_id: str = Query(..., alias="to", description="Target entity ID"),
     max_depth: int = Query(5, ge=1, le=10, description="Max path length"),
     extra: int = Query(2, ge=0, le=5, description="Extra hops beyond shortest"),
-    neo4j=Depends(get_neo4j_client),
+    *,
+    neo4j: FromDishka[Neo4jClient],
 ):
     """Find shortest and near-shortest paths between two entities."""
     with neo4j.session() as session:
@@ -297,6 +301,7 @@ def graph_paths(
     response_model=GraphResponse,
     summary="Traverse the entity graph from any starting node",
 )
+@inject
 def graph_traverse(
     entity_id: str,
     depth: int = Query(1, ge=0, le=3, description="Traversal depth (0-3)"),
@@ -313,7 +318,8 @@ def graph_traverse(
         description="Use CLIENT_OF/SUPPLIER_OF summary edges (true) "
         "or individual AWARDED/AWARDED_TO edges (false)",
     ),
-    neo4j=Depends(get_neo4j_client),
+    *,
+    neo4j: FromDishka[Neo4jClient],
 ):
     """Variable-depth graph traversal starting from any entity type."""
     type_filter = (

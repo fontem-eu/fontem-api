@@ -22,11 +22,10 @@ from __future__ import annotations
 import pytest
 import pandas as pd
 
-from starlette.testclient import TestClient
 
 from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
 from src.api.app import app
-from src.api.dependencies import get_data_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 
 # ---------------------------------------------------------------------------
@@ -120,18 +119,14 @@ class _NotFoundMock(FinancialDataSource):
 
 @pytest.fixture
 def client():
-    app.dependency_overrides[get_data_source] = lambda: _GoodMock()
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(_GoodMock)
+    cleanup_dishka()
 
 
 @pytest.fixture
 def client_404():
-    app.dependency_overrides[get_data_source] = lambda: _NotFoundMock()
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    yield make_test_client(_NotFoundMock)
+    cleanup_dishka()
 
 
 @pytest.fixture

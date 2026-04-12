@@ -5,16 +5,19 @@ Endpoints for the platform health and data quality dashboard.
 """
 from __future__ import annotations
 
+from dishka.integrations.fastapi import FromDishka, inject
+from src.analysis.data_quality_source import DataQualitySource
+
 from fastapi import APIRouter, Depends
 
-from ..dependencies import get_data_quality_source
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
 
 
 @router.get("")
+@inject
 def data_quality_overview(
-    source=Depends(get_data_quality_source),
+    source: FromDishka[DataQualitySource],
 ):
     """Full data quality overview for the dashboard."""
     return {
@@ -26,25 +29,29 @@ def data_quality_overview(
 
 
 @router.get("/graph")
-def graph_stats(source=Depends(get_data_quality_source)):
+@inject
+def graph_stats(source: FromDishka[DataQualitySource]):
     """Node and relationship counts."""
     return source.get_graph_stats()
 
 
 @router.get("/matching")
-def matching_stats(source=Depends(get_data_quality_source)):
+@inject
+def matching_stats(source: FromDishka[DataQualitySource]):
     """Entity resolution and matching metrics."""
     return source.get_matching_stats()
 
 
 @router.get("/freshness")
-def freshness_stats(source=Depends(get_data_quality_source)):
+@inject
+def freshness_stats(source: FromDishka[DataQualitySource]):
     """Data freshness and loading timestamps."""
     return source.get_data_freshness()
 
 
 @router.get("/coverage")
-def coverage_stats(source=Depends(get_data_quality_source)):
+@inject
+def coverage_stats(source: FromDishka[DataQualitySource]):
     """Data coverage by country, sector, and entity type."""
     return source.get_coverage_stats()
 
@@ -52,72 +59,84 @@ def coverage_stats(source=Depends(get_data_quality_source)):
 # ── Per-pipeline endpoints ────────────────────────────────────────
 
 @router.get("/contracts/timeline")
-def contracts_timeline(source=Depends(get_data_quality_source)):
+@inject
+def contracts_timeline(source: FromDishka[DataQualitySource]):
     """Daily contract counts by publication_date."""
     return source.get_contracts_timeline()
 
 
 @router.get("/contracts/by-country")
-def contracts_by_country(source=Depends(get_data_quality_source)):
+@inject
+def contracts_by_country(source: FromDishka[DataQualitySource]):
     """Contracts and EUR by country."""
     return source.get_contracts_by_country()
 
 
 @router.get("/contracts/nulls")
-def contracts_nulls(source=Depends(get_data_quality_source)):
+@inject
+def contracts_nulls(source: FromDishka[DataQualitySource]):
     """Missing field counts for contracts."""
     return source.get_contracts_nulls()
 
 
 @router.get("/contracts/currency-quality")
-def contracts_currency_quality(source=Depends(get_data_quality_source)):
+@inject
+def contracts_currency_quality(source: FromDishka[DataQualitySource]):
     """Currency-related data quality: undisclosed, inferred, conversion success."""
     return source.get_contracts_currency_quality()
 
 
 @router.get("/contracts/value-timeline")
-def contracts_value_timeline(source=Depends(get_data_quality_source)):
+@inject
+def contracts_value_timeline(source: FromDishka[DataQualitySource]):
     """Daily total EUR value of contracts."""
     return source.get_contracts_value_timeline()
 
 
 @router.get("/gleif")
-def gleif_stats(source=Depends(get_data_quality_source)):
+@inject
+def gleif_stats(source: FromDishka[DataQualitySource]):
     """GLEIF company and relationship stats."""
     return source.get_gleif_stats()
 
 
 @router.get("/edgar")
-def edgar_stats(source=Depends(get_data_quality_source)):
+@inject
+def edgar_stats(source: FromDishka[DataQualitySource]):
     """US EDGAR financial data stats."""
     return source.get_edgar_stats()
 
 
 @router.get("/esef")
-def esef_stats(source=Depends(get_data_quality_source)):
+@inject
+def esef_stats(source: FromDishka[DataQualitySource]):
     """EU ESEF financial data stats."""
     return source.get_esef_stats()
 
 
 @router.get("/lobbying")
-def lobbying_stats(source=Depends(get_data_quality_source)):
+@inject
+def lobbying_stats(source: FromDishka[DataQualitySource]):
     """EU Transparency Register stats."""
     return source.get_lobbying_stats()
 
 
 @router.get("/directors")
-def directors_stats(source=Depends(get_data_quality_source)):
+@inject
+def directors_stats(source: FromDishka[DataQualitySource]):
     """French directors/person data stats."""
     return source.get_directors_stats()
 
 
 @router.get("/trade-edges")
-def trade_edges_stats(source=Depends(get_data_quality_source)):
+@inject
+def trade_edges_stats(source: FromDishka[DataQualitySource]):
     """Materialized trade edge stats."""
     return source.get_trade_edges_stats()
 
 
 @router.get("/dedup")
-def dedup_stats(source=Depends(get_data_quality_source)):
+@inject
+def dedup_stats(source: FromDishka[DataQualitySource]):
     """Deduplication queue stats."""
     return source.get_dedup_stats()

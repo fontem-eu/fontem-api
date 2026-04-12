@@ -11,10 +11,8 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
-from starlette.testclient import TestClient
 
-from src.api.app import app
-from src.api.dependencies import get_data_source
+from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 # ---------------------------------------------------------------------------
 # Shared fake data
@@ -57,21 +55,14 @@ _AAPL_BARS = pd.DataFrame(
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def client():
-    with TestClient(app) as c:
-        yield c
-
-
 @pytest.fixture(autouse=True)
-def _mock_data_source():
+def client():
     mock_ds = MagicMock()
     mock_ds.get_available_tickers.return_value = _FAKE_TICKERS
     mock_ds.get_price_history.return_value = _AAPL_BARS.copy()
     mock_ds.get_data_source_name.return_value = "edgar"
-    app.dependency_overrides[get_data_source] = lambda: mock_ds
-    yield
-    app.dependency_overrides.clear()
+    yield make_test_client(data_source=mock_ds)
+    cleanup_dishka()
 
 
 # ---------------------------------------------------------------------------
@@ -181,23 +172,22 @@ def test_prices_unknown_period_falls_back_to_1y(client):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def _mock_empty_source():
-    """Override with a source that returns an empty DataFrame for any ticker."""
+def empty_client():
+    """Client with a source that returns an empty DataFrame for any ticker."""
     mock_ds = MagicMock()
     mock_ds.get_available_tickers.return_value = []
     mock_ds.get_price_history.return_value = pd.DataFrame(
         columns=["Open", "High", "Low", "Close", "Volume"]
     )
-    app.dependency_overrides[get_data_source] = lambda: mock_ds
-    yield
-    app.dependency_overrides.clear()
+    yield make_test_client(data_source=mock_ds)
+    cleanup_dishka()
 
 
-def test_prices_unknown_ticker_returns_404(client, _mock_empty_source):
-    resp = client.get("/ZZZNOTTHERE/prices")
+def test_prices_unknown_ticker_returns_404(empty_client):
+    resp = empty_client.get("/ZZZNOTTHERE/prices")
     assert resp.status_code == 404
 
 
-def test_prices_404_body_has_detail(client, _mock_empty_source):
-    resp = client.get("/ZZZNOTTHERE/prices")
+def test_prices_404_body_has_detail(empty_client):
+    resp = empty_client.get("/ZZZNOTTHERE/prices")
     assert "detail" in resp.json()

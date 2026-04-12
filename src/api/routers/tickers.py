@@ -5,9 +5,10 @@ GET /tickers/search   — search tickers by name, symbol, or keywords
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from dishka.integrations.fastapi import FromDishka, inject
 
-from src.api.dependencies import get_data_source
+from fastapi import APIRouter, Query
+
 from src.api.schemas.tickers import TickerSearchResponse
 from src.analysis.gmr_data_source import FinancialDataSource
 
@@ -28,6 +29,7 @@ router = APIRouter(
         "Useful for autocomplete search boxes."
     ),
 )
+@inject
 def search_tickers(
     query: str = Query(
         ...,
@@ -40,7 +42,8 @@ def search_tickers(
         ge=1,
         le=50,
     ),
-    data_source: FinancialDataSource = Depends(get_data_source),
+    *,
+    data_source: FromDishka[FinancialDataSource],
 ) -> TickerSearchResponse:
     """Search tickers by name, symbol, or keywords."""
     results = data_source.search_tickers(query, limit)
