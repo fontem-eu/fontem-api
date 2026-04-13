@@ -305,7 +305,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--neo4j-password",
-        default=os.environ.get("NEO4J_PASSWORD", "gmr-neo4j-2026"),
+        default=os.environ.get("NEO4J_PASSWORD", ""),
     )
     parser.add_argument(
         "--currency-dir",

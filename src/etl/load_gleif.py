@@ -1,3 +1,4 @@
+import os
 """
 GLEIF Full Dump → Neo4j Company Loader
 =======================================
@@ -190,7 +191,7 @@ def main(argv=None):
         help="Neo4j username",
     )
     parser.add_argument(
-        "--neo4j-password", default="gmr-neo4j-2026",
+        "--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""),
         help="Neo4j password",
     )
     args = parser.parse_args(argv)

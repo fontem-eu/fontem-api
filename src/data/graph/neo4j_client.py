@@ -21,7 +21,7 @@ class Neo4jClient:
         self._uri = uri or os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
         self._user = user or os.environ.get("NEO4J_USER", "neo4j")
         self._password = password or os.environ.get(
-            "NEO4J_PASSWORD", "gmr-neo4j-2026"
+            "NEO4J_PASSWORD", ""
         )
         self._driver = GraphDatabase.driver(
             self._uri, auth=(self._user, self._password),

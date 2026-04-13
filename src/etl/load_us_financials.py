@@ -225,7 +225,7 @@ def main(argv=None):
     )
     parser.add_argument("--neo4j-uri", default=os.environ.get("NEO4J_URI", "bolt://neo4j:7687"))
     parser.add_argument("--neo4j-user", default=os.environ.get("NEO4J_USER", "neo4j"))
-    parser.add_argument("--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", "gmr-neo4j-2026"))
+    parser.add_argument("--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""))
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
