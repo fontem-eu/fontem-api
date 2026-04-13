@@ -35,6 +35,9 @@ class _FakeResult:
     def single(self):
         return None
 
+    def data(self):
+        return []
+
 
 class _FakeNeo4jClient:
     """Stub Neo4jClient for tests — returns empty results instead of crashing."""

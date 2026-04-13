@@ -1,4 +1,3 @@
-import os
 """
 GLEIF Full Dump → Neo4j Company Loader
 =======================================
@@ -15,6 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import os
 import sys
 import time
 import zipfile

@@ -144,7 +144,8 @@ class TestUnifiedSearch:
     def test_returns_companies_and_authorities(self):
         """Search returns both entity types."""
         mock = _mock_contract_source()
-        # The new unified search makes 3 queries: listed, procurement, authorities
+        # Build a mock Neo4jClient whose session returns scripted query results
+        neo4j_mock = MagicMock()
         session = MagicMock()
         call_count = {"n": 0}
 
@@ -152,17 +153,14 @@ class TestUnifiedSearch:
             call_count["n"] += 1
             result = MagicMock()
             if call_count["n"] == 1:
-                # Listed companies
                 result.data.return_value = [
                     {"gmr_id": "gid-1", "name": "SOCOMEC", "country": "FR",
                      "ticker": None, "exchange": None, "currency": None,
                      "is_active": True},
                 ]
             elif call_count["n"] == 2:
-                # Procurement-only companies
                 result.data.return_value = []
             else:
-                # Authorities
                 result.data.return_value = [
                     {"authority_id": "aid-1", "name": "DB Netz AG",
                      "country": "DE"},
@@ -170,9 +168,10 @@ class TestUnifiedSearch:
             return result
 
         session.run = MagicMock(side_effect=_run_side)
-        mock._neo4j.session.return_value.__enter__.return_value = session
+        neo4j_mock.session.return_value.__enter__ = MagicMock(return_value=session)
+        neo4j_mock.session.return_value.__exit__ = MagicMock(return_value=False)
 
-        client = make_test_client(contract_source=mock)
+        client = make_test_client(contract_source=mock, neo4j_client=neo4j_mock)
         resp = client.get("/search?q=test")
         cleanup_dishka()
         assert resp.status_code == 200

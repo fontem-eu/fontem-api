@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
 from src.analysis.contract_data_source import ContractDataSource
+from src.data.graph.neo4j_client import Neo4jClient
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -37,10 +38,11 @@ class MergeDecision(BaseModel):
 def list_candidates(
     limit: int = Query(50, ge=1, le=200),
     *,
+    neo4j: FromDishka[Neo4jClient],
     source: FromDishka[ContractDataSource],
 ):
     """List unreviewed SAME_AS merge candidates."""
-    with source._neo4j.session() as session:  # pylint: disable=protected-access
+    with neo4j.session() as session:  
         rows = session.run(
             "MATCH (dup)-[r:SAME_AS {reviewed: false}]->(canonical) "
             "RETURN dup.gmr_id AS dup_id, dup.name AS dup_name, "
@@ -68,10 +70,11 @@ def find_similar(
     country: str | None = Query(None),
     limit: int = Query(10, ge=1, le=50),
     *,
+    neo4j: FromDishka[Neo4jClient],
     source: FromDishka[ContractDataSource],
 ):
     """Find similar entities (for manual matching / operator review)."""
-    with source._neo4j.session() as session:  # pylint: disable=protected-access
+    with neo4j.session() as session:  
         if entity_type == "authority":
             rows = session.run(
                 "MATCH (a:Authority) "
@@ -135,14 +138,25 @@ def resolve_candidate(
     dup_id: str,
     canonical_id: str,
     decision: MergeDecision,
-    source: FromDishka[ContractDataSource],
+    *,
+    neo4j: FromDishka[Neo4jClient],
 ):
     """Approve or reject a SAME_AS merge candidate.
 
     When approving, merged_properties allows the operator to override
     any field on the surviving entity. All edits are validated.
     """
-    with source._neo4j.session() as session:  # pylint: disable=protected-access
+    # Validate before opening a transaction
+    if decision.action not in ("approve", "reject"):
+        raise HTTPException(
+            status_code=400, detail="action must be 'approve' or 'reject'",
+        )
+    if decision.action == "approve" and decision.merged_properties:
+        errors = _validate_merged_properties(decision.merged_properties)
+        if errors:
+            raise HTTPException(status_code=422, detail={"validation_errors": errors})
+
+    with neo4j.session() as session:
         rel = session.run(
             "MATCH (dup:Company {gmr_id: $dup})"
             "-[r:SAME_AS]->(canonical:Company {gmr_id: $can}) "
@@ -163,18 +177,9 @@ def resolve_candidate(
             )
             return {"status": "rejected"}
 
-        if decision.action == "approve":
-            # Validate merged properties if provided
-            if decision.merged_properties:
-                errors = _validate_merged_properties(decision.merged_properties)
-                if errors:
-                    raise HTTPException(
-                        status_code=422,
-                        detail={"validation_errors": errors},
-                    )
-
-            # Create audit node
-            session.run(
+        # Approve: audit + merge + property overrides in a single write tx
+        def _merge_tx(tx):
+            tx.run(
                 "MATCH (dup:Company {gmr_id: $dup}) "
                 "CREATE (:MergeEvent {"
                 "  canonical_id: $can, merged_id: $dup, "
@@ -183,8 +188,7 @@ def resolve_candidate(
                 "})",
                 dup=dup_id, can=canonical_id,
             )
-            # Merge nodes
-            session.run(
+            tx.run(
                 "MATCH (dup:Company {gmr_id: $dup}), "
                 "  (canonical:Company {gmr_id: $can}) "
                 "CALL apoc.refactor.mergeNodes("
@@ -195,7 +199,6 @@ def resolve_candidate(
                 "RETURN node",
                 dup=dup_id, can=canonical_id,
             )
-            # Apply operator-edited properties on the surviving node
             if decision.merged_properties:
                 props = decision.merged_properties
                 sets = []
@@ -207,21 +210,17 @@ def resolve_candidate(
                     sets.append("c.country = $country")
                     params["country"] = props.country.strip().upper()
                 if props.lei is not None:
-                    val = props.lei.strip() or None
                     sets.append("c.lei = $lei")
-                    params["lei"] = val
+                    params["lei"] = props.lei.strip() or None
                 if props.vat is not None:
                     cleaned = [v.strip() for v in props.vat if v.strip()]
                     sets.append("c.vat = $vat")
                     params["vat"] = cleaned if cleaned else None
                 if sets:
-                    session.run(
+                    tx.run(
                         f"MATCH (c:Company {{gmr_id: $can}}) SET {', '.join(sets)}",
                         **params,
                     )
 
-            return {"status": "merged", "surviving_id": canonical_id}
-
-        raise HTTPException(
-            status_code=400, detail="action must be 'approve' or 'reject'",
-        )
+        session.execute_write(_merge_tx)
+        return {"status": "merged", "surviving_id": canonical_id}

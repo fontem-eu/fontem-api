@@ -10,6 +10,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from src.analysis.person_data_source import PersonDataSource
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.contract_data_source import ContractDataSource
+from src.data.graph.neo4j_client import Neo4jClient
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -34,8 +35,10 @@ def company_contracts(
 @inject
 def company_profile(
     gmr_id: str,
+    *,
     source: FromDishka[ContractDataSource],
     person_source: FromDishka[PersonDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ):
     """Company profile with procurement summary, directors, and group."""
     contracts = source.get_company_contracts(gmr_id, years=5, limit=5)
@@ -43,7 +46,7 @@ def company_profile(
 
     # Corporate group (via SUBSIDIARY_OF)
     group = None
-    with source._neo4j.session() as session:  # pylint: disable=protected-access
+    with neo4j.session() as session:
         group_data = session.run(
             "MATCH (member:Company {gmr_id: $gid}) "
             "OPTIONAL MATCH (member)-[:SUBSIDIARY_OF*1..5]->(ancestor) "
@@ -157,6 +160,7 @@ def unified_search(  # pylint: disable=too-many-locals
     limit: int = Query(10, ge=1, le=50),
     *,
     contract_source: FromDishka[ContractDataSource],
+    neo4j: FromDishka[Neo4jClient],
 ):
     """Unified search across companies and authorities.
 
@@ -164,7 +168,7 @@ def unified_search(  # pylint: disable=too-many-locals
     Matches on both company name AND ticker symbol.
     Deduplicates by gmr_id (a company with multiple listings appears once).
     """
-    with contract_source._neo4j.session() as session:  # pylint: disable=protected-access
+    with neo4j.session() as session:
         # 1. Listed companies matching by ticker OR name (highest priority)
         listed = session.run(
             "MATCH (c:Company)-[:LISTED_AS]->(l:Listing) "
