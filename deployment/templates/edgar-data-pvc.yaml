@@ -10,4 +10,4 @@ spec:
   resources:
     requests:
       storage: 50Gi
-  volumeName: edgar-data-pv
+  volumeName: edgar-data-pv-{{ .Release.Namespace }}

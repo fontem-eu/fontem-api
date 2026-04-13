@@ -9,5 +9,5 @@ spec:
   resources:
     requests:
       storage: 10Gi
-  volumeName: esef-data-pv
+  volumeName: esef-data-pv-{{ .Release.Namespace }}
   storageClassName: ""
