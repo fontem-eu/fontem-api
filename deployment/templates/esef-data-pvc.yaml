@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  namespace: gmr
+  namespace: {{ .Release.Namespace }}
   name: esef-data
 spec:
   accessModes:

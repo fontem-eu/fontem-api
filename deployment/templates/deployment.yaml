@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  namespace: gmr
+  namespace: {{ .Release.Namespace }}
   name: gmr-api
   labels:
     app: gmr-api

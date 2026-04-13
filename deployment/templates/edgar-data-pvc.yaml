@@ -2,7 +2,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: edgar-data
-  namespace: gmr
+  namespace: {{ .Release.Namespace }}
 spec:
   storageClassName: ""
   accessModes:

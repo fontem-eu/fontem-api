@@ -2,12 +2,12 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: gmr-api
-  namespace: gmr
+  namespace: {{ .Release.Namespace }}
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-    - host: gmr.void42.internal
+    - host: {{ .Values.domain | default "gmr.void42.internal" }}
       http:
         paths:
           - path: /

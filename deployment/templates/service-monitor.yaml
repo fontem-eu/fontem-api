@@ -2,7 +2,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: gmr-api
-  namespace: gmr
+  namespace: {{ .Release.Namespace }}
   labels:
     app: gmr-api
     # Must match the Prometheus operator's serviceMonitorSelector
@@ -13,7 +13,7 @@ spec:
       app: gmr-api
   namespaceSelector:
     matchNames:
-      - gmr
+      - {{ .Release.Namespace }}
   endpoints:
     - port: http
       path: /metrics
