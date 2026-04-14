@@ -98,6 +98,21 @@ def _extract_qid(uri: str) -> str:
     return ""
 
 
+def _normalize_date(raw: str) -> str:
+    """Convert DD/MM/YYYY to YYYY-MM-DD. Returns '' on failure."""
+    raw = (raw or "").strip()[:10]
+    if not raw:
+        return ""
+    # Already ISO? (starts with 4-digit year)
+    if len(raw) >= 10 and raw[4] == "-":
+        return raw[:10]
+    # DD/MM/YYYY
+    parts = raw.split("/")
+    if len(parts) == 3 and len(parts[2]) == 4:
+        return f"{parts[2]}-{parts[1]}-{parts[0]}"
+    return raw
+
+
 def _to_float(value: str) -> float | None:
     if not value:
         return None
@@ -124,8 +139,8 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
     reader = csv.DictReader(text)
 
     for row in reader:
-        # Filter by start date if requested
-        start_date = (row.get("Operation_Start_Date") or "")[:10]
+        # Normalize DD/MM/YYYY → YYYY-MM-DD for comparison and storage
+        start_date = _normalize_date(row.get("Operation_Start_Date", ""))
         if since and start_date and start_date < since:
             continue
 
@@ -181,7 +196,7 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
             "fund": (row.get("Fund_Name") or row.get("Fund_Code") or "")[:200] or None,
             "programme": (row.get("Programme_Name") or "")[:200] or None,
             "start_date": start_date or None,
-            "end_date": (row.get("Operation_End_Date") or "")[:10] or None,
+            "end_date": _normalize_date(row.get("Operation_End_Date", "")) or None,
             "nuts_code": nuts_code or None,
             "country": country_code or None,
             "beneficiary_gmr_id": beneficiary_gmr_id,
