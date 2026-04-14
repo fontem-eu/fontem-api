@@ -24,6 +24,7 @@ class GraphDataQualitySource(DataQualitySource):
                 "Contract", "Authority", "CPV",
                 "Person", "Lobbyist", "LobbyInterest",
                 "SanctionedEntity", "BeneficialOwner",
+                "NUTSRegion", "CohesionProject",
             ]:
                 n = session.run(
                     f"MATCH (n:{label}) RETURN count(n) AS n"
@@ -509,6 +510,88 @@ class GraphDataQualitySource(DataQualitySource):
             "by_reporting_year": by_year,
         }
 
+    def get_nuts_stats(self) -> dict:
+        """NUTS region stats: hierarchy levels, company/authority coverage."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (n:NUTSRegion) RETURN count(n) AS n"
+            ).single()["n"]
+            by_level = session.run(
+                "MATCH (n:NUTSRegion) "
+                "RETURN n.level AS level, count(n) AS n ORDER BY n.level"
+            ).data()
+            companies_linked = session.run(
+                "MATCH (:Company)-[:LOCATED_IN]->(:NUTSRegion) "
+                "RETURN count(*) AS n"
+            ).single()["n"]
+            total_companies = session.run(
+                "MATCH (c:Company) RETURN count(c) AS n"
+            ).single()["n"]
+            authorities_linked = session.run(
+                "MATCH (:Authority)-[:LOCATED_IN]->(:NUTSRegion) "
+                "RETURN count(*) AS n"
+            ).single()["n"]
+            top_regions = session.run(
+                "MATCH (c:Company)-[:LOCATED_IN]->(n:NUTSRegion {level: 0}) "
+                "RETURN n.code AS code, n.name AS name, count(c) AS companies "
+                "ORDER BY companies DESC LIMIT 15"
+            ).data()
+        return {
+            "total_regions": total,
+            "by_level": by_level,
+            "companies_linked": companies_linked,
+            "total_companies": total_companies,
+            "company_coverage_pct": round(
+                companies_linked / max(total_companies, 1) * 100, 1
+            ),
+            "authorities_linked": authorities_linked,
+            "top_regions": top_regions,
+        }
+
+    def get_eu_knowledge_graph_stats(self) -> dict:
+        """EU Knowledge Graph cohesion project stats."""
+        with self._neo4j.session() as session:
+            projects = session.run(
+                "MATCH (p:CohesionProject) RETURN count(p) AS n"
+            ).single()["n"]
+            with_budget = session.run(
+                "MATCH (p:CohesionProject) "
+                "WHERE p.total_budget IS NOT NULL "
+                "RETURN count(p) AS n"
+            ).single()["n"]
+            total_eu_contribution = session.run(
+                "MATCH (p:CohesionProject) "
+                "WHERE p.eu_contribution IS NOT NULL "
+                "RETURN sum(p.eu_contribution) AS total"
+            ).single()["total"] or 0
+            beneficiary_links = session.run(
+                "MATCH (:Company)-[:BENEFICIARY_OF]->(:CohesionProject) "
+                "RETURN count(*) AS n"
+            ).single()["n"]
+            by_fund = session.run(
+                "MATCH (p:CohesionProject) WHERE p.fund IS NOT NULL "
+                "RETURN p.fund AS fund, count(p) AS n "
+                "ORDER BY n DESC LIMIT 10"
+            ).data()
+            by_country = session.run(
+                "MATCH (p:CohesionProject) WHERE p.country IS NOT NULL "
+                "RETURN p.country AS country, count(p) AS n "
+                "ORDER BY n DESC LIMIT 15"
+            ).data()
+            with_nuts = session.run(
+                "MATCH (p:CohesionProject)-[:LOCATED_IN]->(:NUTSRegion) "
+                "RETURN count(p) AS n"
+            ).single()["n"]
+        return {
+            "total_projects": projects,
+            "with_budget": with_budget,
+            "total_eu_contribution": total_eu_contribution,
+            "beneficiary_links": beneficiary_links,
+            "by_fund": by_fund,
+            "by_country": by_country,
+            "with_nuts_region": with_nuts,
+        }
+
     def get_coverage_stats(self) -> dict:
         """Return coverage metrics."""
         with self._neo4j.session() as session:
@@ -591,5 +674,15 @@ class GraphDataQualitySource(DataQualitySource):
             "listings_with_isin": session.run(
                 "MATCH (l:Listing) WHERE l.isin IS NOT NULL "
                 "RETURN count(l) AS n"
+            ).single()["n"],
+
+            # NUTS regions
+            "nuts_region_count": session.run(
+                "MATCH (n:NUTSRegion) RETURN count(n) AS n"
+            ).single()["n"],
+
+            # EU Cohesion projects
+            "cohesion_project_count": session.run(
+                "MATCH (p:CohesionProject) RETURN count(p) AS n"
             ).single()["n"],
         }

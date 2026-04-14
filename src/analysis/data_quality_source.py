@@ -46,3 +46,5 @@ class DataQualitySource(ABC):
     def get_openfigi_stats(self) -> dict: return {}
     def get_beneficial_ownership_stats(self) -> dict: return {}
     def get_cdp_stats(self) -> dict: return {}
+    def get_nuts_stats(self) -> dict: return {}
+    def get_eu_knowledge_graph_stats(self) -> dict: return {}

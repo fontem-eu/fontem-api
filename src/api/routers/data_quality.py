@@ -175,3 +175,17 @@ def beneficial_ownership_stats(source: FromDishka[DataQualitySource]):
 def cdp_stats(source: FromDishka[DataQualitySource]):
     """CDP climate disclosure stats."""
     return source.get_cdp_stats()
+
+
+@router.get("/nuts")
+@inject
+def nuts_stats(source: FromDishka[DataQualitySource]):
+    """NUTS region stats."""
+    return source.get_nuts_stats()
+
+
+@router.get("/eu-knowledge-graph")
+@inject
+def eu_knowledge_graph_stats(source: FromDishka[DataQualitySource]):
+    """EU Knowledge Graph cohesion project stats."""
+    return source.get_eu_knowledge_graph_stats()
