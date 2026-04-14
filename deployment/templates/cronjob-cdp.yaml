@@ -6,6 +6,7 @@ metadata:
 spec:
   schedule: "0 4 1 1,4,7,10 *"      # quarterly 1st at 04:00 UTC
   concurrencyPolicy: Forbid
+  suspend: true
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
