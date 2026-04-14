@@ -644,6 +644,17 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (p:Person) RETURN count(p) AS n"
             ).single()["n"]
 
+            # New data sources
+            sanctioned = session.run(
+                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
+            ).single()["n"]
+            nuts_count = session.run(
+                "MATCH (n:NUTSRegion) RETURN count(n) AS n"
+            ).single()["n"]
+            cohesion_count = session.run(
+                "MATCH (p:CohesionProject) RETURN count(p) AS n"
+            ).single()["n"]
+
         return {
             "companies_with_contracts": companies_with_contracts,
             "contracts_by_country": by_country,
@@ -653,36 +664,7 @@ class GraphDataQualitySource(DataQualitySource):
             "lobbyists_with_ep_passes": lobbyists_with_ep,
             "top_lobby_interests": lobby_interests,
             "person_count": person_count,
-
-            # Sanctions
-            "sanctioned_entity_count": session.run(
-                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
-            ).single()["n"],
-
-            # Beneficial ownership
-            "beneficial_owner_count": session.run(
-                "MATCH (b:BeneficialOwner) RETURN count(b) AS n"
-            ).single()["n"],
-
-            # CDP
-            "companies_with_cdp": session.run(
-                "MATCH (c:Company) WHERE c.cdp_score IS NOT NULL "
-                "RETURN count(c) AS n"
-            ).single()["n"],
-
-            # FIRDS / OpenFIGI
-            "listings_with_isin": session.run(
-                "MATCH (l:Listing) WHERE l.isin IS NOT NULL "
-                "RETURN count(l) AS n"
-            ).single()["n"],
-
-            # NUTS regions
-            "nuts_region_count": session.run(
-                "MATCH (n:NUTSRegion) RETURN count(n) AS n"
-            ).single()["n"],
-
-            # EU Cohesion projects
-            "cohesion_project_count": session.run(
-                "MATCH (p:CohesionProject) RETURN count(p) AS n"
-            ).single()["n"],
+            "sanctioned_entity_count": sanctioned,
+            "nuts_region_count": nuts_count,
+            "cohesion_project_count": cohesion_count,
         }
