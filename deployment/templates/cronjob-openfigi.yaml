@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etl-openfigi
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: "0 8 * * 1"             # weekly Monday at 08:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 7200
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: regcred
+          containers:
+            - name: etl-openfigi
+              image: contribute.void42.internal/golden/gmr-api:{{ .Values.version }}
+              imagePullPolicy: Always
+              env:
+                - name: NEO4J_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_URI
+                - name: NEO4J_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_USER
+                - name: NEO4J_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_PASSWORD
+                - name: OPENFIGI_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: openfigi-credentials
+                      key: api_key
+              command:
+                - python
+                - -m
+                - src.etl.load_openfigi
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi
