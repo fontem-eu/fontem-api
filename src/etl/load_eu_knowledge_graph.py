@@ -149,7 +149,11 @@ def sparql_query(query: str, retries: int = 3) -> dict:
     params = urllib.parse.urlencode({"query": query, "format": "json"})
     url = f"{SPARQL_ENDPOINT}?{params}"
     req = urllib.request.Request(
-        url, headers={"Accept": "application/sparql-results+json"}
+        url,
+        headers={
+            "Accept": "application/sparql-results+json",
+            "User-Agent": "GMR-KnowledgeGraph/1.0 (civic-transparency; contact@gmr.void42.net)",
+        },
     )
 
     delays = [5, 15, 45]

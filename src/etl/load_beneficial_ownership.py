@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import gzip
+import zipfile
 import io
 import logging
 import os
@@ -31,8 +31,8 @@ from . import gmr_id
 logger = logging.getLogger(__name__)
 
 BODS_URL = (
-    "https://bods-data.openownership.org/storage/data/"
-    "public/gleif/statements.latest.csv.gz"
+    "https://oo-bodsdata.s3.amazonaws.com/data/"
+    "gleif_version_0_4/csv.zip"
 )
 BATCH_SIZE = 2000
 
@@ -61,7 +61,7 @@ SET r.interest_type    = row.interest_type,
 
 
 def download_bods():
-    """Download the gzipped CSV from OpenOwnership."""
+    """Download the CSV ZIP from OpenOwnership."""
     logger.info("Downloading BODS data from %s ...", BODS_URL)
     try:
         resp = httpx.get(BODS_URL, timeout=600, follow_redirects=True)
@@ -109,26 +109,36 @@ def _parse_row(row):
     }
 
 
-def parse_bods_csv(data_bytes, is_gzipped=True):
+def parse_bods_csv(data_bytes, is_zip=True):
     """
-    Parse BODS CSV (possibly gzipped) and yield person-ownership dicts.
+    Parse BODS CSV data and yield person-ownership dicts.
 
+    Handles ZIP archives (containing one or more CSVs) and plain CSV.
     Filters to natural persons only.
     """
-    if is_gzipped:
-        text_stream = io.TextIOWrapper(
-            gzip.GzipFile(fileobj=io.BytesIO(data_bytes)),
-            encoding="utf-8",
-            errors="replace",
-        )
+    if is_zip:
+        zf = zipfile.ZipFile(io.BytesIO(data_bytes))
+        csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
+        logger.info("ZIP contains %d CSV files: %s", len(csv_names),
+                     csv_names[:5])
+        for name in csv_names:
+            text_stream = io.TextIOWrapper(
+                zf.open(name), encoding="utf-8", errors="replace",
+            )
+            reader = csv.DictReader(text_stream)
+            for row in reader:
+                parsed = _parse_row(row)
+                if parsed is not None:
+                    yield parsed
     else:
-        text_stream = io.StringIO(data_bytes.decode("utf-8", errors="replace"))
-
-    reader = csv.DictReader(text_stream)
-    for row in reader:
-        parsed = _parse_row(row)
-        if parsed is not None:
-            yield parsed
+        text_stream = io.StringIO(
+            data_bytes.decode("utf-8", errors="replace")
+        )
+        reader = csv.DictReader(text_stream)
+        for row in reader:
+            parsed = _parse_row(row)
+            if parsed is not None:
+                yield parsed
 
 
 def load_into_neo4j(driver, records):
@@ -203,12 +213,12 @@ def main(argv=None):
         except OSError:
             logger.exception("Failed to read %s", args.file)
             sys.exit(1)
-        is_gzipped = args.file.endswith(".gz")
+        is_zip = args.file.endswith(".zip")
     else:
         data_bytes = download_bods()
-        is_gzipped = True
+        is_zip = True
 
-    records = list(parse_bods_csv(data_bytes, is_gzipped=is_gzipped))
+    records = list(parse_bods_csv(data_bytes, is_zip=is_zip))
     logger.info("Parsed %d beneficial-owner records", len(records))
 
     driver = GraphDatabase.driver(

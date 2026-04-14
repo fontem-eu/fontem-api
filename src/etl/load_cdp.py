@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 CDP_API_BASE = "https://data.cdp.net/resource"
 # Corporate responses dataset — the actual resource ID may change;
 # this is a well-known stable identifier for the climate scores.
-CDP_DATASET_ID = "kxi4-4uxd"
+CDP_DATASET_ID = os.environ.get("CDP_DATASET_ID", "maxh-kwc2")
 
 BATCH_SIZE = 500
 
@@ -82,8 +82,8 @@ def fetch_cdp_data(year, limit):
         resp = httpx.get(url, params=params, timeout=60)
         resp.raise_for_status()
     except httpx.HTTPError:
-        logger.exception("Failed to query CDP API")
-        sys.exit(1)
+        logger.exception("Failed to query CDP API (dataset %s may require membership)", CDP_DATASET_ID)
+        return []
 
     data = resp.json()
     logger.info("Received %d records from CDP", len(data))
