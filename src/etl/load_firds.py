@@ -104,9 +104,9 @@ def parse_firds_xml(xml_stream):
     Keeps only equities (CFI starts with 'E') and collective investment
     schemes (CFI starts with 'C').
     """
-    for event, elem in iterparse(xml_stream, events=("end",)):
+    for _event, elem in iterparse(xml_stream, events=("end",)):
         tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-        if tag != "FinInstrmGnlAttrbts" and tag != "RefData":
+        if tag not in ("FinInstrmGnlAttrbts", "RefData"):
             elem.clear()
             continue
 
@@ -212,6 +212,50 @@ def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
     return {"total": total, "linked": linked, "elapsed_s": round(elapsed, 1)}
 
 
+def _load_from_file(driver, file_path):
+    """Parse a local ZIP and load all instruments."""
+    logger.info("Reading local file: %s", file_path)
+    try:
+        with zipfile.ZipFile(file_path) as zf:
+            xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
+            if not xml_names:
+                logger.error("No XML file found in ZIP")
+                sys.exit(1)
+            all_records = []
+            for xml_name in xml_names:
+                with zf.open(xml_name) as xml_stream:
+                    all_records.extend(parse_firds_xml(xml_stream))
+    except (OSError, zipfile.BadZipFile):
+        logger.exception("Failed to open ZIP %s", file_path)
+        sys.exit(1)
+    return load_into_neo4j(driver, all_records)
+
+
+def _load_from_solr(driver, since):
+    """Download delta ZIPs from FIRDS Solr and load instruments."""
+    urls = query_firds_files(since)
+    summary = {"total": 0, "linked": 0, "elapsed_s": 0}
+    for url in urls:
+        buf = download_zip(url)
+        if buf is None:
+            continue
+        try:
+            zf = zipfile.ZipFile(buf)  # pylint: disable=consider-using-with
+        except zipfile.BadZipFile:
+            logger.warning("Skipping bad ZIP: %s", url)
+            continue
+        xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
+        for xml_name in xml_names:
+            with zf.open(xml_name) as xml_stream:
+                records = list(parse_firds_xml(xml_stream))
+            if records:
+                part = load_into_neo4j(driver, records)
+                summary["total"] += part["total"]
+                summary["linked"] += part["linked"]
+                summary["elapsed_s"] += part["elapsed_s"]
+    return summary
+
+
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -247,43 +291,9 @@ def main(argv=None):
 
     try:
         if args.file:
-            logger.info("Reading local file: %s", args.file)
-            try:
-                zf = zipfile.ZipFile(args.file)
-            except (OSError, zipfile.BadZipFile):
-                logger.exception("Failed to open ZIP %s", args.file)
-                sys.exit(1)
-            xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
-            if not xml_names:
-                logger.error("No XML file found in ZIP")
-                sys.exit(1)
-            all_records = []
-            for xml_name in xml_names:
-                with zf.open(xml_name) as xml_stream:
-                    all_records.extend(parse_firds_xml(xml_stream))
-            summary = load_into_neo4j(driver, all_records)
+            summary = _load_from_file(driver, args.file)
         else:
-            urls = query_firds_files(args.since)
-            total_summary = {"total": 0, "linked": 0, "elapsed_s": 0}
-            for url in urls:
-                buf = download_zip(url)
-                if buf is None:
-                    continue
-                try:
-                    zf = zipfile.ZipFile(buf)
-                except zipfile.BadZipFile:
-                    logger.warning("Skipping bad ZIP: %s", url)
-                    continue
-                xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
-                for xml_name in xml_names:
-                    with zf.open(xml_name) as xml_stream:
-                        records = list(parse_firds_xml(xml_stream))
-                    if records:
-                        s = load_into_neo4j(driver, records)
-                        total_summary["total"] += s["total"]
-                        total_summary["linked"] += s["linked"]
-                        total_summary["elapsed_s"] += s["elapsed_s"]
-            summary = total_summary
+            summary = _load_from_solr(driver, args.since)
     finally:
         driver.close()
 

@@ -73,6 +73,42 @@ def download_bods():
     return resp.content
 
 
+def _parse_row(row):
+    """Parse a single BODS CSV row into a dict, or None if not relevant."""
+    subject_type = (row.get("subjectType") or row.get("statementType") or "")
+    if "person" not in subject_type.lower():
+        return None
+
+    subject_id = row.get("statementID") or row.get("id") or ""
+    if not subject_id:
+        return None
+
+    lei = row.get("interestedParty_describedByEntityStatement_entityLEI") or ""
+    if not lei:
+        lei = row.get("lei") or row.get("LEI") or ""
+    if not lei or len(lei) != 20:
+        return None
+
+    share_pct_raw = row.get("sharePercentage") or row.get("interestLevel") or ""
+    try:
+        share_percentage = float(share_pct_raw) if share_pct_raw else None
+    except ValueError:
+        share_percentage = None
+
+    return {
+        "bo_id": str(gmr_id.from_name("BO", f"bo:{subject_id}")),
+        "name": (
+            row.get("personName") or row.get("name") or row.get("fullName") or ""
+        ).strip(),
+        "nationality": (row.get("nationality") or "").strip(),
+        "country": (row.get("country") or row.get("addressCountry") or "").strip(),
+        "lei": lei,
+        "interest_type": (row.get("interestType") or "").strip(),
+        "share_percentage": share_percentage,
+        "start_date": (row.get("interestStartDate") or row.get("startDate") or "")[:10],
+    }
+
+
 def parse_bods_csv(data_bytes, is_gzipped=True):
     """
     Parse BODS CSV (possibly gzipped) and yield person-ownership dicts.
@@ -90,48 +126,9 @@ def parse_bods_csv(data_bytes, is_gzipped=True):
 
     reader = csv.DictReader(text_stream)
     for row in reader:
-        # Only natural persons
-        subject_type = (row.get("subjectType") or row.get("statementType") or "")
-        if "person" not in subject_type.lower():
-            continue
-
-        subject_id = row.get("statementID") or row.get("id") or ""
-        if not subject_id:
-            continue
-
-        lei = row.get("interestedParty_describedByEntityStatement_entityLEI") or ""
-        if not lei:
-            lei = row.get("lei") or row.get("LEI") or ""
-        if not lei or len(lei) != 20:
-            continue
-
-        name = (
-            row.get("personName") or row.get("name") or row.get("fullName") or ""
-        ).strip()
-        nationality = (row.get("nationality") or "").strip()
-        country = (row.get("country") or row.get("addressCountry") or "").strip()
-
-        interest_type = (row.get("interestType") or "").strip()
-        share_pct_raw = row.get("sharePercentage") or row.get("interestLevel") or ""
-        try:
-            share_percentage = float(share_pct_raw) if share_pct_raw else None
-        except ValueError:
-            share_percentage = None
-
-        start_date = (row.get("interestStartDate") or row.get("startDate") or "")[:10]
-
-        bo_id = str(gmr_id.from_name("BO", f"bo:{subject_id}"))
-
-        yield {
-            "bo_id": bo_id,
-            "name": name,
-            "nationality": nationality,
-            "country": country,
-            "lei": lei,
-            "interest_type": interest_type,
-            "share_percentage": share_percentage,
-            "start_date": start_date,
-        }
+        parsed = _parse_row(row)
+        if parsed is not None:
+            yield parsed
 
 
 def load_into_neo4j(driver, records):
