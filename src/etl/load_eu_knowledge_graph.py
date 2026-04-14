@@ -141,8 +141,9 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
     for row in reader:
         # Normalize DD/MM/YYYY → YYYY-MM-DD for comparison and storage
         start_date = _normalize_date(row.get("Operation_Start_Date", ""))
-        if since and start_date and start_date < since:
-            continue
+        if since:
+            if not start_date or start_date < since:
+                continue
 
         # Extract QID from the Operation_Unique_Identifier URI
         op_uri = row.get("Operation_Unique_Identifier", "")
