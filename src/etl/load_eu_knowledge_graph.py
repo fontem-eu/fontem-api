@@ -1,13 +1,22 @@
 """
 EU Knowledge Graph (Kohesio) → Neo4j
 =====================================
-Ingests EU cohesion policy projects and beneficiaries from the
-LinkedOpenData SPARQL endpoint into Neo4j as CohesionProject nodes.
-Matches beneficiaries against existing Company nodes and links
-projects to NUTSRegion nodes.
+Ingests EU cohesion policy projects and beneficiaries into Neo4j as
+CohesionProject nodes. Matches beneficiaries against existing Company
+nodes and links projects to NUTSRegion nodes.
+
+Data source: the SPARQL endpoint at query.linkedopendata.eu is for
+targeted queries, NOT bulk download. For bulk ingestion, use the
+RDF Truthy dump from https://data.linkedopendata.eu/ (download to
+local file, then pass via --file). The SPARQL path is kept as a
+fallback for small incremental queries only.
+
+NOTE (April 2026): Both the SPARQL endpoint and the RDF dump site
+return 403. Use --file with a locally obtained dump, or wait for
+access to be restored. Contact REGIO-KOHESIO@ec.europa.eu for
+bulk data access.
 
 Usage:
-    python -m src.etl.load_eu_knowledge_graph --neo4j-uri bolt://localhost:7687
     python -m src.etl.load_eu_knowledge_graph --file /tmp/eukg_projects.json
     python -m src.etl.load_eu_knowledge_graph --limit 1000 --since 2020-01-01
 """
