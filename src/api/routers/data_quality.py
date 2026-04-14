@@ -140,3 +140,38 @@ def trade_edges_stats(source: FromDishka[DataQualitySource]):
 def dedup_stats(source: FromDishka[DataQualitySource]):
     """Deduplication queue stats."""
     return source.get_dedup_stats()
+
+
+@router.get("/sanctions")
+@inject
+def sanctions_stats(source: FromDishka[DataQualitySource]):
+    """Sanctions list stats."""
+    return source.get_sanctions_stats()
+
+
+@router.get("/firds")
+@inject
+def firds_stats(source: FromDishka[DataQualitySource]):
+    """FIRDS instrument data stats."""
+    return source.get_firds_stats()
+
+
+@router.get("/openfigi")
+@inject
+def openfigi_stats(source: FromDishka[DataQualitySource]):
+    """OpenFIGI enrichment stats."""
+    return source.get_openfigi_stats()
+
+
+@router.get("/beneficial-ownership")
+@inject
+def beneficial_ownership_stats(source: FromDishka[DataQualitySource]):
+    """Beneficial ownership stats."""
+    return source.get_beneficial_ownership_stats()
+
+
+@router.get("/cdp")
+@inject
+def cdp_stats(source: FromDishka[DataQualitySource]):
+    """CDP climate disclosure stats."""
+    return source.get_cdp_stats()

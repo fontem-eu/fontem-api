@@ -23,6 +23,7 @@ class GraphDataQualitySource(DataQualitySource):
                 "Company", "Listing", "FinancialYear",
                 "Contract", "Authority", "CPV",
                 "Person", "Lobbyist", "LobbyInterest",
+                "SanctionedEntity", "BeneficialOwner",
             ]:
                 n = session.run(
                     f"MATCH (n:{label}) RETURN count(n) AS n"
@@ -390,6 +391,124 @@ class GraphDataQualitySource(DataQualitySource):
             ).single()["n"]
             return {"pending": pending, "reviewed": reviewed, "total": pending + reviewed}
 
+    def get_sanctions_stats(self) -> dict:
+        """Sanctions list stats."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
+            ).single()["n"]
+            persons = session.run(
+                "MATCH (s:SanctionedEntity {entity_type: 'person'}) "
+                "RETURN count(s) AS n"
+            ).single()["n"]
+            entities = total - persons
+            matched = session.run(
+                "MATCH (s:SanctionedEntity)-[:SANCTIONED]->(:Company) "
+                "RETURN count(DISTINCT s) AS n"
+            ).single()["n"]
+            regimes = session.run(
+                "MATCH (s:SanctionedEntity) "
+                "RETURN s.sanction_regime AS regime, count(s) AS n "
+                "ORDER BY n DESC LIMIT 10"
+            ).data()
+        return {
+            "total": total, "persons": persons, "entities": entities,
+            "matched_to_companies": matched, "top_regimes": regimes,
+        }
+
+    def get_firds_stats(self) -> dict:
+        """FIRDS instrument data stats."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (l:Listing) WHERE l.isin IS NOT NULL "
+                "RETURN count(l) AS n"
+            ).single()["n"]
+            with_ticker = session.run(
+                "MATCH (l:Listing) WHERE l.isin IS NOT NULL "
+                "AND l.ticker IS NOT NULL RETURN count(l) AS n"
+            ).single()["n"]
+            without_ticker = total - with_ticker
+            by_type = session.run(
+                "MATCH (l:Listing) WHERE l.instrument_type IS NOT NULL "
+                "RETURN l.instrument_type AS type, count(l) AS count "
+                "ORDER BY count DESC LIMIT 15"
+            ).data()
+            by_venue = session.run(
+                "MATCH (l:Listing) WHERE l.trading_venue_mic IS NOT NULL "
+                "RETURN l.trading_venue_mic AS venue, count(l) AS count "
+                "ORDER BY count DESC LIMIT 10"
+            ).data()
+        return {
+            "total": total, "with_ticker": with_ticker,
+            "without_ticker": without_ticker,
+            "ticker_rate": round(with_ticker / max(total, 1) * 100, 1),
+            "by_instrument_type": by_type, "by_venue": by_venue,
+        }
+
+    def get_openfigi_stats(self) -> dict:
+        """OpenFIGI enrichment stats."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (l:Listing) RETURN count(l) AS n"
+            ).single()["n"]
+            with_ticker = session.run(
+                "MATCH (l:Listing) WHERE l.ticker IS NOT NULL "
+                "RETURN count(l) AS n"
+            ).single()["n"]
+            without_ticker = total - with_ticker
+        return {
+            "total_listings": total, "with_ticker": with_ticker,
+            "without_ticker": without_ticker,
+            "enrichment_rate": round(with_ticker / max(total, 1) * 100, 1),
+        }
+
+    def get_beneficial_ownership_stats(self) -> dict:
+        """Beneficial ownership stats."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (b:BeneficialOwner) RETURN count(b) AS n"
+            ).single()["n"]
+            owns_rels = session.run(
+                "MATCH ()-[r:OWNS]->() RETURN count(r) AS n"
+            ).single()["n"]
+            by_country = session.run(
+                "MATCH (b:BeneficialOwner) WHERE b.country IS NOT NULL "
+                "RETURN b.country AS country, count(b) AS count "
+                "ORDER BY count DESC LIMIT 20"
+            ).data()
+            by_type = session.run(
+                "MATCH ()-[r:OWNS]->() WHERE r.interest_type IS NOT NULL "
+                "RETURN r.interest_type AS type, count(r) AS count "
+                "ORDER BY count DESC LIMIT 10"
+            ).data()
+        return {
+            "total": total, "owns_relationships": owns_rels,
+            "by_country": by_country, "ownership_types": by_type,
+        }
+
+    def get_cdp_stats(self) -> dict:
+        """CDP climate disclosure stats."""
+        with self._neo4j.session() as session:
+            with_score = session.run(
+                "MATCH (c:Company) WHERE c.cdp_score IS NOT NULL "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+            distribution = session.run(
+                "MATCH (c:Company) WHERE c.cdp_score IS NOT NULL "
+                "RETURN c.cdp_score AS score, count(c) AS count "
+                "ORDER BY score"
+            ).data()
+            by_year = session.run(
+                "MATCH (c:Company) WHERE c.cdp_reporting_year IS NOT NULL "
+                "RETURN toString(c.cdp_reporting_year) AS year, count(c) AS count "
+                "ORDER BY year DESC LIMIT 10"
+            ).data()
+        return {
+            "companies_with_score": with_score,
+            "score_distribution": distribution,
+            "by_reporting_year": by_year,
+        }
+
     def get_coverage_stats(self) -> dict:
         """Return coverage metrics."""
         with self._neo4j.session() as session:
@@ -451,4 +570,26 @@ class GraphDataQualitySource(DataQualitySource):
             "lobbyists_with_ep_passes": lobbyists_with_ep,
             "top_lobby_interests": lobby_interests,
             "person_count": person_count,
+
+            # Sanctions
+            "sanctioned_entity_count": session.run(
+                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
+            ).single()["n"],
+
+            # Beneficial ownership
+            "beneficial_owner_count": session.run(
+                "MATCH (b:BeneficialOwner) RETURN count(b) AS n"
+            ).single()["n"],
+
+            # CDP
+            "companies_with_cdp": session.run(
+                "MATCH (c:Company) WHERE c.cdp_score IS NOT NULL "
+                "RETURN count(c) AS n"
+            ).single()["n"],
+
+            # FIRDS / OpenFIGI
+            "listings_with_isin": session.run(
+                "MATCH (l:Listing) WHERE l.isin IS NOT NULL "
+                "RETURN count(l) AS n"
+            ).single()["n"],
         }

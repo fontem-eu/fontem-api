@@ -41,3 +41,8 @@ class DataQualitySource(ABC):
     def get_directors_stats(self) -> dict: return {}
     def get_trade_edges_stats(self) -> dict: return {}
     def get_dedup_stats(self) -> dict: return {}
+    def get_sanctions_stats(self) -> dict: return {}
+    def get_firds_stats(self) -> dict: return {}
+    def get_openfigi_stats(self) -> dict: return {}
+    def get_beneficial_ownership_stats(self) -> dict: return {}
+    def get_cdp_stats(self) -> dict: return {}
