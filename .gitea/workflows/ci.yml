@@ -12,7 +12,7 @@ jobs:
       - name: Install deps
         run: |
           pip install --no-cache-dir vendor/*.whl
-          pip install --no-cache-dir -r requirements.txt pytest pylint
+          pip install --no-cache-dir -r requirements.txt pytest pylint tzdata
       - name: Test
         run: python3 -m pytest tests/ -q
       - name: Lint
