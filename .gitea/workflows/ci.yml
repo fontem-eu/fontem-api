@@ -1,0 +1,99 @@
+name: CI/CD
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.12-slim
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: apt-get update && apt-get install -y gcc g++ libpq-dev
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: |
+          python3 -m pytest tests/ \
+            --cov=src --cov-report=xml:coverage.xml \
+            --junitxml=test-results.xml -q
+      - name: Run pylint
+        run: |
+          python3 -m pylint src tests \
+            --output-format=parseable --reports=no \
+            > pylint-report.txt 2>&1 || true
+          tail -1 pylint-report.txt
+
+  build:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set tag
+        id: meta
+        run: |
+          TAG="v$(git rev-parse --short HEAD)"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+      - name: Build and push
+        run: |
+          docker build -t contribute.void42.internal/golden/gmr-api:${{ steps.meta.outputs.tag }} .
+          docker push contribute.void42.internal/golden/gmr-api:${{ steps.meta.outputs.tag }}
+      - name: Sign image
+        env:
+          COSIGN_PASSWORD: ""
+        run: |
+          echo '${{ secrets.COSIGN_KEY }}' > /tmp/cosign.key
+          cosign sign --key /tmp/cosign.key --yes contribute.void42.internal/golden/gmr-api:${{ steps.meta.outputs.tag }}
+          rm -f /tmp/cosign.key
+
+  deploy-dev:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update dev values
+        run: |
+          sed -i "s/version: \".*\"/version: \"${{ needs.build.outputs.tag }}\"/" deployment/values-dev.yaml || \
+            echo "version: \"${{ needs.build.outputs.tag }}\"" > deployment/values-dev.yaml
+      - name: Push
+        run: |
+          git config user.name "GMR CI"
+          git config user.email "ci@void42.internal"
+          git add deployment/values-dev.yaml
+          git diff --cached --quiet || git commit -m "ci: deploy ${{ needs.build.outputs.tag }} to dev"
+          git push
+
+  smoke-test:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for ArgoCD sync
+        run: sleep 30
+      - name: Run smoke tests
+        run: |
+          git clone http://gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-smoke-tests.git /tmp/smoke
+          cd /tmp/smoke && npm ci
+          BASE_URL=http://gmr-dev.void42.internal npx playwright test --project=chromium --grep-invert "ASSIST"
+
+  promote-prod:
+    needs: [build, smoke-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update prod values
+        run: |
+          sed -i "s/version: \".*\"/version: \"${{ needs.build.outputs.tag }}\"/" deployment/values.yaml
+      - name: Push
+        run: |
+          git config user.name "GMR CI"
+          git config user.email "ci@void42.internal"
+          git add deployment/values.yaml
+          git diff --cached --quiet || git commit -m "ci: promote ${{ needs.build.outputs.tag }} to prod [skip ci]"
+          git push
