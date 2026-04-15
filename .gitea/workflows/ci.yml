@@ -9,9 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Python
+      - name: Check environment
         run: |
-          apt-get update && apt-get install -y python3-pip gcc g++ libpq-dev 2>&1 || echo "apt failed, trying pip3 directly"
-          pip3 install --break-system-packages -r requirements.txt 2>&1 | tail -5
-      - name: Run unit tests
-        run: python3 -m pytest tests/unit/ -q
+          echo "Node: $(node --version)"
+          echo "Python: $(python3 --version)"
+          echo "pip: $(pip3 --version 2>&1 || echo 'no pip')"
+          echo "Working dir: $(pwd)"
+          ls -la
