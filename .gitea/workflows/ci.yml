@@ -9,8 +9,13 @@ jobs:
     runs-on: python
     steps:
       - uses: actions/checkout@v4
+      - name: Install system deps
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            gcc g++ libpq-dev git \
+          && rm -rf /var/lib/apt/lists/*
       - name: Install app deps
-        run: pip install -r requirements.txt
+        run: pip install --no-cache-dir -r requirements.txt pytest pylint
       - name: Run unit tests
         run: python3 -m pytest tests/unit/ -q
       - name: Run pylint
