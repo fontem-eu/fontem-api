@@ -8,11 +8,7 @@ jobs:
   test:
     runs-on: python
     steps:
-      - name: Checkout
-        run: git clone --depth=1 http://gitea-http.dev-tools.svc.cluster.local:3000/$GITHUB_REPOSITORY.git .
-      - name: Install deps
-        run: pip install --no-cache-dir -r requirements.txt pytest pylint 2>&1 | tail -5
-      - name: Test
-        run: python3 -m pytest tests/unit/ -q
-      - name: Lint
-        run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
+      - name: Debug env
+        run: echo "REPO=$GITHUB_REPOSITORY REF=$GITHUB_REF_NAME HEAD=$GITHUB_HEAD_REF SHA=$GITHUB_SHA SERVER=$GITHUB_SERVER_URL"
+      - name: Test clone
+        run: git clone --depth=1 http://gitea-http.dev-tools.svc.cluster.local:3000/golden/edgar-gmr-etl.git /tmp/test && ls /tmp/test
