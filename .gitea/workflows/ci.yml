@@ -9,10 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install system deps
-        run: apt-get update && apt-get install -y gcc g++ libpq-dev
+        run: apt-get update && apt-get install -y gcc g++ libpq-dev python3-pip
       - uses: actions/checkout@v4
       - name: Install Python deps
-        run: pip install -r requirements.txt
+        run: pip install --break-system-packages -r requirements.txt
       - name: Run unit tests
         run: python3 -m pytest tests/unit/ -q
       - name: Run pylint
