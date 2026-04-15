@@ -12,6 +12,6 @@ jobs:
       - name: Install deps
         run: pip install --no-cache-dir -r requirements.txt pytest pylint 2>&1 | tail -5
       - name: Test
-        run: python3 -m pytest tests/unit/ -q
+        run: python3 -m pytest tests/ -q
       - name: Lint
         run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
