@@ -8,9 +8,21 @@ jobs:
   test:
     runs-on: python
     steps:
-      - name: Debug
+      - name: Checkout
         run: |
-          echo "Hello from CI"
-          python3 --version
-          which pip
-          env | sort | head -30
+          apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          git clone --depth=1 --branch="$BRANCH" \
+            "http://gitea-http.dev-tools.svc.cluster.local:3000/${GITHUB_REPOSITORY}.git" . 2>&1
+      - name: Install deps
+        run: |
+          apt-get install -y -qq gcc g++ libpq-dev >/dev/null 2>&1
+          pip install --no-cache-dir -q -r requirements.txt pytest pylint 2>&1
+      - name: Run unit tests
+        run: python3 -m pytest tests/unit/ -q
+      - name: Run pylint
+        run: |
+          python3 -m pylint src tests \
+            --output-format=parseable --reports=no \
+            > pylint-report.txt 2>&1 || true
+          tail -1 pylint-report.txt
