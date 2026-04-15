@@ -48,3 +48,6 @@ class DataQualitySource(ABC):
     def get_cdp_stats(self) -> dict: return {}
     def get_nuts_stats(self) -> dict: return {}
     def get_eu_knowledge_graph_stats(self) -> dict: return {}
+    def get_cross_source_overlap(self) -> dict: return {}
+    def get_country_code_consistency(self) -> dict: return {}
+    def get_field_completeness(self) -> dict: return {}

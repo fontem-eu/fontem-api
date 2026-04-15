@@ -592,6 +592,165 @@ class GraphDataQualitySource(DataQualitySource):
             "with_nuts_region": with_nuts,
         }
 
+    def get_cross_source_overlap(self) -> dict:
+        """Count entities shared between data sources."""
+        with self._neo4j.session() as session:
+            contracts_and_cohesion = session.run(
+                "MATCH (c:Company)-[:AWARDED_TO]-(:Contract) "
+                "WHERE (c)-[:BENEFICIARY_OF]->(:CohesionProject) "
+                "RETURN count(DISTINCT c) AS n"
+            ).single()["n"]
+
+            contracts_and_lobby = session.run(
+                "MATCH (c:Company)<-[:REPRESENTS]-(:Lobbyist) "
+                "WHERE (c)-[:AWARDED_TO]-(:Contract) "
+                "RETURN count(DISTINCT c) AS n"
+            ).single()["n"]
+
+            listed_and_contracts = session.run(
+                "MATCH (c:Company)-[:LISTED_AS]->(:Listing) "
+                "WHERE (c)-[:AWARDED_TO]-(:Contract) "
+                "RETURN count(DISTINCT c) AS n"
+            ).single()["n"]
+
+            sanctions_matched = session.run(
+                "MATCH (se:SanctionedEntity)-[:SANCTIONED]->(:Company) "
+                "RETURN count(DISTINCT se) AS n"
+            ).single()["n"]
+
+        return {
+            "contracts_and_cohesion": contracts_and_cohesion,
+            "contracts_and_lobby": contracts_and_lobby,
+            "listed_and_contracts": listed_and_contracts,
+            "sanctions_matched": sanctions_matched,
+        }
+
+    def get_country_code_consistency(self) -> dict:
+        """Check country code format consistency across companies."""
+        with self._neo4j.session() as session:
+            alpha2 = session.run(
+                "MATCH (c:Company) WHERE size(c.country) = 2 "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+            alpha3 = session.run(
+                "MATCH (c:Company) WHERE size(c.country) = 3 "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+            other = session.run(
+                "MATCH (c:Company) "
+                "WHERE c.country IS NOT NULL AND size(c.country) NOT IN [2, 3] "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+            no_country = session.run(
+                "MATCH (c:Company) WHERE c.country IS NULL "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+
+            top_alpha2 = session.run(
+                "MATCH (c:Company) WHERE size(c.country) = 2 "
+                "RETURN c.country AS code, count(c) AS n "
+                "ORDER BY n DESC LIMIT 10"
+            ).data()
+
+        return {
+            "alpha2_count": alpha2,
+            "alpha3_count": alpha3,
+            "other_count": other,
+            "no_country_count": no_country,
+            "top_alpha2_codes": top_alpha2,
+        }
+
+    def get_field_completeness(self) -> dict:
+        """Per-source field completeness percentages."""
+        with self._neo4j.session() as session:
+            # Sanctions completeness
+            se_total = session.run(
+                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
+            ).single()["n"]
+            se_name = session.run(
+                "MATCH (s:SanctionedEntity) "
+                "WHERE s.name IS NOT NULL AND s.name <> '' "
+                "RETURN count(s) AS n"
+            ).single()["n"]
+            se_regime = session.run(
+                "MATCH (s:SanctionedEntity) "
+                "WHERE s.sanction_regime IS NOT NULL "
+                "AND s.sanction_regime <> '' "
+                "RETURN count(s) AS n"
+            ).single()["n"]
+
+            # Cohesion completeness
+            cp_total = session.run(
+                "MATCH (p:CohesionProject) RETURN count(p) AS n"
+            ).single()["n"]
+            cp_start = session.run(
+                "MATCH (p:CohesionProject) "
+                "WHERE p.start_date IS NOT NULL "
+                "RETURN count(p) AS n"
+            ).single()["n"]
+            cp_nuts = session.run(
+                "MATCH (p:CohesionProject) "
+                "WHERE p.nuts_code IS NOT NULL AND p.nuts_code <> '' "
+                "RETURN count(p) AS n"
+            ).single()["n"]
+            cp_linked_nuts = session.run(
+                "MATCH (p:CohesionProject)-[:LOCATED_IN]->(:NUTSRegion) "
+                "RETURN count(p) AS n"
+            ).single()["n"]
+
+            # Company completeness
+            c_total = session.run(
+                "MATCH (c:Company) RETURN count(c) AS n"
+            ).single()["n"]
+            c_lei = session.run(
+                "MATCH (c:Company) WHERE c.lei IS NOT NULL "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+            c_country = session.run(
+                "MATCH (c:Company) WHERE c.country IS NOT NULL "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+            c_nuts_linked = session.run(
+                "MATCH (c:Company)-[:LOCATED_IN]->(:NUTSRegion) "
+                "RETURN count(c) AS n"
+            ).single()["n"]
+
+        return {
+            "sanctions": {
+                "total": se_total,
+                "name_pct": round(
+                    se_name / max(se_total, 1) * 100, 1
+                ),
+                "regime_pct": round(
+                    se_regime / max(se_total, 1) * 100, 1
+                ),
+            },
+            "cohesion": {
+                "total": cp_total,
+                "start_date_pct": round(
+                    cp_start / max(cp_total, 1) * 100, 1
+                ),
+                "nuts_code_pct": round(
+                    cp_nuts / max(cp_total, 1) * 100, 1
+                ),
+                "nuts_linked_pct": round(
+                    cp_linked_nuts / max(cp_total, 1) * 100, 1
+                ),
+            },
+            "companies": {
+                "total": c_total,
+                "lei_pct": round(
+                    c_lei / max(c_total, 1) * 100, 1
+                ),
+                "country_pct": round(
+                    c_country / max(c_total, 1) * 100, 1
+                ),
+                "nuts_linked_pct": round(
+                    c_nuts_linked / max(c_total, 1) * 100, 1
+                ),
+            },
+        }
+
     def get_coverage_stats(self) -> dict:
         """Return coverage metrics."""
         with self._neo4j.session() as session:

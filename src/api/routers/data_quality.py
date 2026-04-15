@@ -189,3 +189,24 @@ def nuts_stats(source: FromDishka[DataQualitySource]):
 def eu_knowledge_graph_stats(source: FromDishka[DataQualitySource]):
     """EU Knowledge Graph cohesion project stats."""
     return source.get_eu_knowledge_graph_stats()
+
+
+@router.get("/cross-source-overlap")
+@inject
+def cross_source_overlap(source: FromDishka[DataQualitySource]):
+    """Cross-source entity overlap counts."""
+    return source.get_cross_source_overlap()
+
+
+@router.get("/country-codes")
+@inject
+def country_code_consistency(source: FromDishka[DataQualitySource]):
+    """Country code format consistency metrics."""
+    return source.get_country_code_consistency()
+
+
+@router.get("/field-completeness")
+@inject
+def field_completeness(source: FromDishka[DataQualitySource]):
+    """Per-source field completeness percentages."""
+    return source.get_field_completeness()
