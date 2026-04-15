@@ -2,11 +2,14 @@
 OpenOwnership BODS (Beneficial Ownership Data Standard) → Neo4j
 ===============================================================
 Downloads (or reads a local copy of) the GLEIF ownership subset from
-OpenOwnership and MERGEs BeneficialOwner nodes with OWNS relationships
-to existing Company nodes (matched via LEI).
+OpenOwnership and MERGEs ownership relationships into Neo4j.
 
-Only natural-person records are loaded — company-to-company ownership
-is already handled via SUBSIDIARY_OF relationships.
+Two types of records are handled:
+
+1. **Entity-to-entity** (company-to-company) ownership — creates OWNS
+   relationships between Company nodes matched via LEI.
+2. **Person-to-entity** — creates BeneficialOwner nodes with OWNS
+   relationships to Company nodes matched via LEI.
 
 Usage:
     python -m src.etl.load_beneficial_ownership --neo4j-uri bolt://localhost:7687
@@ -59,6 +62,17 @@ SET r.interest_type    = row.interest_type,
     r.start_date       = row.start_date
 """
 
+MERGE_ENTITY_OWNS = """
+UNWIND $batch AS row
+MATCH (parent:Company {lei: row.parent_lei})
+MATCH (child:Company {lei: row.child_lei})
+MERGE (parent)-[r:OWNS]->(child)
+SET r.interest_type    = row.interest_type,
+    r.share_percentage = row.share_percentage,
+    r.start_date       = row.start_date,
+    r.source           = 'bods_gleif'
+"""
+
 
 def download_bods():
     """Download the CSV ZIP from OpenOwnership."""
@@ -73,8 +87,21 @@ def download_bods():
     return resp.content
 
 
-def _parse_row(row):
-    """Parse a single BODS CSV row into a dict, or None if not relevant."""
+def _parse_share_pct(row):
+    """Extract share percentage from various column names."""
+    for col in ("sharePercentage", "interestLevel",
+                "interests_share_exact", "interests_share_minimum"):
+        raw = (row.get(col) or "").strip()
+        if raw:
+            try:
+                return float(raw)
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_person_row(row):
+    """Parse a person-to-entity BODS CSV row, or None if not relevant."""
     subject_type = (row.get("subjectType") or row.get("statementType") or "")
     if "person" not in subject_type.lower():
         return None
@@ -89,13 +116,8 @@ def _parse_row(row):
     if not lei or len(lei) != 20:
         return None
 
-    share_pct_raw = row.get("sharePercentage") or row.get("interestLevel") or ""
-    try:
-        share_percentage = float(share_pct_raw) if share_pct_raw else None
-    except ValueError:
-        share_percentage = None
-
     return {
+        "record_type": "person",
         "bo_id": str(gmr_id.from_name("BO", f"bo:{subject_id}")),
         "name": (
             row.get("personName") or row.get("name") or row.get("fullName") or ""
@@ -104,17 +126,79 @@ def _parse_row(row):
         "country": (row.get("country") or row.get("addressCountry") or "").strip(),
         "lei": lei,
         "interest_type": (row.get("interestType") or "").strip(),
-        "share_percentage": share_percentage,
-        "start_date": (row.get("interestStartDate") or row.get("startDate") or "")[:10],
+        "share_percentage": _parse_share_pct(row),
+        "start_date": (
+            row.get("interestStartDate") or row.get("startDate") or ""
+        )[:10],
     }
+
+
+def _parse_entity_row(row):
+    """Parse an entity-to-entity BODS CSV row, or None if not relevant.
+
+    The GLEIF BODS CSV has columns like:
+    - ``interestedParty_describedByEntityStatement_entityLEI`` (parent LEI)
+    - ``subject_describedByEntityStatement_entityLEI`` (child LEI, the owned entity)
+    """
+    subject_type = (row.get("subjectType") or row.get("statementType") or "")
+    # Entity-to-entity rows have statementType containing 'ownership'
+    # or subjectType containing 'entity'
+    is_entity = (
+        "entity" in subject_type.lower()
+        or "ownership" in subject_type.lower()
+    )
+    # If it's explicitly a person, skip
+    if "person" in subject_type.lower():
+        return None
+    if not is_entity:
+        return None
+
+    parent_lei = (
+        row.get("interestedParty_describedByEntityStatement_entityLEI")
+        or row.get("interestedPartyLEI")
+        or ""
+    ).strip()
+    child_lei = (
+        row.get("subject_describedByEntityStatement_entityLEI")
+        or row.get("subjectLEI")
+        or row.get("lei")
+        or row.get("LEI")
+        or ""
+    ).strip()
+
+    if not parent_lei or len(parent_lei) != 20:
+        return None
+    if not child_lei or len(child_lei) != 20:
+        return None
+    if parent_lei == child_lei:
+        return None
+
+    return {
+        "record_type": "entity",
+        "parent_lei": parent_lei,
+        "child_lei": child_lei,
+        "interest_type": (row.get("interestType") or "").strip(),
+        "share_percentage": _parse_share_pct(row),
+        "start_date": (
+            row.get("interestStartDate") or row.get("startDate") or ""
+        )[:10],
+    }
+
+
+def _parse_row(row):
+    """Parse a single BODS CSV row — tries entity-to-entity first, then person."""
+    parsed = _parse_entity_row(row)
+    if parsed is not None:
+        return parsed
+    return _parse_person_row(row)
 
 
 def parse_bods_csv(data_bytes, is_zip=True):
     """
-    Parse BODS CSV data and yield person-ownership dicts.
+    Parse BODS CSV data and yield ownership dicts.
 
     Handles ZIP archives (containing one or more CSVs) and plain CSV.
-    Filters to natural persons only.
+    Returns both person-to-entity and entity-to-entity records.
     """
     if is_zip:
         zf = zipfile.ZipFile(io.BytesIO(data_bytes))
@@ -142,10 +226,17 @@ def parse_bods_csv(data_bytes, is_zip=True):
 
 
 def load_into_neo4j(driver, records):
-    """MERGE BeneficialOwner nodes and create OWNS relationships."""
-    total = 0
-    linked = 0
-    batch = []
+    """MERGE ownership relationships into Neo4j.
+
+    Handles both person-to-entity (BeneficialOwner -> Company) and
+    entity-to-entity (Company -> Company) records.
+    """
+    total_person = 0
+    total_entity = 0
+    linked_person = 0
+    linked_entity = 0
+    person_batch = []
+    entity_batch = []
     t0 = time.time()
 
     with driver.session() as session:
@@ -153,29 +244,51 @@ def load_into_neo4j(driver, records):
         logger.info("Constraint ensured")
 
         for rec in records:
-            batch.append(rec)
-            if len(batch) >= BATCH_SIZE:
-                session.run(MERGE_OWNER, batch=batch)
-                result = session.run(CREATE_OWNS, batch=batch)
-                linked += result.consume().counters.relationships_created
-                total += len(batch)
-                batch = []
-                if total % 50000 < BATCH_SIZE:
-                    elapsed = time.time() - t0
-                    rate = total / elapsed if elapsed else 0
-                    logger.info(
-                        "  %d owners loaded (%.0f/s), %d linked",
-                        total, rate, linked,
-                    )
+            if rec.get("record_type") == "entity":
+                entity_batch.append(rec)
+                if len(entity_batch) >= BATCH_SIZE:
+                    result = session.run(MERGE_ENTITY_OWNS, batch=entity_batch)
+                    linked_entity += result.consume().counters.relationships_created
+                    total_entity += len(entity_batch)
+                    entity_batch = []
+            else:
+                person_batch.append(rec)
+                if len(person_batch) >= BATCH_SIZE:
+                    session.run(MERGE_OWNER, batch=person_batch)
+                    result = session.run(CREATE_OWNS, batch=person_batch)
+                    linked_person += result.consume().counters.relationships_created
+                    total_person += len(person_batch)
+                    person_batch = []
 
-        if batch:
-            session.run(MERGE_OWNER, batch=batch)
-            result = session.run(CREATE_OWNS, batch=batch)
-            linked += result.consume().counters.relationships_created
-            total += len(batch)
+            total = total_person + total_entity
+            if total % 50000 < BATCH_SIZE and total > 0:
+                elapsed = time.time() - t0
+                rate = total / elapsed if elapsed else 0
+                logger.info(
+                    "  %d records (%.0f/s): %d person, %d entity",
+                    total, rate, linked_person, linked_entity,
+                )
+
+        if person_batch:
+            session.run(MERGE_OWNER, batch=person_batch)
+            result = session.run(CREATE_OWNS, batch=person_batch)
+            linked_person += result.consume().counters.relationships_created
+            total_person += len(person_batch)
+
+        if entity_batch:
+            result = session.run(MERGE_ENTITY_OWNS, batch=entity_batch)
+            linked_entity += result.consume().counters.relationships_created
+            total_entity += len(entity_batch)
 
     elapsed = time.time() - t0
-    return {"total": total, "linked": linked, "elapsed_s": round(elapsed, 1)}
+    return {
+        "total": total_person + total_entity,
+        "total_person": total_person,
+        "total_entity": total_entity,
+        "linked_person": linked_person,
+        "linked_entity": linked_entity,
+        "elapsed_s": round(elapsed, 1),
+    }
 
 
 def main(argv=None):
@@ -230,9 +343,13 @@ def main(argv=None):
         driver.close()
 
     logger.info(
-        "Done: %d owners, %d OWNS relationships in %.1fs",
+        "Done: %d records (%d person, %d entity), "
+        "%d person links, %d entity links in %.1fs",
         summary["total"],
-        summary["linked"],
+        summary["total_person"],
+        summary["total_entity"],
+        summary["linked_person"],
+        summary["linked_entity"],
         summary["elapsed_s"],
     )
 

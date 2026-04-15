@@ -23,6 +23,8 @@ import time
 import httpx
 from neo4j import GraphDatabase
 
+from src.services.location_service import LocationService
+
 logger = logging.getLogger(__name__)
 
 NUTS_CSV_URL = (
@@ -40,8 +42,9 @@ FOR (n:NUTSRegion) REQUIRE n.code IS UNIQUE
 MERGE_REGION = """
 UNWIND $batch AS row
 MERGE (n:NUTSRegion {code: row.code})
-SET n.name  = row.name,
-    n.level = row.level
+SET n.name           = row.name,
+    n.level          = row.level,
+    n.country_alpha3 = row.country_alpha3
 """
 
 MERGE_PART_OF = """
@@ -124,22 +127,26 @@ def parse_nuts_csv(csv_text: str):
             continue
         name = (row.get(name_col) or "").strip() if name_col else ""
         level = len(code) - 2
+        country_alpha3 = LocationService.country_from_nuts(code) or ""
         yield {
             "code": code,
             "name": name or code,
             "level": level,
             "parent": _parent_code(code),
+            "country_alpha3": country_alpha3,
         }
 
 
 def generate_nuts0_fallback():
     """Generate NUTS level 0 regions from hardcoded EU country codes."""
     for code, name in sorted(NUTS0_COUNTRIES.items()):
+        country_alpha3 = LocationService.country_from_nuts(code) or ""
         yield {
             "code": code,
             "name": name,
             "level": 0,
             "parent": None,
+            "country_alpha3": country_alpha3,
         }
 
 

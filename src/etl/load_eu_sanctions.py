@@ -90,72 +90,138 @@ FOR (c:Company) ON EACH [c.name]
 """
 
 
-def _text(elem, tag):
-    """Get text of a child element, or empty string."""
-    child = elem.find(tag)
+NS = "http://eu.europa.ec/fpi/fsd/export"
+
+
+def _tag(local: str) -> str:
+    """Build a namespace-qualified tag name."""
+    return f"{{{NS}}}{local}"
+
+
+def _child_text(elem, local_name: str) -> str:
+    """Get text content of a namespace-qualified child element."""
+    child = elem.find(_tag(local_name))
     return (child.text or "").strip() if child is not None else ""
 
 
+def _child_attr(elem, local_name: str, attr: str) -> str:
+    """Get an attribute from a namespace-qualified child element."""
+    child = elem.find(_tag(local_name))
+    if child is not None:
+        return (child.attrib.get(attr) or "").strip()
+    return ""
+
+
 def _parse_entity_type(entity_el):
-    """Determine whether the sanctioned subject is a person or entity."""
-    subject_type_el = entity_el.find("subjectType")
+    """Determine whether the sanctioned subject is a person or entity.
+
+    The subjectType element has a ``code`` attribute: 'person' or 'enterprise'.
+    """
+    subject_type_el = entity_el.find(_tag("subjectType"))
     if subject_type_el is not None:
-        raw = (subject_type_el.text or "").strip().lower()
+        raw = (subject_type_el.attrib.get("code") or "").strip().lower()
     else:
         raw = "entity"
     return "person" if "person" in raw else "entity"
 
 
 def _collect_names(entity_el):
-    """Return (primary_name, aliases) from an entity element."""
+    """Return (primary_name, aliases) from nameAlias child elements.
+
+    Names are stored as attributes on ``nameAlias`` elements:
+    ``wholeName``, ``firstName``, ``lastName``.
+    """
     names = []
-    for name_el in entity_el.iter():
-        name_tag = name_el.tag.split("}")[-1] if "}" in name_el.tag else name_el.tag
-        if name_tag in ("wholeName", "lastName", "name"):
-            name_text = (name_el.text or "").strip()
-            if name_text and len(name_text) > 1:
-                names.append(name_text)
-    primary = names[0] if names else ""
-    aliases = names[1:] if len(names) > 1 else []
+    for alias_el in entity_el.findall(_tag("nameAlias")):
+        whole = (alias_el.attrib.get("wholeName") or "").strip()
+        if whole and len(whole) > 1:
+            names.append(whole)
+            continue
+        # Fall back to firstName + lastName
+        first = (alias_el.attrib.get("firstName") or "").strip()
+        last = (alias_el.attrib.get("lastName") or "").strip()
+        combined = f"{first} {last}".strip()
+        if combined and len(combined) > 1:
+            names.append(combined)
+
+    # De-duplicate while preserving order
+    seen = set()
+    unique = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+
+    primary = unique[0] if unique else ""
+    aliases = unique[1:] if len(unique) > 1 else []
     return primary, aliases
 
 
 def _find_nationality(entity_el):
-    """Extract nationality from citizenship/country child elements."""
-    for cit_el in entity_el.iter():
-        cit_tag = cit_el.tag.split("}")[-1] if "}" in cit_el.tag else cit_el.tag
-        if cit_tag in ("citizenship", "country"):
-            nationality = (cit_el.text or "").strip()
-            if nationality:
-                return nationality
+    """Extract nationality from citizenship child elements.
+
+    The ``citizenship`` element has ``countryIso2Code`` and
+    ``countryDescription`` attributes.
+    """
+    for cit_el in entity_el.findall(_tag("citizenship")):
+        country = (cit_el.attrib.get("countryIso2Code") or "").strip()
+        if country and country != "00":
+            return country
+        desc = (cit_el.attrib.get("countryDescription") or "").strip()
+        if desc and desc != "UNKNOWN":
+            return desc
+    return ""
+
+
+def _find_designation_date(entity_el):
+    """Extract the earliest regulation publication date as designation date."""
+    earliest = ""
+    for reg_el in entity_el.findall(_tag("regulation")):
+        pub_date = (reg_el.attrib.get("publicationDate") or "").strip()[:10]
+        if pub_date and (not earliest or pub_date < earliest):
+            earliest = pub_date
+    return earliest
+
+
+def _find_programme(entity_el):
+    """Extract the sanction programme/regime from regulation elements."""
+    for reg_el in entity_el.findall(_tag("regulation")):
+        prog = (reg_el.attrib.get("programme") or "").strip()
+        if prog:
+            return prog
     return ""
 
 
 def parse_sanctions_xml(xml_bytes):
-    """Parse EU sanctions XML and yield entity dicts."""
+    """Parse EU sanctions XML and yield entity dicts.
+
+    The XML uses namespace ``http://eu.europa.ec/fpi/fsd/export``.
+    Each ``sanctionEntity`` element contains nameAlias, subjectType,
+    citizenship, regulation, and remark children.
+    """
     root = ET.fromstring(xml_bytes)
 
-    for entity_el in root.iter():
-        tag = entity_el.tag.split("}")[-1] if "}" in entity_el.tag else entity_el.tag
-        if tag not in ("sanctionEntity", "SubjectType"):
-            continue
-
+    for entity_el in root.findall(_tag("sanctionEntity")):
         eu_ref = (
-            _text(entity_el, "euReferenceNumber")
-            or _text(entity_el, "logicalId")
-            or entity_el.attrib.get("logicalId", "")
-        )
+            entity_el.attrib.get("euReferenceNumber")
+            or entity_el.attrib.get("logicalId")
+            or ""
+        ).strip()
         if not eu_ref:
             continue
 
         entity_type = _parse_entity_type(entity_el)
         primary_name, aliases = _collect_names(entity_el)
         nationality = _find_nationality(entity_el)
+        designation_date = _find_designation_date(entity_el)
+        regime = _find_programme(entity_el)
+        reason = _child_text(entity_el, "remark")
 
-        designation_date = _text(entity_el, "designationDate") or ""
-        regime = _text(entity_el, "programme") or _text(entity_el, "regime") or ""
-        legal_basis = _text(entity_el, "legalBasis") or ""
-        reason = _text(entity_el, "remark") or ""
+        # Legal basis from the regulation numberTitle attribute
+        legal_basis = ""
+        reg_el = entity_el.find(_tag("regulation"))
+        if reg_el is not None:
+            legal_basis = (reg_el.attrib.get("numberTitle") or "").strip()
 
         entity_id = str(gmr_id.from_name("EU", f"sanction:{eu_ref}"))
 

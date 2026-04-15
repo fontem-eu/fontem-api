@@ -123,7 +123,7 @@ class TestParseKohesioCsv:
     def test_pt_country_is_set(self):
         records = self._load("PT")
         for r in records:
-            assert r["country"] == "PT"
+            assert r["country"] == "PRT"
 
     # ── CZ — mixed dates: some valid, some empty ──────────
 

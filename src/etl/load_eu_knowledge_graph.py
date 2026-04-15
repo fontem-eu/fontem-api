@@ -31,6 +31,8 @@ import time
 import httpx
 from neo4j import GraphDatabase
 
+from src.services.location_service import LocationService
+
 from . import gmr_id
 
 logger = logging.getLogger(__name__)
@@ -73,8 +75,16 @@ LINK_NUTS = """
 UNWIND $batch AS row
 WITH row WHERE row.nuts_code IS NOT NULL AND row.nuts_code <> ''
 MATCH (p:CohesionProject {project_id: row.project_id})
-MATCH (n:NUTSRegion {code: row.nuts_code})
-MERGE (p)-[:LOCATED_IN]->(n)
+OPTIONAL MATCH (exact:NUTSRegion {code: row.nuts_code})
+OPTIONAL MATCH (parent2:NUTSRegion)
+  WHERE parent2.code = left(row.nuts_code, size(row.nuts_code) - 1)
+    AND exact IS NULL
+OPTIONAL MATCH (parent1:NUTSRegion)
+  WHERE parent1.code = left(row.nuts_code, size(row.nuts_code) - 2)
+    AND exact IS NULL AND parent2 IS NULL
+WITH p, coalesce(exact, parent2, parent1) AS region
+WHERE region IS NOT NULL
+MERGE (p)-[:LOCATED_IN]->(region)
 """
 
 MERGE_BENEFICIARY = """
@@ -159,7 +169,8 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
             continue
 
         project_id = str(gmr_id.from_name("EU", f"eukg:{qid}"))
-        country_code = (row.get("CountryCode") or "")[:5]
+        raw_country = (row.get("CountryCode") or "")[:5].strip()
+        country_code = LocationService.to_alpha3(raw_country) or raw_country
 
         # Best NUTS code: prefer NUTS3, then NUTS2, then NUTS1
         nuts_code = (
