@@ -8,9 +8,15 @@ jobs:
   test:
     runs-on: python
     steps:
-      - name: Step 1
-        run: echo "step 1 ok"
-      - name: Step 2
-        run: apt-get update && echo "step 2 ok"
-      - name: Step 3
-        run: apt-get install -y git gcc g++ libpq-dev && echo "step 3 ok"
+      - name: Install system deps
+        run: apt-get update -qq && apt-get install -y -qq git gcc g++ libpq-dev > /dev/null
+      - name: Checkout
+        env:
+          REPO_URL: http://gitea-http.dev-tools.svc.cluster.local:3000
+        run: git clone --depth=1 "$REPO_URL/$GITHUB_REPOSITORY.git" .
+      - name: Install Python deps
+        run: pip install --no-cache-dir -r requirements.txt pytest pylint 2>&1 | tail -5
+      - name: Run unit tests
+        run: python3 -m pytest tests/unit/ -q
+      - name: Run pylint
+        run: python3 -m pylint src tests --output-format=parseable --reports=no > pylint-report.txt 2>&1 || true; tail -1 pylint-report.txt
