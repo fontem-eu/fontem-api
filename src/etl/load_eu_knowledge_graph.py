@@ -141,8 +141,15 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
     for row in reader:
         # Normalize DD/MM/YYYY → YYYY-MM-DD for comparison and storage
         start_date = _normalize_date(row.get("Operation_Start_Date", ""))
+        end_date = _normalize_date(row.get("Operation_End_Date", ""))
+
+        # Use the best available date for --since filtering:
+        # prefer start_date, fall back to end_date, skip if both missing
+        filter_date = start_date or end_date
         if since:
-            if not start_date or start_date < since:
+            if not filter_date:
+                continue  # no temporal info at all — cannot determine relevance
+            if filter_date < since:
                 continue
 
         # Extract QID from the Operation_Unique_Identifier URI
@@ -197,7 +204,7 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
             "fund": (row.get("Fund_Name") or row.get("Fund_Code") or "")[:200] or None,
             "programme": (row.get("Programme_Name") or "")[:200] or None,
             "start_date": start_date or None,
-            "end_date": _normalize_date(row.get("Operation_End_Date", "")) or None,
+            "end_date": end_date or None,
             "nuts_code": nuts_code or None,
             "country": country_code or None,
             "beneficiary_gmr_id": beneficiary_gmr_id,
