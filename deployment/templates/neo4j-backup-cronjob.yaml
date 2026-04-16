@@ -4,7 +4,7 @@ metadata:
   name: neo4j-backup
   namespace: {{ .Release.Namespace }}
 spec:
-  schedule: "0 1 * * *"           # daily at 01:00 UTC
+  schedule: "0 1 1,15 * *"        # 1st and 15th of each month at 01:00 UTC
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -51,8 +51,8 @@ spec:
                   SIZE=$(du -sh /backup/${DATE}-full.cypher.gz | cut -f1)
                   echo "Backup saved: ${DATE}-full.cypher.gz (${SIZE})"
 
-                  # Keep the last 7 days
-                  ls -t /backup/*.cypher.gz 2>/dev/null | tail -n +8 | xargs rm -f 2>/dev/null || true
+                  # Keep the last 3 backups
+                  ls -t /backup/*.cypher.gz 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
                   echo "Backup complete. Files:"
                   ls -lh /backup/*.cypher.gz 2>/dev/null
 
