@@ -252,8 +252,8 @@ def _find_extra_paths(session, endpoints, shortest_len, search_depth):
 def graph_paths(
     from_id: str = Query(..., alias="from", description="Source entity ID"),
     to_id: str = Query(..., alias="to", description="Target entity ID"),
-    max_depth: int = Query(5, ge=1, le=10, description="Max path length"),
-    extra: int = Query(2, ge=0, le=5, description="Extra hops beyond shortest"),
+    max_depth: int = Query(5, ge=1, le=6, description="Max path length"),
+    extra: int = Query(2, ge=0, le=3, description="Extra hops beyond shortest"),
     *,
     neo4j: FromDishka[Neo4jClient],
 ):
