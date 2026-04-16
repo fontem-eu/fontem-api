@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Setup Docker
-        run: curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz | tar xz --strip-components=1 -C /usr/local/bin docker/docker
+        run: docker version > /dev/null
       - name: Build and push image
         run: |
           TAG="v$(git rev-parse --short HEAD)"
