@@ -17,3 +17,29 @@ jobs:
         run: python3 -m pytest tests/ -q
       - name: Lint
         run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
+
+  build-deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Docker
+        run: curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz | tar xz --strip-components=1 -C /usr/local/bin docker/docker
+      - name: Build and push image
+        run: |
+          TAG="v$(git rev-parse --short HEAD)"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login gitea-http.dev-tools.svc.cluster.local:3000 -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+          docker build -t gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-api:$TAG .
+          docker push gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-api:$TAG
+      - name: Deploy to dev
+        run: |
+          git clone --depth=1 http://oauth2:${{ secrets.REGISTRY_PASSWORD }}@gitea-http.dev-tools.svc.cluster.local:3000/golden/gitops.git /tmp/gitops
+          cd /tmp/gitops
+          sed -i 's/version: ".*"/version: "'$TAG'"/' dev/gmr-api.yaml
+          git config user.name "GMR CI"
+          git config user.email "ci@void42.internal"
+          git add dev/gmr-api.yaml
+          git diff --cached --quiet || git commit -m "ci: deploy gmr-api $TAG to dev"
+          git push origin main
