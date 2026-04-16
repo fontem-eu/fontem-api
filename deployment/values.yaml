@@ -1,3 +1,4 @@
 version: "v41f487e"
 domain: localhost
 apiIngress: "true"
+replicas: 1
