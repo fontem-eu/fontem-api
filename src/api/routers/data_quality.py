@@ -121,13 +121,6 @@ def lobbying_stats(source: FromDishka[DataQualitySource]):
     return source.get_lobbying_stats()
 
 
-@router.get("/directors")
-@inject
-def directors_stats(source: FromDishka[DataQualitySource]):
-    """French directors/person data stats."""
-    return source.get_directors_stats()
-
-
 @router.get("/trade-edges")
 @inject
 def trade_edges_stats(source: FromDishka[DataQualitySource]):
@@ -161,13 +154,6 @@ def firds_stats(source: FromDishka[DataQualitySource]):
 def openfigi_stats(source: FromDishka[DataQualitySource]):
     """OpenFIGI enrichment stats."""
     return source.get_openfigi_stats()
-
-
-@router.get("/beneficial-ownership")
-@inject
-def beneficial_ownership_stats(source: FromDishka[DataQualitySource]):
-    """Beneficial ownership stats."""
-    return source.get_beneficial_ownership_stats()
 
 
 @router.get("/cdp")

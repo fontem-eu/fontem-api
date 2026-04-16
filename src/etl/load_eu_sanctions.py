@@ -327,8 +327,16 @@ def main(argv=None):
             sys.exit(1)
 
     logger.info("Downloaded/read %d KB", len(xml_bytes) // 1024)
-    entities = list(parse_sanctions_xml(xml_bytes))
-    logger.info("Parsed %d sanctioned entities", len(entities))
+    all_entities = list(parse_sanctions_xml(xml_bytes))
+    logger.info("Parsed %d sanctioned entities total", len(all_entities))
+
+    # GDPR: skip natural persons — only process non-person entities
+    entities = [e for e in all_entities if e["entity_type"] != "person"]
+    skipped = len(all_entities) - len(entities)
+    logger.info(
+        "Filtered to %d non-person entities (skipped %d persons)",
+        len(entities), skipped,
+    )
 
     driver = GraphDatabase.driver(
         args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password)

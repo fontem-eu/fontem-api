@@ -22,8 +22,8 @@ class GraphDataQualitySource(DataQualitySource):
             for label in [
                 "Company", "Listing", "FinancialYear",
                 "Contract", "Authority", "CPV",
-                "Person", "Lobbyist", "LobbyInterest",
-                "SanctionedEntity", "BeneficialOwner",
+                "Lobbyist", "LobbyInterest",
+                "SanctionedEntity",
                 "NUTSRegion", "CohesionProject",
             ]:
                 n = session.run(
@@ -341,32 +341,6 @@ class GraphDataQualitySource(DataQualitySource):
                 "cost_distribution": cost_ranges,
             }
 
-    def get_directors_stats(self) -> dict:
-        """French directors / person data stats."""
-        with self._neo4j.session() as session:
-            persons = session.run("MATCH (p:Person) RETURN count(p) AS n").single()["n"]
-            links = session.run(
-                "MATCH ()-[r:DIRECTS]->() RETURN count(r) AS n"
-            ).single()["n"]
-            companies_with = session.run(
-                "MATCH (p:Person)-[:DIRECTS]->(c:Company) "
-                "RETURN count(DISTINCT c) AS n"
-            ).single()["n"]
-            roles = session.run(
-                "MATCH ()-[r:DIRECTS]->() WHERE r.role IS NOT NULL "
-                "RETURN r.role AS label, count(r) AS value "
-                "ORDER BY value DESC LIMIT 10"
-            ).data()
-            with_birth = session.run(
-                "MATCH (p:Person) WHERE p.birth_year IS NOT NULL RETURN count(p) AS n"
-            ).single()["n"]
-            return {
-                "persons": persons, "director_links": links,
-                "companies_with_directors": companies_with,
-                "birth_year_coverage": round(with_birth / max(persons, 1) * 100, 1),
-                "roles": roles,
-            }
-
     def get_trade_edges_stats(self) -> dict:
         """Materialized trade edge stats."""
         with self._neo4j.session() as session:
@@ -461,30 +435,6 @@ class GraphDataQualitySource(DataQualitySource):
             "total_listings": total, "with_ticker": with_ticker,
             "without_ticker": without_ticker,
             "enrichment_rate": round(with_ticker / max(total, 1) * 100, 1),
-        }
-
-    def get_beneficial_ownership_stats(self) -> dict:
-        """Beneficial ownership stats."""
-        with self._neo4j.session() as session:
-            total = session.run(
-                "MATCH (b:BeneficialOwner) RETURN count(b) AS n"
-            ).single()["n"]
-            owns_rels = session.run(
-                "MATCH ()-[r:OWNS]->() RETURN count(r) AS n"
-            ).single()["n"]
-            by_country = session.run(
-                "MATCH (b:BeneficialOwner) WHERE b.country IS NOT NULL "
-                "RETURN b.country AS country, count(b) AS count "
-                "ORDER BY count DESC LIMIT 20"
-            ).data()
-            by_type = session.run(
-                "MATCH ()-[r:OWNS]->() WHERE r.interest_type IS NOT NULL "
-                "RETURN r.interest_type AS type, count(r) AS count "
-                "ORDER BY count DESC LIMIT 10"
-            ).data()
-        return {
-            "total": total, "owns_relationships": owns_rels,
-            "by_country": by_country, "ownership_types": by_type,
         }
 
     def get_cdp_stats(self) -> dict:
@@ -798,11 +748,6 @@ class GraphDataQualitySource(DataQualitySource):
                 "ORDER BY lobbyists DESC LIMIT 10"
             ).data()
 
-            # Person/director stats
-            person_count = session.run(
-                "MATCH (p:Person) RETURN count(p) AS n"
-            ).single()["n"]
-
             # New data sources
             sanctioned = session.run(
                 "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
@@ -822,7 +767,6 @@ class GraphDataQualitySource(DataQualitySource):
             "lobbyist_count": lobbyist_count,
             "lobbyists_with_ep_passes": lobbyists_with_ep,
             "top_lobby_interests": lobby_interests,
-            "person_count": person_count,
             "sanctioned_entity_count": sanctioned,
             "nuts_region_count": nuts_count,
             "cohesion_project_count": cohesion_count,
