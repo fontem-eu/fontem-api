@@ -1,1 +1,3 @@
-version: "v11c0b9a"
+version: "latest"
+domain: localhost
+apiIngress: "true"
