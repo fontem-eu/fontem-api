@@ -17,8 +17,8 @@ RUN useradd --create-home --shell /bin/bash appuser
 WORKDIR /app
 
 # --- Python dependencies -------------------------------------------------------
-COPY Requirements.txt .
-RUN pip install --no-cache-dir -r Requirements.txt && rm Requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && rm requirements.txt
 
 # --- eforms-parser (TED contract loader dependency) ---------------------------
 COPY vendor/*.whl /tmp/
