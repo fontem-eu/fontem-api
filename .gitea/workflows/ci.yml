@@ -12,11 +12,34 @@ jobs:
       - name: Install deps
         run: |
           pip install --no-cache-dir vendor/*.whl
-          pip install --no-cache-dir -r requirements.txt pytest pylint tzdata
-      - name: Test
-        run: python3 -m pytest tests/ -q
+          pip install --no-cache-dir -r requirements.txt pytest pylint tzdata pytest-cov
+      - name: Test with coverage
+        run: python3 -m pytest tests/ -q --cov=src --cov-report=xml:coverage.xml
       - name: Lint
         run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
+
+  analyze:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps and generate coverage
+        run: |
+          pip install --no-cache-dir vendor/*.whl
+          pip install --no-cache-dir -r requirements.txt pytest pytest-cov tzdata cyclonedx-bom
+          python3 -m pytest tests/ -q --cov=src --cov-report=xml:coverage.xml || true
+      - name: SonarQube scan
+        run: npx sonarqube-scanner -Dsonar.host.url=http://sonarqube.sonarqube.svc.cluster.local:9000 -Dsonar.token=${{ secrets.SONAR_TOKEN }}
+      - name: Generate SBOM
+        run: cyclonedx-py requirements -i requirements.txt --format json -o sbom.json
+      - name: Upload SBOM to Dependency-Track
+        run: |
+          curl -fsS -X POST "http://dependency-track.dependency-track.svc.cluster.local:8080/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
+            -H "Content-Type: multipart/form-data" \
+            -F "projectName=edgar-gmr-etl" -F "projectVersion=$(git rev-parse --short HEAD)" \
+            -F "autoCreate=true" -F "bom=@sbom.json"
 
   build-deploy:
     needs: test
