@@ -1,10 +1,12 @@
 """
 NUTS Region Hierarchy → Neo4j
 =============================
-Loads the NUTS (Nomenclature of Territorial Units for Statistics)
-hierarchy into Neo4j as NUTSRegion nodes with PART_OF relationships,
-then links existing Company and Authority nodes to their NUTS 0 region
-based on the ``country`` property.
+Loads the NUTS (Nomenclature of Territorial Units for Statistics) hierarchy
+into Neo4j as NUTSRegion nodes with PART_OF relationships covering all four
+levels (0: countries, 1: major regions, 2: basic regions, 3: small regions).
+
+Entity → region linking is a separate concern (see ``link_entities_to_nuts``);
+this script only populates the reference hierarchy.
 
 Usage:
     python -m src.etl.load_nuts --neo4j-uri bolt://localhost:7687
@@ -55,40 +57,6 @@ MATCH (parent:NUTSRegion {code: row.parent})
 MERGE (child)-[:PART_OF]->(parent)
 """
 
-LINK_COMPANIES = """
-MATCH (c:Company), (n:NUTSRegion {level: 0})
-WHERE c.country IS NOT NULL
-  AND c.country = n.code
-  AND NOT (c)-[:LOCATED_IN]->(:NUTSRegion)
-MERGE (c)-[:LOCATED_IN]->(n)
-"""
-
-LINK_AUTHORITIES = """
-MATCH (a:Authority), (n:NUTSRegion {level: 0})
-WHERE a.country IS NOT NULL
-  AND a.country = n.code
-  AND NOT (a)-[:LOCATED_IN]->(:NUTSRegion)
-MERGE (a)-[:LOCATED_IN]->(n)
-"""
-
-# EU-27 + EEA/candidate countries — NUTS level 0 codes
-NUTS0_COUNTRIES = {
-    "AT": "Austria", "BE": "Belgium", "BG": "Bulgaria",
-    "CY": "Cyprus", "CZ": "Czechia", "DE": "Germany",
-    "DK": "Denmark", "EE": "Estonia", "EL": "Greece",
-    "ES": "Spain", "FI": "Finland", "FR": "France",
-    "HR": "Croatia", "HU": "Hungary", "IE": "Ireland",
-    "IT": "Italy", "LT": "Lithuania", "LU": "Luxembourg",
-    "LV": "Latvia", "MT": "Malta", "NL": "Netherlands",
-    "PL": "Poland", "PT": "Portugal", "RO": "Romania",
-    "SE": "Sweden", "SI": "Slovenia", "SK": "Slovakia",
-    "AL": "Albania", "CH": "Switzerland", "IS": "Iceland",
-    "LI": "Liechtenstein", "ME": "Montenegro", "MK": "North Macedonia",
-    "NO": "Norway", "RS": "Serbia", "TR": "Turkey",
-    "UK": "United Kingdom", "BA": "Bosnia and Herzegovina",
-    "XK": "Kosovo",
-}
-
 
 def _parent_code(code: str) -> str | None:
     """Derive the parent NUTS code by removing the last character."""
@@ -133,19 +101,6 @@ def parse_nuts_csv(csv_text: str):
             "name": name or code,
             "level": level,
             "parent": _parent_code(code),
-            "country_alpha3": country_alpha3,
-        }
-
-
-def generate_nuts0_fallback():
-    """Generate NUTS level 0 regions from hardcoded EU country codes."""
-    for code, name in sorted(NUTS0_COUNTRIES.items()):
-        country_alpha3 = LocationService.country_from_nuts(code) or ""
-        yield {
-            "code": code,
-            "name": name,
-            "level": 0,
-            "parent": None,
             "country_alpha3": country_alpha3,
         }
 
@@ -196,22 +151,13 @@ def load_into_neo4j(driver, regions):
         if part_of_batch:
             session.run(MERGE_PART_OF, batch=part_of_batch)
 
-        # Link Company and Authority nodes to NUTS 0
-        logger.info("Linking Company nodes to NUTS 0 regions ...")
-        result = session.run(LINK_COMPANIES)
-        companies_linked = result.consume().counters.relationships_created
-        logger.info("  linked %d companies", companies_linked)
-
-        logger.info("Linking Authority nodes to NUTS 0 regions ...")
-        result = session.run(LINK_AUTHORITIES)
-        authorities_linked = result.consume().counters.relationships_created
-        logger.info("  linked %d authorities", authorities_linked)
-
     elapsed = time.time() - t0
+    by_level = {0: 0, 1: 0, 2: 0, 3: 0}
+    for r in all_regions:
+        by_level[r["level"]] = by_level.get(r["level"], 0) + 1
     return {
         "total": total,
-        "companies_linked": companies_linked,
-        "authorities_linked": authorities_linked,
+        "by_level": by_level,
         "elapsed_s": round(elapsed, 1),
     }
 
@@ -244,7 +190,8 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Load regions
+    # Load regions — fail loudly on download errors; masking with a NUTS 0
+    # fallback hid a real production problem for months.
     if args.file:
         logger.info("Reading local file: %s", args.file)
         try:
@@ -253,17 +200,13 @@ def main(argv=None):
         except OSError:
             logger.exception("Failed to read file %s", args.file)
             sys.exit(1)
-        regions = list(parse_nuts_csv(csv_text))
     else:
-        try:
-            csv_text = download_nuts_csv()
-            regions = list(parse_nuts_csv(csv_text))
-        except (httpx.HTTPError, ValueError):
-            logger.warning(
-                "Failed to download NUTS CSV, falling back to NUTS 0 only"
-            )
-            regions = list(generate_nuts0_fallback())
+        csv_text = download_nuts_csv()
 
+    regions = list(parse_nuts_csv(csv_text))
+    if not regions:
+        logger.error("Parsed zero regions from CSV — aborting")
+        sys.exit(1)
     logger.info("Parsed %d NUTS regions", len(regions))
 
     driver = GraphDatabase.driver(
@@ -275,11 +218,10 @@ def main(argv=None):
         driver.close()
 
     logger.info(
-        "Done: %d regions, %d companies linked, %d authorities linked in %.1fs",
+        "Done: %d regions loaded in %.1fs (by level: %s)",
         summary["total"],
-        summary["companies_linked"],
-        summary["authorities_linked"],
         summary["elapsed_s"],
+        summary["by_level"],
     )
 
 
