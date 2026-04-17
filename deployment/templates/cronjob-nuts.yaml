@@ -38,10 +38,16 @@ spec:
                     secretKeyRef:
                       name: neo4j-credentials
                       key: NEO4J_PASSWORD
+              # Eurostat's HTTPS endpoint for the NUTS CSV is unreachable from
+              # our cluster (TLS handshake times out). Use the CSV bundled in
+              # the image — refresh by updating src/etl/data/NUTS_AT_2024.csv
+              # when a new Eurostat revision comes out.
               command:
                 - python
                 - -m
                 - src.etl.load_nuts
+                - --file
+                - /app/src/etl/data/NUTS_AT_2024.csv
               resources:
                 requests:
                   cpu: 250m
