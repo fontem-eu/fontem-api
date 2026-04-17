@@ -28,20 +28,42 @@ logger = logging.getLogger(__name__)
 # load_eu_knowledge_graph (via explicit nuts_code field).
 ENTITY_LABELS = ("Company", "Authority", "Lobbyist")
 
+# Use CALL { ... } IN TRANSACTIONS OF N ROWS so Neo4j auto-commits every
+# batch. Without this, linking 3.6M Company nodes blows past the 256 MB
+# per-transaction memory cap and the whole ETL crashes with
+# MemoryPoolOutOfMemoryError.
 LINK_LABEL_TEMPLATE = """
 MATCH (e:{label})
 WHERE e.country IS NOT NULL AND NOT (e)-[:LOCATED_IN]->(:NUTSRegion)
-WITH e, e.country AS a3
-MATCH (n:NUTSRegion {{level: 0, country_alpha3: a3}})
-MERGE (e)-[:LOCATED_IN]->(n)
+CALL (e) {{
+  WITH e, e.country AS a3
+  MATCH (n:NUTSRegion {{level: 0, country_alpha3: a3}})
+  MERGE (e)-[:LOCATED_IN]->(n)
+}} IN TRANSACTIONS OF 10000 ROWS
 """
+
+_COUNT_LABEL_TEMPLATE = (
+    "MATCH (:{label})-[r:LOCATED_IN]->(:NUTSRegion) RETURN count(r) AS n"
+)
 
 
 def link_label(session, label: str) -> int:
-    """Link all unlinked entities of a given label to their NUTS 0 region."""
+    """Link all unlinked entities of a given label to their NUTS 0 region.
+
+    Uses ``CALL ... IN TRANSACTIONS`` so the driver auto-commits every 10k
+    rows; a single giant transaction blows past Neo4j's per-tx memory cap
+    (256 MB default) when there are millions of Company nodes.
+
+    Implicit-transaction queries don't report relationship counters on the
+    result summary, so we diff the LOCATED_IN edge count per label before /
+    after the run to compute how many edges were created.
+    """
     query = LINK_LABEL_TEMPLATE.format(label=label)
-    result = session.run(query)
-    return result.consume().counters.relationships_created
+    count_query = _COUNT_LABEL_TEMPLATE.format(label=label)
+    before = session.run(count_query).single()["n"]
+    session.run(query).consume()
+    after = session.run(count_query).single()["n"]
+    return after - before
 
 
 def run(driver) -> dict:
