@@ -43,13 +43,13 @@ jobs:
           echo "$COSIGN_KEY" > /tmp/cosign.key
           cosign sign --key /tmp/cosign.key --yes --allow-http-registry gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-api:$TAG
           rm /tmp/cosign.key
-      - name: Deploy to dev
+      - name: Deploy to staging
         run: |
           git clone --depth=1 http://oauth2:${{ secrets.REGISTRY_PASSWORD }}@gitea-http.dev-tools.svc.cluster.local:3000/golden/gitops.git /tmp/gitops
           cd /tmp/gitops
-          sed -i 's/version: ".*"/version: "'$TAG'"/' dev/gmr-api.yaml
+          sed -i 's/version: ".*"/version: "'$TAG'"/' staging/gmr-api.yaml
           git config user.name "GMR CI"
           git config user.email "ci@void42.internal"
-          git add dev/gmr-api.yaml
-          git diff --cached --quiet || git commit -m "ci: deploy gmr-api $TAG to dev"
+          git add staging/gmr-api.yaml
+          git diff --cached --quiet || git commit -m "ci: deploy gmr-api $TAG to staging"
           git push origin main
