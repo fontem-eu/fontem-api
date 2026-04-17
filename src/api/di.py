@@ -13,6 +13,7 @@ from dishka import Provider, Scope, provide, make_async_container, AsyncContaine
 
 from src.analysis.contract_data_source import ContractDataSource
 from src.analysis.data_quality_source import DataQualitySource
+from src.analysis.geo_source import GeoSource
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.person_data_source import PersonDataSource
 from src.data.graph.neo4j_client import Neo4jClient
@@ -62,6 +63,11 @@ class DataSourceProvider(Provider):
     def person_data_source(self, neo4j: Neo4jClient) -> PersonDataSource:
         from src.data.graph.graph_person_source import GraphPersonSource
         return GraphPersonSource(neo4j_client=neo4j)
+
+    @provide(scope=Scope.APP)
+    def geo_source(self, neo4j: Neo4jClient) -> GeoSource:
+        from src.data.graph.graph_geo_source import GraphGeoSource
+        return GraphGeoSource(neo4j_client=neo4j)
 
 
 def resolve_company_id(identifier: str, neo4j: Neo4jClient) -> dict:

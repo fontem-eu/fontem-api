@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from src.analysis.contract_data_source import ContractDataSource
 from src.analysis.data_quality_source import DataQualitySource
+from src.analysis.geo_source import GeoSource
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.person_data_source import PersonDataSource
 from src.api.app import app
@@ -86,6 +87,10 @@ class FlexibleMockProvider(Provider):
     @provide(scope=Scope.APP)
     def person_data_source(self) -> PersonDataSource:
         return self._mocks.get("person_source")  # type: ignore[return-value]
+
+    @provide(scope=Scope.APP)
+    def geo_source(self) -> GeoSource:
+        return self._mocks.get("geo_source")  # type: ignore[return-value]
 
 
 def make_test_client(data_source=None, **kwargs) -> TestClient:
