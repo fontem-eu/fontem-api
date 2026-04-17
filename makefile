@@ -65,6 +65,27 @@ deploy:
 	kubectl -n gmr rollout status deployment/gmr-api --timeout=300s
 	@echo "Deployment is ready!"
 
+# Build + push + commit new tag to dev/gmr-api.yaml in gitops.
+# ArgoCD's gmr-api-dev Application picks it up. Hot-loop dev flow.
+TAG          := v$(shell git rev-parse --short HEAD)
+GITOPS_REPO  ?= http://oauth2:$(GITOPS_TOKEN)@gitea-http.dev-tools.svc.cluster.local:3000/golden/gitops.git
+GITOPS_EMAIL ?= $(USER)@local
+GITOPS_NAME  ?= $(USER) (local dev)
+
+deploy-dev: build release
+	@if [ -z "$(GITOPS_TOKEN)" ]; then echo "GITOPS_TOKEN not set (Gitea PAT for gitops push)"; exit 1; fi
+	@tmp=$$(mktemp -d) && \
+	  git clone --depth=1 $(GITOPS_REPO) $$tmp >/dev/null 2>&1 && \
+	  cd $$tmp && \
+	  sed -i 's/version: ".*"/version: "$(TAG)"/' dev/gmr-api.yaml && \
+	  git config user.email "$(GITOPS_EMAIL)" && \
+	  git config user.name "$(GITOPS_NAME)" && \
+	  git add dev/gmr-api.yaml && \
+	  (git diff --cached --quiet && echo "dev/gmr-api.yaml already at $(TAG)") || \
+	  (git commit -m "dev: deploy gmr-api $(TAG) (local)" && git push origin main) ; \
+	  rm -rf $$tmp
+	@echo "gmr-api:$(TAG) deployed to gmr-dev"
+
 # Run mutation tests in an isolated temp copy to avoid source contamination.
 # mutmut modifies files on disk during its run -- never run it in the real tree.
 mutation:
