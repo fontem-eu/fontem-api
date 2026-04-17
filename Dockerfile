@@ -7,10 +7,16 @@
 # ──────────────────────────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
+COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
+
 # --- OS-level dependencies (minimal) ----------------------------------------
 RUN apt-get update -y \
- && apt-get install -y --no-install-recommends gcc \
+ && apt-get install -y --no-install-recommends gcc ca-certificates \
+ && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_INDEX_URL=https://nexus.void42.internal/repository/pypi-proxy/simple/ \
+    PIP_TRUSTED_HOST=nexus.void42.internal
 
 # --- Non-root user for security -----------------------------------------------
 RUN useradd --create-home --shell /bin/bash appuser

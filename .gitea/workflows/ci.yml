@@ -10,6 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
+        env:
+          PIP_INDEX_URL: https://nexus.void42.internal/repository/pypi-proxy/simple/
+          PIP_TRUSTED_HOST: nexus.void42.internal
         run: |
           pip install --no-cache-dir vendor/*.whl
           pip install --no-cache-dir -r requirements.txt pytest pylint tzdata
@@ -25,20 +28,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Setup Docker
-        run: curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz | tar xz --strip-components=1 -C /usr/local/bin docker/docker
+        run: curl -fsSL https://nexus.void42.internal/repository/docker-releases/linux/static/stable/x86_64/docker-27.5.1.tgz | tar xz --strip-components=1 -C /usr/local/bin docker/docker
       - name: Build and push image
         run: |
           TAG="v$(git rev-parse --short HEAD)"
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login gitea-http.dev-tools.svc.cluster.local:3000 -u "${{ secrets.REGISTRY_USER }}" --password-stdin
-          docker build -t gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-api:$TAG .
+          docker build --network host -t gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-api:$TAG .
           docker push gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-api:$TAG
       - name: Sign image with Cosign
         env:
           COSIGN_PASSWORD: ""
           COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
         run: |
-          curl -sL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 -o /usr/local/bin/cosign
+          curl -sL https://nexus.void42.internal/repository/github-releases/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 -o /usr/local/bin/cosign
           chmod +x /usr/local/bin/cosign
           echo "$COSIGN_KEY" > /tmp/cosign.key
           cosign sign --key /tmp/cosign.key --yes --allow-http-registry gitea-http.dev-tools.svc.cluster.local:3000/golden/gmr-api:$TAG
