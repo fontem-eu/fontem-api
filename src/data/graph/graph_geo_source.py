@@ -17,9 +17,38 @@ logger = logging.getLogger(__name__)
 _MAX_NUTS_DEPTH = 3
 
 _METRICS = {"companies", "contracts", "contracts_eur"}
+_ENTITY_METRICS = {"contracts", "contracts_eur"}
+
+# Template for company-centric entity query.  Authorities awarding contracts
+# to this company are the geographic anchor.
+_COMPANY_QUERY = """
+MATCH (c:Company {{gmr_id: $entity_id}})<-[:AWARDED_TO]-(ct:Contract)<-[:AWARDED]-(auth:Authority)
+MATCH (auth)-[:LOCATED_IN]->(leaf:NUTSRegion)
+MATCH (leaf)-[:PART_OF*0..{depth}]->(region:NUTSRegion {{level: $level}})
+WHERE ($scope IS NULL OR region.code STARTS WITH $scope)
+RETURN region.code AS code,
+       region.name AS name,
+       region.level AS level,
+       {value_expr} AS value
+ORDER BY value DESC
+"""
+
+# Template for authority-centric entity query.  Companies receiving contracts
+# from this authority are the geographic anchor.
+_AUTHORITY_QUERY = """
+MATCH (auth:Authority {{authority_id: $entity_id}})-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company)
+MATCH (c)-[:LOCATED_IN]->(leaf:NUTSRegion)
+MATCH (leaf)-[:PART_OF*0..{depth}]->(region:NUTSRegion {{level: $level}})
+WHERE ($scope IS NULL OR region.code STARTS WITH $scope)
+RETURN region.code AS code,
+       region.name AS name,
+       region.level AS level,
+       {value_expr} AS value
+ORDER BY value DESC
+"""
 
 
-class GraphGeoSource(GeoSource):  # pylint: disable=too-few-public-methods
+class GraphGeoSource(GeoSource):
     """Production geo source backed by Neo4j."""
 
     def __init__(self, neo4j_client: Neo4jClient) -> None:
@@ -97,6 +126,52 @@ class GraphGeoSource(GeoSource):  # pylint: disable=too-few-public-methods
         }
         with self._neo4j.session() as session:
             rows = session.run(query, **params).data()
+        return [
+            {
+                "nuts_code": r["code"],
+                "label": r["name"],
+                "level": r["level"],
+                "value": r["value"],
+            }
+            for r in rows
+        ]
+
+    def aggregate_entity_by_nuts(
+        self,
+        entity_id: str,
+        level: int,
+        metric: str,
+        scope_nuts: str | None = None,
+    ) -> list[dict]:
+        if level not in range(_MAX_NUTS_DEPTH + 1):
+            raise ValueError(f"level must be 0..{_MAX_NUTS_DEPTH}, got {level}")
+        if metric not in _ENTITY_METRICS:
+            raise ValueError(
+                f"entity metric must be one of {_ENTITY_METRICS}, got {metric}"
+            )
+
+        value_expr = (
+            "count(DISTINCT ct)"
+            if metric == "contracts"
+            else "coalesce(sum(toFloat(ct.value_eur)), 0.0)"
+        )
+        # Max PART_OF hops needed to reach any level from any leaf level.
+        fmt = {"depth": _MAX_NUTS_DEPTH, "value_expr": value_expr}
+        params = {
+            "entity_id": entity_id,
+            "level": level,
+            "scope": scope_nuts,
+        }
+        with self._neo4j.session() as session:
+            # Try company path first; fall back to authority path.
+            rows = session.run(
+                _COMPANY_QUERY.format(**fmt), **params
+            ).data()
+            if not rows:
+                rows = session.run(
+                    _AUTHORITY_QUERY.format(**fmt), **params
+                ).data()
+
         return [
             {
                 "nuts_code": r["code"],

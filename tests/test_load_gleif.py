@@ -29,7 +29,10 @@ ADYEN_XML = f"""
   <lei:LEI>724500973ODKK3IFQ447</lei:LEI>
   <lei:Entity>
     <lei:LegalName>Adyen N.V.</lei:LegalName>
-    <lei:LegalAddress><lei:Country>NL</lei:Country></lei:LegalAddress>
+    <lei:LegalAddress>
+      <lei:Country>NL</lei:Country>
+      <lei:PostalCode>1077 ZX</lei:PostalCode>
+    </lei:LegalAddress>
     <lei:LegalForm>
       <lei:OtherLegalForm>N.V.</lei:OtherLegalForm>
     </lei:LegalForm>
@@ -71,6 +74,7 @@ def test_parse_single_record():
     assert r["lei"] == "724500973ODKK3IFQ447"
     assert r["name"] == "Adyen N.V."
     assert r["country"] == "NL"
+    assert r["postal_code"] == "1077 ZX"
     assert r["legal_form"] == "N.V."
     assert r["active"] is True
 
@@ -163,7 +167,7 @@ def test_load_creates_constraint_and_merges():
 
     records = iter([
         {"lei": "724500973ODKK3IFQ447", "name": "Adyen",
-         "country": "NL", "legal_form": "N.V.", "active": True},
+         "country": "NL", "postal_code": "1077 ZX", "legal_form": "N.V.", "active": True},
     ])
 
     summary = load_into_neo4j(mock_driver, records, batch_size=100)
@@ -189,7 +193,7 @@ def test_load_batches_correctly():
     # 5 records with batch_size=2 → 3 batches (2+2+1)
     records = iter([
         {"lei": f"{'A' * 18}{i:02d}", "name": f"Co{i}",
-         "country": "XX", "legal_form": "", "active": True}
+         "country": "XX", "postal_code": "", "legal_form": "", "active": True}
         for i in range(5)
     ])
 

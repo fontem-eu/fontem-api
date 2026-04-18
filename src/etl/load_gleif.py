@@ -39,6 +39,7 @@ TAG_ENTITY = f"{_t}Entity"
 TAG_LEGAL_NAME = f"{_t}LegalName"
 TAG_LEGAL_ADDRESS = f"{_t}LegalAddress"
 TAG_COUNTRY = f"{_t}Country"
+TAG_POSTAL_CODE = f"{_t}PostalCode"
 TAG_LEGAL_FORM = f"{_t}LegalForm"
 TAG_ENTITY_LEGAL_FORM_CODE = f"{_t}EntityLegalFormCode"
 TAG_OTHER_LEGAL_FORM = f"{_t}OtherLegalForm"
@@ -77,7 +78,7 @@ def parse_gleif_xml(xml_stream):
     """
     Streaming parser for LEI-CDF v3.1 XML.
 
-    Yields dicts with keys: lei, name, country, legal_form, active.
+    Yields dicts with keys: lei, name, country, postal_code, legal_form, active.
     Memory-efficient: clears each element after processing.
     """
     for event, elem in iterparse(xml_stream, events=("end",)):
@@ -93,6 +94,7 @@ def parse_gleif_xml(xml_stream):
         name = _text(entity, TAG_LEGAL_NAME)
         addr = entity.find(TAG_LEGAL_ADDRESS)
         country = _text(addr, TAG_COUNTRY) if addr is not None else None
+        postal_code = _text(addr, TAG_POSTAL_CODE) if addr is not None else None
         status = _text(entity, TAG_ENTITY_STATUS)
 
         legal_form_el = entity.find(TAG_LEGAL_FORM)
@@ -112,6 +114,7 @@ def parse_gleif_xml(xml_stream):
             "lei": lei,
             "name": name or "",
             "country": country or "",
+            "postal_code": postal_code or "",
             "legal_form": legal_form or "",
             "active": status == "ACTIVE",
         }
@@ -132,11 +135,12 @@ def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
     query = """
     UNWIND $batch AS row
     MERGE (c:Company {gmr_id: row.gmr_id})
-    SET c.lei        = row.lei,
-        c.name       = row.name,
-        c.country    = row.country,
-        c.legal_form = row.legal_form,
-        c.active     = row.active
+    SET c.lei         = row.lei,
+        c.name        = row.name,
+        c.country     = row.country,
+        c.postal_code = CASE row.postal_code WHEN '' THEN null ELSE row.postal_code END,
+        c.legal_form  = row.legal_form,
+        c.active      = row.active
     """
 
     total = 0

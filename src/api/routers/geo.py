@@ -4,12 +4,11 @@ Geo API Router
 Endpoints for geographic aggregation over the NUTS hierarchy.
 
 - ``GET /geo/aggregate`` — aggregate entities/contracts by NUTS region.
+- ``GET /geo/entity/{entity_id}/aggregate`` — entity-scoped contract map.
 - ``GET /geo/nuts-boundaries`` — return bundled GeoJSON for a NUTS level.
 
 Boundary geometry is bundled in the image (``src/api/data/nutsN.geojson``)
-because Eurostat's GISCO HTTPS endpoint is unreachable from the cluster.
-Only NUTS 0 (country) boundaries ship today; NUTS 1–3 will follow once the
-data is sourced.
+for all four NUTS levels (0–3).
 """
 from __future__ import annotations
 
@@ -68,6 +67,47 @@ def aggregate(
     }
 
 
+@router.get("/entity/{entity_id}/aggregate")
+@inject
+def entity_aggregate(
+    entity_id: str,
+    level: int = Query(0, ge=0, le=3, description="NUTS level (0–3)"),
+    metric: str = Query(
+        "contracts",
+        description="Metric: contracts (count) or contracts_eur (EUR sum)",
+    ),
+    scope_nuts: str | None = Query(
+        None,
+        description=(
+            "Ancestor NUTS code — restrict results to regions whose code "
+            "starts with this prefix (e.g. 'DE' for all German regions)."
+        ),
+    ),
+    *,
+    source: FromDishka[GeoSource],
+):
+    """Aggregate one entity's contract volume by NUTS region.
+
+    Works for both Company (gmr_id) and Authority (authority_id).
+    """
+    try:
+        rows = source.aggregate_entity_by_nuts(
+            entity_id=entity_id,
+            level=level,
+            metric=metric,
+            scope_nuts=scope_nuts,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "entity_id": entity_id,
+        "level": level,
+        "metric": metric,
+        "scope_nuts": scope_nuts,
+        "regions": rows,
+    }
+
+
 @router.get("/nuts-boundaries")
 def nuts_boundaries(
     level: int = Query(0, ge=0, le=3),
@@ -77,10 +117,7 @@ def nuts_boundaries(
     if not os.path.isfile(path):
         raise HTTPException(
             status_code=501,
-            detail=(
-                f"Boundaries for NUTS {level} are not bundled yet. "
-                f"Only NUTS 0 is available today."
-            ),
+            detail=f"Boundaries for NUTS {level} are not bundled yet.",
         )
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)

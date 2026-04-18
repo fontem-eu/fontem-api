@@ -97,3 +97,91 @@ def test_returns_normalized_rows():
     assert result == [
         {"nuts_code": "DE", "label": "Deutschland", "level": 0, "value": 123},
     ]
+
+
+# ── aggregate_entity_by_nuts ─────────────────────────────────────────────
+
+
+def test_entity_rejects_invalid_level():
+    source = GraphGeoSource(neo4j_client=MagicMock())
+    with pytest.raises(ValueError, match="level"):
+        source.aggregate_entity_by_nuts(entity_id="abc", level=9, metric="contracts")
+
+
+def test_entity_rejects_invalid_metric():
+    source = GraphGeoSource(neo4j_client=MagicMock())
+    with pytest.raises(ValueError, match="metric"):
+        source.aggregate_entity_by_nuts(entity_id="abc", level=0, metric="companies")
+
+
+def test_entity_contracts_count_query():
+    """metric=contracts must use count(DISTINCT ct) in Cypher."""
+    client, session = _fake_neo4j([])
+    source = GraphGeoSource(neo4j_client=client)
+    source.aggregate_entity_by_nuts(entity_id="abc-123", level=0, metric="contracts")
+    # First query tried is the company path
+    first_query = session.run.call_args_list[0].args[0]
+    assert "count(DISTINCT ct)" in first_query
+    assert "Company" in first_query
+
+
+def test_entity_contracts_eur_query():
+    """metric=contracts_eur must use sum(toFloat(ct.value_eur)) in Cypher."""
+    client, session = _fake_neo4j([])
+    source = GraphGeoSource(neo4j_client=client)
+    source.aggregate_entity_by_nuts(entity_id="abc-123", level=0, metric="contracts_eur")
+    first_query = session.run.call_args_list[0].args[0]
+    assert "sum(toFloat(ct.value_eur))" in first_query
+
+
+def test_entity_scope_filter_applied():
+    """scope_nuts is passed as $scope parameter."""
+    client, session = _fake_neo4j([])
+    source = GraphGeoSource(neo4j_client=client)
+    source.aggregate_entity_by_nuts(
+        entity_id="abc", level=1, metric="contracts", scope_nuts="DE"
+    )
+    params = session.run.call_args_list[0].kwargs
+    assert params["scope"] == "DE"
+    assert params["level"] == 1
+
+
+def test_entity_falls_back_to_authority_query_when_company_empty():
+    """If the company path returns no rows, tries the authority path."""
+    session = MagicMock()
+    # First call (company) returns empty; second (authority) returns data
+    company_result = MagicMock()
+    company_result.data.return_value = []
+    authority_result = MagicMock()
+    authority_result.data.return_value = [
+        {"code": "DE", "name": "Deutschland", "level": 0, "value": 5}
+    ]
+    session.run.side_effect = [company_result, authority_result]
+    session.__enter__ = MagicMock(return_value=session)
+    session.__exit__ = MagicMock(return_value=False)
+    client = MagicMock()
+    client.session.return_value = session
+
+    source = GraphGeoSource(neo4j_client=client)
+    result = source.aggregate_entity_by_nuts(
+        entity_id="ORG-001", level=0, metric="contracts"
+    )
+    assert len(result) == 1
+    assert result[0]["nuts_code"] == "DE"
+    # Authority path uses authority_id
+    authority_query = session.run.call_args_list[1].args[0]
+    assert "authority_id" in authority_query
+
+
+def test_entity_returns_normalized_rows():
+    """Result rows are shaped as {nuts_code, label, level, value}."""
+    client, _ = _fake_neo4j([
+        {"code": "DE", "name": "Deutschland", "level": 0, "value": 42},
+    ])
+    source = GraphGeoSource(neo4j_client=client)
+    result = source.aggregate_entity_by_nuts(
+        entity_id="some-gmr-id", level=0, metric="contracts"
+    )
+    assert result == [
+        {"nuts_code": "DE", "label": "Deutschland", "level": 0, "value": 42}
+    ]
