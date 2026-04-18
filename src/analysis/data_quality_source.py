@@ -49,3 +49,7 @@ class DataQualitySource(ABC):
     def get_cross_source_overlap(self) -> dict: return {}
     def get_country_code_consistency(self) -> dict: return {}
     def get_field_completeness(self) -> dict: return {}
+
+    def get_connectedness(self) -> dict:
+        """Return graph connectedness metrics: degree distribution + stats."""
+        return {"stats": {}, "distribution": [], "hubs": []}

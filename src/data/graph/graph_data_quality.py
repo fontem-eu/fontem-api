@@ -771,3 +771,102 @@ class GraphDataQualitySource(DataQualitySource):
             "nuts_region_count": nuts_count,
             "cohesion_project_count": cohesion_count,
         }
+
+    # Degree-bucket boundaries for the connectedness histogram. Picked to
+    # give meaningful resolution at the low end (where the mass is) and
+    # handle the long tail (some hub nodes have 200k+ edges).
+    _DEGREE_BUCKETS: list[tuple[int, str]] = [
+        (0, "0"),
+        (1, "1"),
+        (3, "2-3"),
+        (10, "4-10"),
+        (30, "11-30"),
+        (100, "31-100"),
+        (300, "101-300"),
+        (1000, "301-1000"),
+        (10000, "1001-10000"),
+        (999999, "10000+"),
+    ]
+
+    def get_connectedness(self) -> dict:
+        """Return degree distribution, summary stats, and top hubs.
+
+        Whole-graph scan. Runs in ~2s on the current 4M-node graph via
+        Cypher's ``COUNT { (n)--() }`` subquery, which is backed by Neo4j's
+        relationship counts per node. Well below the 30s transaction
+        timeout. Three focused queries — aggregation happens server-side,
+        so we never ship the per-node degree list back.
+        """
+        bucket_labels = {b[0]: b[1] for b in self._DEGREE_BUCKETS}
+
+        with self._neo4j.session() as session:
+            # 1. Bucketed distribution.
+            distribution_rows = session.run(
+                """
+                MATCH (n)
+                WITH COUNT { (n)--() } AS deg
+                WITH
+                  CASE
+                    WHEN deg = 0      THEN 0
+                    WHEN deg = 1      THEN 1
+                    WHEN deg <= 3     THEN 3
+                    WHEN deg <= 10    THEN 10
+                    WHEN deg <= 30    THEN 30
+                    WHEN deg <= 100   THEN 100
+                    WHEN deg <= 300   THEN 300
+                    WHEN deg <= 1000  THEN 1000
+                    WHEN deg <= 10000 THEN 10000
+                    ELSE 999999
+                  END AS bucket
+                RETURN bucket, count(*) AS nodes
+                """
+            ).data()
+            counts = {row["bucket"]: row["nodes"] for row in distribution_rows}
+
+            # 2. Summary stats.
+            stats_row = session.run(
+                """
+                MATCH (n)
+                WITH COUNT { (n)--() } AS deg
+                RETURN
+                  count(*) AS total_nodes,
+                  avg(deg) AS mean_degree,
+                  percentileCont(deg, 0.5) AS median_degree,
+                  max(deg) AS max_degree
+                """
+            ).single()
+            total_edges = session.run(
+                "MATCH ()-[r]->() RETURN count(r) AS n"
+            ).single()["n"]
+
+            # 3. Top 10 hubs.
+            hubs_rows = session.run(
+                """
+                MATCH (n)
+                WITH n, COUNT { (n)--() } AS deg
+                ORDER BY deg DESC
+                LIMIT 10
+                RETURN
+                  labels(n) AS labels,
+                  coalesce(n.name, n.code, n.id, n.gmr_id, '<unnamed>') AS id,
+                  deg AS degree
+                """
+            ).data()
+
+        distribution = [
+            {"bucket": edge, "label": bucket_labels[edge], "nodes": counts.get(edge, 0)}
+            for edge, _ in self._DEGREE_BUCKETS
+        ]
+
+        return {
+            "stats": {
+                "total_nodes": stats_row["total_nodes"],
+                "total_edges": total_edges,
+                "orphan_count": counts.get(0, 0),
+                "mean_degree": round(float(stats_row["mean_degree"] or 0), 4),
+                "median_degree": float(stats_row["median_degree"] or 0),
+                "max_degree": stats_row["max_degree"] or 0,
+            },
+            "distribution": distribution,
+            "hubs": hubs_rows,
+        }

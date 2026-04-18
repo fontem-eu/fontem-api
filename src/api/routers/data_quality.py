@@ -196,3 +196,10 @@ def country_code_consistency(source: FromDishka[DataQualitySource]):
 def field_completeness(source: FromDishka[DataQualitySource]):
     """Per-source field completeness percentages."""
     return source.get_field_completeness()
+
+
+@router.get("/connectedness")
+@inject
+def connectedness(source: FromDishka[DataQualitySource]):
+    """Graph connectedness: degree distribution, summary stats, top hubs."""
+    return source.get_connectedness()
