@@ -23,9 +23,8 @@ logger = logging.getLogger(__name__)
 # Explicit list of modules that expose a RULE constant. Order = priority.
 # Add new rule modules here after adding tests + documentation.
 _BUILTIN_RULE_MODULES: list[str] = [
-    # Populated as rules land. The first two ship in follow-up PRs:
-    # "src.reasoner.rules.orphan_company",
-    # "src.reasoner.rules.duplicate_company_by_vat",
+    "src.reasoner.rules.orphan_company",
+    # "src.reasoner.rules.duplicate_company_by_vat",  # lands in next PR
 ]
 
 
