@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from ...analysis.geo_source import GeoSource
+from ...services.location_service import LocationService
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -19,22 +20,22 @@ _MAX_NUTS_DEPTH = 3
 _METRICS = {"companies", "contracts", "contracts_eur"}
 _ENTITY_METRICS = {"contracts", "contracts_eur"}
 
-# Template for company-centric entity query.  Authorities awarding contracts
-# to this company are the geographic anchor.
-_COMPANY_QUERY = """
+# Authorities have no LOCATED_IN edges (authorities_linked=0 in production).
+# Instead we aggregate contracts by authority.country (alpha-3) and map to
+# NUTS level-0 codes using LocationService.  For level > 0 the company
+# receives no sub-national authority geography, so the result is empty.
+_COMPANY_COUNTRY_QUERY = """
 MATCH (c:Company {{gmr_id: $entity_id}})<-[:AWARDED_TO]-(ct:Contract)<-[:AWARDED]-(auth:Authority)
-MATCH (auth)-[:LOCATED_IN]->(leaf:NUTSRegion)
-MATCH (leaf)-[:PART_OF*0..{depth}]->(region:NUTSRegion {{level: $level}})
-WHERE ($scope IS NULL OR region.code STARTS WITH $scope)
-RETURN region.code AS code,
-       region.name AS name,
-       region.level AS level,
+WHERE auth.country IS NOT NULL
+  AND ($scope_a3 IS NULL OR auth.country = $scope_a3)
+RETURN auth.country AS country_a3,
        {value_expr} AS value
 ORDER BY value DESC
 """
 
 # Template for authority-centric entity query.  Companies receiving contracts
-# from this authority are the geographic anchor.
+# from this authority are the geographic anchor; LOCATED_IN is available on
+# Company nodes so all NUTS levels work here.
 _AUTHORITY_QUERY = """
 MATCH (auth:Authority {{authority_id: $entity_id}})-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company)
 MATCH (c)-[:LOCATED_IN]->(leaf:NUTSRegion)
@@ -46,6 +47,17 @@ RETURN region.code AS code,
        {value_expr} AS value
 ORDER BY value DESC
 """
+
+# GBR → alpha-2 "GB" via pycountry, but NUTS uses "UK".
+_NUTS_ALPHA2_OVERRIDES = {"GB": "UK"}
+
+
+def _alpha3_to_nuts_code(alpha3: str) -> str | None:
+    """Convert an alpha-3 country code to its NUTS level-0 code."""
+    a2 = LocationService.alpha3_to_alpha2(alpha3)
+    if a2 is None:
+        return None
+    return _NUTS_ALPHA2_OVERRIDES.get(a2, a2)
 
 
 class GraphGeoSource(GeoSource):
@@ -155,22 +167,71 @@ class GraphGeoSource(GeoSource):
             if metric == "contracts"
             else "coalesce(sum(toFloat(ct.value_eur)), 0.0)"
         )
-        # Max PART_OF hops needed to reach any level from any leaf level.
         fmt = {"depth": _MAX_NUTS_DEPTH, "value_expr": value_expr}
-        params = {
-            "entity_id": entity_id,
-            "level": level,
-            "scope": scope_nuts,
-        }
+
         with self._neo4j.session() as session:
-            # Try company path first; fall back to authority path.
-            rows = session.run(
-                _COMPANY_QUERY.format(**fmt), **params
+            # ── Company path: aggregate by authority country ──────────────────
+            # Authorities have no LOCATED_IN edges, so we use auth.country
+            # (alpha-3) for level-0 aggregation.  For level > 0 within a scope,
+            # convert the scope NUTS prefix to the corresponding alpha-3 country.
+            scope_a3: str | None = None
+            if scope_nuts and level > 0:
+                # scope_nuts starts with the 2-char NUTS country code.
+                nuts_country = scope_nuts[:2].upper()
+                scope_a3 = LocationService.alpha2_to_alpha3(nuts_country)
+
+            country_rows = session.run(
+                _COMPANY_COUNTRY_QUERY.format(value_expr=value_expr),
+                entity_id=entity_id,
+                scope_a3=scope_a3,
             ).data()
-            if not rows:
-                rows = session.run(
-                    _AUTHORITY_QUERY.format(**fmt), **params
-                ).data()
+
+            if country_rows:
+                # Map alpha-3 → NUTS code and fetch region names.
+                nuts_codes = [
+                    _alpha3_to_nuts_code(r["country_a3"])
+                    for r in country_rows
+                ]
+                value_by_nuts = {
+                    _alpha3_to_nuts_code(r["country_a3"]): r["value"]
+                    for r in country_rows
+                    if _alpha3_to_nuts_code(r["country_a3"])
+                }
+
+                if level == 0:
+                    # Return one row per country NUTS code.
+                    region_rows = session.run(
+                        "MATCH (r:NUTSRegion {level: 0}) "
+                        "WHERE r.code IN $codes "
+                        "RETURN r.code AS code, r.name AS name, r.level AS level",
+                        codes=[c for c in nuts_codes if c],
+                    ).data()
+                    return [
+                        {
+                            "nuts_code": r["code"],
+                            "label": r["name"],
+                            "level": r["level"],
+                            "value": value_by_nuts.get(r["code"], 0),
+                        }
+                        for r in region_rows
+                    ]
+
+                # For level > 0 we only know authority country, not sub-region.
+                # Return empty — the map will show a no-data state for this entity.
+                logger.debug(
+                    "entity %s: no sub-national authority geography available "
+                    "for level %d (authorities_linked=0); returning empty",
+                    entity_id, level,
+                )
+                return []
+
+            # ── Authority path: use company LOCATED_IN ────────────────────────
+            rows = session.run(
+                _AUTHORITY_QUERY.format(**fmt),
+                entity_id=entity_id,
+                level=level,
+                scope=scope_nuts,
+            ).data()
 
         return [
             {
