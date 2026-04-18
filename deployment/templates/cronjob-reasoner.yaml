@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reasoner-sweep
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: "0 */6 * * *"           # every 6 hours
+  concurrencyPolicy: Forbid
+  suspend: true
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: regcred
+          containers:
+            - name: reasoner-sweep
+              image: contribute.void42.internal/golden/gmr-api:{{ .Values.version }}
+              imagePullPolicy: Always
+              env:
+                - name: NEO4J_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_URI
+                - name: NEO4J_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_USER
+                - name: NEO4J_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_PASSWORD
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: gmr-postgres-credentials
+                      key: POSTGRES_PASSWORD
+                - name: DATABASE_URL
+                  value: {{ .Values.reasonerDatabaseUrl | default "postgresql://postgres:$(POSTGRES_PASSWORD)@postgresql:5432/gmr_app" | quote }}
+              command:
+                - python
+                - -m
+                - src.reasoner.cli
+                - sweep
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi
