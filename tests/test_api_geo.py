@@ -8,9 +8,10 @@ from unittest.mock import MagicMock
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 
-def _mock_geo_source(rows):
+def _mock_geo_source(rows, entity_rows=None):
     source = MagicMock()
     source.aggregate_by_nuts = MagicMock(return_value=rows)
+    source.aggregate_entity_by_nuts = MagicMock(return_value=entity_rows or [])
     return source
 
 
@@ -75,6 +76,67 @@ def test_aggregate_source_value_error_becomes_400():
         cleanup_dishka()
 
 
+# ── /geo/entity/{entity_id}/aggregate ─────────────────────────
+
+
+def test_entity_aggregate_returns_200_with_regions():
+    entity_rows = [
+        {"nuts_code": "DE", "label": "Deutschland", "level": 0, "value": 30},
+    ]
+    source = _mock_geo_source([], entity_rows=entity_rows)
+    client = make_test_client(geo_source=source)
+    try:
+        r = client.get("/geo/entity/some-gmr-id/aggregate")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["entity_id"] == "some-gmr-id"
+        assert data["level"] == 0
+        assert data["metric"] == "contracts"
+        assert data["regions"] == entity_rows
+    finally:
+        cleanup_dishka()
+
+
+def test_entity_aggregate_passes_params():
+    source = _mock_geo_source([])
+    client = make_test_client(geo_source=source)
+    try:
+        client.get(
+            "/geo/entity/abc-123/aggregate"
+            "?level=1&metric=contracts_eur&scope_nuts=DE"
+        )
+        source.aggregate_entity_by_nuts.assert_called_once_with(
+            entity_id="abc-123",
+            level=1,
+            metric="contracts_eur",
+            scope_nuts="DE",
+        )
+    finally:
+        cleanup_dishka()
+
+
+def test_entity_aggregate_bad_level_returns_422():
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        r = client.get("/geo/entity/abc/aggregate?level=9")
+        assert r.status_code == 422
+    finally:
+        cleanup_dishka()
+
+
+def test_entity_aggregate_value_error_becomes_400():
+    source = MagicMock()
+    source.aggregate_by_nuts = MagicMock(return_value=[])
+    source.aggregate_entity_by_nuts.side_effect = ValueError("bad metric")
+    client = make_test_client(geo_source=source)
+    try:
+        r = client.get("/geo/entity/abc/aggregate?metric=bogus")
+        assert r.status_code == 400
+        assert "bad metric" in r.json()["detail"]
+    finally:
+        cleanup_dishka()
+
+
 # ── /geo/nuts-boundaries ───────────────────────────────────────
 
 
@@ -95,12 +157,14 @@ def test_nuts_boundaries_level_0_returns_feature_collection():
         cleanup_dishka()
 
 
-def test_nuts_boundaries_level_3_returns_501_not_yet_bundled():
-    """NUTS 3 GeoJSON isn't bundled yet — endpoint must return 501, not 500."""
+def test_nuts_boundaries_level_3_returns_feature_collection():
+    """NUTS 3 GeoJSON is now bundled — endpoint must return 200."""
     client = make_test_client(geo_source=_mock_geo_source([]))
     try:
         r = client.get("/geo/nuts-boundaries?level=3")
-        assert r.status_code == 501
-        assert "not bundled" in r.json()["detail"].lower()
+        assert r.status_code == 200
+        data = r.json()
+        assert data["type"] == "FeatureCollection"
+        assert len(data["features"]) >= 1000
     finally:
         cleanup_dishka()
