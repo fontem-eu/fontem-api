@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Add new rule modules here after adding tests + documentation.
 _BUILTIN_RULE_MODULES: list[str] = [
     "src.reasoner.rules.orphan_company",
-    # "src.reasoner.rules.duplicate_company_by_vat",  # lands in next PR
+    "src.reasoner.rules.duplicate_company_by_vat",
 ]
 
 
