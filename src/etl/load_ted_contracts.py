@@ -126,6 +126,8 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
     total = 0
     t0 = time.time()
     loaded_at = datetime.now().astimezone().isoformat()
+    touched_companies: set[str] = set()
+    touched_authorities: set[str] = set()
 
     with driver.session() as session:
         # Create constraints
@@ -232,6 +234,10 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                     str(value_eur_decimal) if value_eur_decimal is not None else None
                 )
 
+                # Capture for the post-ETL consolidator hook
+                touched_companies.add(match.gmr_id)
+                touched_authorities.add(authority_id)
+
                 batch.append({
                     "notice_id": pub_num,
                     "bt701": notice.notice_id,
@@ -283,6 +289,10 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
         "Done: %d contracts in %.1fs", total, elapsed,
     )
     logger.info("Match stats: %s", json.dumps(matcher.stats.summary()))
+    # Notify the consolidator about touched Company + Authority nodes.
+    from src.etl._hooks import notify_consolidator
+    notify_consolidator("Company", list(touched_companies))
+    notify_consolidator("Authority", list(touched_authorities))
     return {"total": total, "elapsed_s": round(elapsed, 1),
             "match_stats": matcher.stats.summary()}
 

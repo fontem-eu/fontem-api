@@ -154,9 +154,11 @@ def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
             "FOR (c:Company) REQUIRE c.gmr_id IS UNIQUE"
         )
 
+        written_ids: list[str] = []
         for rec in records:
             rec["gmr_id"] = gmr_id.from_lei(rec["lei"])
             batch.append(rec)
+            written_ids.append(rec["gmr_id"])
 
             if len(batch) >= batch_size:
                 session.run(query, batch=batch)
@@ -174,6 +176,9 @@ def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
             total += len(batch)
 
     elapsed = time.time() - t0
+    # Notify the consolidator about the new/updated companies. Best-effort.
+    from src.etl._hooks import notify_consolidator
+    notify_consolidator("Company", written_ids)
     return {"total": total, "elapsed_s": round(elapsed, 1)}
 
 
