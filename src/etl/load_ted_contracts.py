@@ -149,8 +149,11 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
             if not buyer:
                 continue
 
+            # eforms-parser returns legal_id as LegalIdentifier(value, scheme_name).
+            # The matcher expects a bare string — pass the value through.
+            buyer_legal_value = buyer.legal_id.value if buyer.legal_id else None
             authority_id = matcher.match_authority(
-                buyer.name, buyer.country, buyer.legal_id,
+                buyer.name, buyer.country, buyer_legal_value,
             )
 
             for award in notice.awards:
@@ -160,17 +163,29 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                 if not contractor:
                     continue
 
-                # eforms-parser returns `cbc:CompanyID` as `legal_id`; TED
-                # publishers (especially French ones) often stuff internal
-                # tenderer references there rather than a real VAT. We only
-                # keep the value when it canonicalises as a valid EU VAT;
-                # everything else (TED notice-ids, SIRENs, malformed strings)
-                # is dropped so it doesn't pollute Company.vat.
-                raw_vat = contractor.legal_id
-                if isinstance(raw_vat, list):
-                    raw_vat = raw_vat[0] if raw_vat else None
+                # eforms-parser now returns `legal_id` as a LegalIdentifier
+                # (value + scheme_name). Route based on scheme_name when the
+                # publisher sets one; fall back to canon_vat validation when
+                # scheme_name is absent (most French TED notices).
+                #
+                # Only `scheme_name == "VAT"` (or salvage-valid canonical) ends
+                # up in `Company.vat`. National IDs (SIREN, SIRET, etc.) are
+                # intentionally dropped here — we don't have a `siren` property
+                # yet. When we add one this is the place to route them.
                 from src.etl.identifiers import canon_vat
-                raw_vat = canon_vat(raw_vat)
+
+                raw_vat: str | None = None
+                if contractor.legal_id is not None:
+                    value = contractor.legal_id.value
+                    scheme = (contractor.legal_id.scheme_name or "").upper()
+                    if scheme == "VAT":
+                        raw_vat = canon_vat(value)
+                    elif scheme in ("NATIONAL", "EORI", ""):
+                        # schemeName missing or not-VAT — still try canon_vat
+                        # so publishers who stuff a VAT under a bad scheme
+                        # (happens) aren't lost.
+                        raw_vat = canon_vat(value)
+                    # else: explicit non-VAT scheme, drop.
 
                 match = matcher.match_company(
                     contractor.name, contractor.country, raw_vat,
