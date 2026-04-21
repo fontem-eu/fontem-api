@@ -811,36 +811,55 @@ class GraphDataQualitySource(DataQualitySource):
         self._connectedness_cache = (now, result)
         return result
 
+    # Portable across Neo4j 4.x and 5.x. `size((n)--())` was removed
+    # in Neo4j 5 (hence the original prod 500); the list-comprehension
+    # form works in both.
+    _DEGREE_EXPR = "size([(n)--() | 1])"
+
+    def _connectedness_cypher(self, label: str) -> str:
+        # Label is pulled from the whitelisted tuple; Neo4j doesn't
+        # support parameterized labels so f-string interpolation is
+        # the canonical approach.
+        return (
+            f"MATCH (n:{label}) "
+            f"WITH {self._DEGREE_EXPR} AS degree "
+            "RETURN count(*) AS count, "
+            "  sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS isolated, "
+            "  min(degree) AS min_d, "
+            "  max(degree) AS max_d, "
+            "  avg(degree) AS mean_d, "
+            "  percentileCont(degree, 0.5) AS median_d, "
+            "  percentileCont(degree, 0.95) AS p95_d, "
+            "  sum(CASE WHEN degree = 1 THEN 1 ELSE 0 END) AS b_1, "
+            "  sum(CASE WHEN degree >= 2 AND degree <= 5 THEN 1 ELSE 0 END) AS b_2_5, "
+            "  sum(CASE WHEN degree >= 6 AND degree <= 10 THEN 1 ELSE 0 END) AS b_6_10, "
+            "  sum(CASE WHEN degree >= 11 AND degree <= 50 THEN 1 ELSE 0 END) AS b_11_50, "
+            "  sum(CASE WHEN degree >= 51 AND degree <= 100 THEN 1 ELSE 0 END) AS b_51_100, "
+            "  sum(CASE WHEN degree >= 101 AND degree <= 500 THEN 1 ELSE 0 END) AS b_101_500, "
+            "  sum(CASE WHEN degree > 500 THEN 1 ELSE 0 END) AS b_500_plus"
+        )
+
     def _compute_connectedness(self) -> dict:
-        per_type = []
+        per_type: list[dict] = []
+        errors: list[dict] = []
         with self._neo4j.session() as session:
             for label in _CONNECTEDNESS_LABELS:
-                row = session.run(
-                    # Label is whitelisted above; Neo4j doesn't
-                    # support parameterized labels so f-string is
-                    # the canonical approach here.
-                    f"MATCH (n:{label}) "
-                    "WITH size((n)--()) AS degree "
-                    "RETURN count(*) AS count, "
-                    "  sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS isolated, "
-                    "  min(degree) AS min_d, "
-                    "  max(degree) AS max_d, "
-                    "  avg(degree) AS mean_d, "
-                    "  percentileCont(degree, 0.5) AS median_d, "
-                    "  percentileCont(degree, 0.95) AS p95_d, "
-                    "  sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS b_0, "
-                    "  sum(CASE WHEN degree = 1 THEN 1 ELSE 0 END) AS b_1, "
-                    "  sum(CASE WHEN degree >= 2 AND degree <= 5 THEN 1 ELSE 0 END) AS b_2_5, "
-                    "  sum(CASE WHEN degree >= 6 AND degree <= 10 THEN 1 ELSE 0 END) AS b_6_10, "
-                    "  sum(CASE WHEN degree >= 11 AND degree <= 50 THEN 1 ELSE 0 END) AS b_11_50, "
-                    "  sum(CASE WHEN degree >= 51 AND degree <= 100 THEN 1 ELSE 0 END) AS b_51_100, "
-                    "  sum(CASE WHEN degree >= 101 AND degree <= 500 THEN 1 ELSE 0 END) AS b_101_500, "
-                    "  sum(CASE WHEN degree > 500 THEN 1 ELSE 0 END) AS b_500_plus"
-                ).single()
-                count = row["count"]
+                try:
+                    row = session.run(self._connectedness_cypher(label)).single()
+                except Exception as exc:  # pylint: disable=broad-except
+                    # One label failing (missing from schema, edge-case
+                    # query rejection, etc.) shouldn't sink the whole
+                    # dashboard. Log the traceback, record a stub so
+                    # the UI can flag it, and move on.
+                    logger.exception(
+                        "connectedness: label %s failed", label,
+                    )
+                    errors.append({"entity_type": label, "error": str(exc)})
+                    continue
+                count = row["count"] or 0
                 if count == 0:
                     continue
-                isolated = row["isolated"]
+                isolated = row["isolated"] or 0
                 per_type.append({
                     "entity_type": label,
                     "count": count,
@@ -852,18 +871,19 @@ class GraphDataQualitySource(DataQualitySource):
                     "median_degree": row["median_d"],
                     "p95_degree": row["p95_d"],
                     "histogram": [
-                        {"bucket": "0", "count": row["b_0"]},
-                        {"bucket": "1", "count": row["b_1"]},
-                        {"bucket": "2-5", "count": row["b_2_5"]},
-                        {"bucket": "6-10", "count": row["b_6_10"]},
-                        {"bucket": "11-50", "count": row["b_11_50"]},
-                        {"bucket": "51-100", "count": row["b_51_100"]},
-                        {"bucket": "101-500", "count": row["b_101_500"]},
-                        {"bucket": "500+", "count": row["b_500_plus"]},
+                        {"bucket": "0", "count": isolated},
+                        {"bucket": "1", "count": row["b_1"] or 0},
+                        {"bucket": "2-5", "count": row["b_2_5"] or 0},
+                        {"bucket": "6-10", "count": row["b_6_10"] or 0},
+                        {"bucket": "11-50", "count": row["b_11_50"] or 0},
+                        {"bucket": "51-100", "count": row["b_51_100"] or 0},
+                        {"bucket": "101-500", "count": row["b_101_500"] or 0},
+                        {"bucket": "500+", "count": row["b_500_plus"] or 0},
                     ],
                 })
         return {
             "per_type": per_type,
+            "errors": errors,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "cache_ttl_seconds": _CONNECTEDNESS_TTL_SECONDS,
         }

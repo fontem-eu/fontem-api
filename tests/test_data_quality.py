@@ -92,7 +92,12 @@ def test_connectedness_endpoint_default_shape():
     cleanup_dishka()
     assert resp.status_code == 200
     data = resp.json()
-    assert data == {"per_type": [], "generated_at": None, "cache_ttl_seconds": 0}
+    assert data == {
+        "per_type": [],
+        "errors": [],
+        "generated_at": None,
+        "cache_ttl_seconds": 0,
+    }
 
 
 def test_connectedness_endpoint_with_data():
