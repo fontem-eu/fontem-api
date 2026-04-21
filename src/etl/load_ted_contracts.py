@@ -160,10 +160,17 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                 if not contractor:
                     continue
 
-                # Normalize VAT (eforms may return a list in older formats)
+                # eforms-parser returns `cbc:CompanyID` as `legal_id`; TED
+                # publishers (especially French ones) often stuff internal
+                # tenderer references there rather than a real VAT. We only
+                # keep the value when it canonicalises as a valid EU VAT;
+                # everything else (TED notice-ids, SIRENs, malformed strings)
+                # is dropped so it doesn't pollute Company.vat.
                 raw_vat = contractor.legal_id
                 if isinstance(raw_vat, list):
                     raw_vat = raw_vat[0] if raw_vat else None
+                from src.etl.identifiers import canon_vat
+                raw_vat = canon_vat(raw_vat)
 
                 match = matcher.match_company(
                     contractor.name, contractor.country, raw_vat,
