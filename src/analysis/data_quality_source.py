@@ -50,4 +50,9 @@ class DataQualitySource(ABC):
     def get_country_code_consistency(self) -> dict: return {}
     def get_field_completeness(self) -> dict: return {}
     def get_graph_connectedness(self) -> dict:
-        return {"per_type": [], "generated_at": None, "cache_ttl_seconds": 0}
+        return {
+            "per_type": [],
+            "errors": [],
+            "generated_at": None,
+            "cache_ttl_seconds": 0,
+        }
