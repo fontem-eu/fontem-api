@@ -21,8 +21,41 @@ jobs:
       - name: Lint
         run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
 
-  build-deploy:
+  # Pre-build supply-chain gate; see gmr-ci/actions/osv-scan.
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: golden/gmr-ci
+          path: .gmr-ci
+          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+      - name: OSV-Scanner lockfile gate
+        uses: ./.gmr-ci/actions/osv-scan
+
+  # First SBOM for this repo — previously missing from CI.
+  analyze:
     needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: golden/gmr-ci
+          path: .gmr-ci
+          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+      - name: Generate + upload SBOM
+        uses: ./.gmr-ci/actions/sbom-generate
+        with:
+          language: python
+          project-name: edgar-gmr-etl
+          project-version: ${{ github.sha }}
+          dtrack-key: ${{ secrets.DTRACK_API_KEY }}
+
+  build-deploy:
+    needs: [test, security]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
