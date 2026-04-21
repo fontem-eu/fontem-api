@@ -196,3 +196,12 @@ def country_code_consistency(source: FromDishka[DataQualitySource]):
 def field_completeness(source: FromDishka[DataQualitySource]):
     """Per-source field completeness percentages."""
     return source.get_field_completeness()
+
+
+@router.get("/connectedness")
+@inject
+def graph_connectedness(source: FromDishka[DataQualitySource]):
+    """Per-label degree stats + histograms. Cached in the source
+    layer (1h TTL) because the underlying Cypher is a full scan
+    across every entity label."""
+    return source.get_graph_connectedness()
