@@ -2,11 +2,26 @@
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime, timezone
 
 from ...analysis.data_quality_source import DataQualitySource
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
+
+# Labels the connectedness dashboard reports on. Curated rather than
+# `MATCH (n)` so each per-label query uses the label-scan index and
+# the result ordering is deterministic.
+_CONNECTEDNESS_LABELS = (
+    "Company", "Listing", "FinancialYear",
+    "Contract", "Authority", "CPV",
+    "Lobbyist", "LobbyInterest",
+    "SanctionedEntity", "NUTSRegion",
+    "CohesionProject", "Person",
+)
+
+_CONNECTEDNESS_TTL_SECONDS = 3600
 
 
 class GraphDataQualitySource(DataQualitySource):
@@ -14,6 +29,10 @@ class GraphDataQualitySource(DataQualitySource):
 
     def __init__(self, neo4j_client: Neo4jClient) -> None:
         self._neo4j = neo4j_client
+        # Connectedness is a full graph scan across every label we
+        # care about; cache hot for an hour so the dashboard feels
+        # instant while staying fresh enough during active ETL work.
+        self._connectedness_cache: tuple[float, dict] | None = None
 
     def get_graph_stats(self) -> dict:
         """Return node/relationship counts by label."""
@@ -770,4 +789,81 @@ class GraphDataQualitySource(DataQualitySource):
             "sanctioned_entity_count": sanctioned,
             "nuts_region_count": nuts_count,
             "cohesion_project_count": cohesion_count,
+        }
+
+    # ── Connectedness ─────────────────────────────────────────────
+
+    def get_graph_connectedness(self) -> dict:
+        """Per-label degree stats + histograms, cached for 1h.
+
+        Degree is undirected (size((n)--())). Histograms bucket by
+        log-ish ranges so a heavily-connected label (Company with
+        contracts + ownership + sanctions) and a sparse one (Person,
+        which only DIRECTS) both show useful shape.
+        """
+        now = time.monotonic()
+        if (
+            self._connectedness_cache is not None
+            and now - self._connectedness_cache[0] < _CONNECTEDNESS_TTL_SECONDS
+        ):
+            return self._connectedness_cache[1]
+        result = self._compute_connectedness()
+        self._connectedness_cache = (now, result)
+        return result
+
+    def _compute_connectedness(self) -> dict:
+        per_type = []
+        with self._neo4j.session() as session:
+            for label in _CONNECTEDNESS_LABELS:
+                row = session.run(
+                    # Label is whitelisted above; Neo4j doesn't
+                    # support parameterized labels so f-string is
+                    # the canonical approach here.
+                    f"MATCH (n:{label}) "
+                    "WITH size((n)--()) AS degree "
+                    "RETURN count(*) AS count, "
+                    "  sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS isolated, "
+                    "  min(degree) AS min_d, "
+                    "  max(degree) AS max_d, "
+                    "  avg(degree) AS mean_d, "
+                    "  percentileCont(degree, 0.5) AS median_d, "
+                    "  percentileCont(degree, 0.95) AS p95_d, "
+                    "  sum(CASE WHEN degree = 0 THEN 1 ELSE 0 END) AS b_0, "
+                    "  sum(CASE WHEN degree = 1 THEN 1 ELSE 0 END) AS b_1, "
+                    "  sum(CASE WHEN degree >= 2 AND degree <= 5 THEN 1 ELSE 0 END) AS b_2_5, "
+                    "  sum(CASE WHEN degree >= 6 AND degree <= 10 THEN 1 ELSE 0 END) AS b_6_10, "
+                    "  sum(CASE WHEN degree >= 11 AND degree <= 50 THEN 1 ELSE 0 END) AS b_11_50, "
+                    "  sum(CASE WHEN degree >= 51 AND degree <= 100 THEN 1 ELSE 0 END) AS b_51_100, "
+                    "  sum(CASE WHEN degree >= 101 AND degree <= 500 THEN 1 ELSE 0 END) AS b_101_500, "
+                    "  sum(CASE WHEN degree > 500 THEN 1 ELSE 0 END) AS b_500_plus"
+                ).single()
+                count = row["count"]
+                if count == 0:
+                    continue
+                isolated = row["isolated"]
+                per_type.append({
+                    "entity_type": label,
+                    "count": count,
+                    "isolated_count": isolated,
+                    "isolated_pct": round(isolated / count * 100, 1),
+                    "min_degree": row["min_d"],
+                    "max_degree": row["max_d"],
+                    "mean_degree": round(row["mean_d"] or 0.0, 2),
+                    "median_degree": row["median_d"],
+                    "p95_degree": row["p95_d"],
+                    "histogram": [
+                        {"bucket": "0", "count": row["b_0"]},
+                        {"bucket": "1", "count": row["b_1"]},
+                        {"bucket": "2-5", "count": row["b_2_5"]},
+                        {"bucket": "6-10", "count": row["b_6_10"]},
+                        {"bucket": "11-50", "count": row["b_11_50"]},
+                        {"bucket": "51-100", "count": row["b_51_100"]},
+                        {"bucket": "101-500", "count": row["b_101_500"]},
+                        {"bucket": "500+", "count": row["b_500_plus"]},
+                    ],
+                })
+        return {
+            "per_type": per_type,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "cache_ttl_seconds": _CONNECTEDNESS_TTL_SECONDS,
         }

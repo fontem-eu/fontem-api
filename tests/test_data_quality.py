@@ -82,3 +82,64 @@ def test_coverage_endpoint():
     assert data["companies_with_contracts"] == 25
     assert len(data["contracts_by_country"]) == 1
     assert data["contracts_by_country"][0]["country"] == "DEU"
+
+
+def test_connectedness_endpoint_default_shape():
+    """GET /data-quality/connectedness returns the default contract
+    shape when no override is supplied — keeps older mocks usable."""
+    client = make_test_client(data_quality_source=MockDataQualitySource())
+    resp = client.get("/data-quality/connectedness")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == {"per_type": [], "generated_at": None, "cache_ttl_seconds": 0}
+
+
+def test_connectedness_endpoint_with_data():
+    """Custom mock returns populated per_type stats; endpoint passes
+    them through unchanged (no massaging in the router layer)."""
+
+    class ConnectednessMock(MockDataQualitySource):
+        def get_graph_connectedness(self):
+            return {
+                "per_type": [
+                    {
+                        "entity_type": "Company",
+                        "count": 100,
+                        "isolated_count": 40,
+                        "isolated_pct": 40.0,
+                        "min_degree": 0,
+                        "max_degree": 42,
+                        "mean_degree": 3.5,
+                        "median_degree": 2,
+                        "p95_degree": 12,
+                        "histogram": [
+                            {"bucket": "0", "count": 40},
+                            {"bucket": "1", "count": 15},
+                            {"bucket": "2-5", "count": 30},
+                            {"bucket": "6-10", "count": 10},
+                            {"bucket": "11-50", "count": 5},
+                            {"bucket": "51-100", "count": 0},
+                            {"bucket": "101-500", "count": 0},
+                            {"bucket": "500+", "count": 0},
+                        ],
+                    },
+                ],
+                "generated_at": "2026-04-21T12:00:00+00:00",
+                "cache_ttl_seconds": 3600,
+            }
+
+    client = make_test_client(data_quality_source=ConnectednessMock())
+    resp = client.get("/data-quality/connectedness")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cache_ttl_seconds"] == 3600
+    assert len(data["per_type"]) == 1
+    company = data["per_type"][0]
+    assert company["entity_type"] == "Company"
+    assert company["isolated_pct"] == 40.0
+    # Histogram always has 8 buckets, in canonical order — the
+    # frontend relies on this for chart labels.
+    buckets = [b["bucket"] for b in company["histogram"]]
+    assert buckets == ["0", "1", "2-5", "6-10", "11-50", "51-100", "101-500", "500+"]
