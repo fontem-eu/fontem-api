@@ -1,0 +1,14 @@
+# Known findings quarantined here so the gitleaks gate starts
+# catching NEW secrets without refusing to merge anything until each
+# legacy leak is rotated. Every entry below should be removed as its
+# secret is rotated out.
+#
+# Format: <file>:<rule>:<line>
+
+# ── NEO4J_PASSWORD hardcoded in the ETL defaults + infra/neo4j/secret.yaml.
+# MUST rotate: the password is committed in plaintext in at least 3 places
+# across this repo alone. Rotation plan: generate new password, update
+# Vault, flip Neo4j, update the Helm values (gitops), delete these lines.
+infra/neo4j/secret.yaml:generic-api-key:13
+src/etl/load_eu_sanctions.py:generic-api-key:32
+tests/test_ted_integration.py:generic-api-key:236
