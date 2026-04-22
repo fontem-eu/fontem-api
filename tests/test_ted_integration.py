@@ -233,7 +233,13 @@ class TestCompanyMatching:
         """Connect to live Neo4j — skip if unavailable."""
         uri = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
         user = os.environ.get("NEO4J_USER", "neo4j")
-        password = os.environ.get("NEO4J_PASSWORD", "gmr-neo4j-2026")
+        # No default password: this integration test is opt-in, the
+        # password comes from the VSO-managed neo4j-credentials Secret
+        # (or `vault kv get secret/gmr/neo4j` for local runs). Missing
+        # env → skip, same as "Neo4j not available".
+        password = os.environ.get("NEO4J_PASSWORD")
+        if password is None:
+            pytest.skip("NEO4J_PASSWORD not set")
         try:
             from neo4j import GraphDatabase
             driver = GraphDatabase.driver(uri, auth=(user, password))

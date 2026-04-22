@@ -5,10 +5,8 @@
 #
 # Format: <file>:<rule>:<line>
 
-# ── NEO4J_PASSWORD hardcoded in the ETL defaults + infra/neo4j/secret.yaml.
-# MUST rotate: the password is committed in plaintext in at least 3 places
-# across this repo alone. Rotation plan: generate new password, update
-# Vault, flip Neo4j, update the Helm values (gitops), delete these lines.
-infra/neo4j/secret.yaml:generic-api-key:13
+# ── EC sanctions public-URL static token. Not actually a secret —
+# the European Commission's public sanctions feed URL includes a
+# stable "token=..." query parameter that's the same for every
+# consumer. Keep in ignore as a documented false positive.
 src/etl/load_eu_sanctions.py:generic-api-key:32
-tests/test_ted_integration.py:generic-api-key:236
