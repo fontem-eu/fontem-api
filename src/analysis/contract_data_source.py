@@ -14,18 +14,26 @@ class ContractDataSource(ABC):
     @abstractmethod
     def get_company_contracts(
         self, gmr_id: str, years: int = 5, limit: int = 50,
+        lang: str | None = None,
     ) -> dict:
-        """Return contracts awarded to a company."""
+        """Return contracts awarded to a company. `lang` picks the
+        translated Authority name (`name_<lang>`) with a fallback to the
+        original `name` when the translation is missing."""
 
     @abstractmethod
     def get_authority_contracts(
         self, authority_id: str, years: int = 5, limit: int = 50,
+        lang: str | None = None,
     ) -> dict:
-        """Return contracts issued by an authority."""
+        """Return contracts issued by an authority. `lang` → translated
+        name coalesced with the stored original."""
 
     @abstractmethod
-    def get_contract_detail(self, notice_id: str) -> dict | None:
-        """Return full detail for a single contract."""
+    def get_contract_detail(
+        self, notice_id: str, lang: str | None = None,
+    ) -> dict | None:
+        """Return full detail for a single contract. `lang` → translated
+        Authority name coalesced with the stored original."""
 
     @abstractmethod
     def get_sector_summary(
