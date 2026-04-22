@@ -43,7 +43,11 @@ jobs:
   build-deploy:
     needs: [test, security]
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # ci-python runner bundles python3 + pip + node + docker CLI. ubuntu-latest
+    # resolves to ci-node which has no pip, so `sbom-generate language: python`
+    # died with `pip: command not found` on every main build. Cosign still
+    # has to be installed below — neither image ships it.
+    runs-on: python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -52,9 +56,8 @@ jobs:
           path: .gmr-ci
           token: ${{ secrets.GMR_CI_READ_TOKEN }}
 
-      - name: Setup Docker + Cosign
+      - name: Setup Cosign
         run: |
-          curl -fsSL https://nexus.void42.internal/repository/docker-releases/linux/static/stable/x86_64/docker-27.5.1.tgz | tar xz --strip-components=1 -C /usr/local/bin docker/docker
           curl -sL https://nexus.void42.internal/repository/github-releases/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 -o /usr/local/bin/cosign
           chmod +x /usr/local/bin/cosign
 
