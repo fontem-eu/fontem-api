@@ -40,16 +40,6 @@ analyze: test
 		'-Dsonar.coverage.exclusions=src/etl/**/*'
 	@echo "Dashboard: $(SONAR_URL)/dashboard?id=$(PROJECT)"
 
-# ── Infra ────────────────────────────────────────────────────
-neo4j:
-	kubectl apply -f infra/neo4j/secret.yaml
-	kubectl apply -f infra/neo4j/pvc.yaml
-	kubectl apply -f infra/neo4j/deployment.yaml
-	kubectl apply -f infra/neo4j/service.yaml
-	@echo "Waiting for Neo4j to be ready..."
-	kubectl -n gmr rollout status deployment/neo4j --timeout=120s
-	@echo "Neo4j is ready."
-
 build:
 	docker pull python:3.12-slim
 	docker build -t contribute.void42.internal/golden/gmr-api:$(shell git rev-parse --short HEAD) .
@@ -99,7 +89,7 @@ mutation:
 	rm -rf "$$MUTDIR" ; \
 	exit $$STATUS
 
-.PHONY: all test analyze mutation neo4j build release deploy security
+.PHONY: all test analyze mutation build release deploy security
 
 DTRACK_URL  ?= http://dependency-track.dependency-track.svc.cluster.local:8080
 DTRACK_KEY  ?= $(shell cat /config/.dtrack-api-key 2>/dev/null)
