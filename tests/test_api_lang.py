@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.api.lang import EU_LANGS, authority_name_expr, safe_lang
+from src.api.lang import (
+    EU_LANGS, authority_name_expr, contract_title_expr, safe_lang,
+)
 
 
 class TestSafeLang:
@@ -57,6 +59,18 @@ class TestAuthorityNameExpr:
 
     def test_empty_string_lang_falls_back(self):
         assert authority_name_expr("a", "") == "a.name"
+
+
+class TestContractTitleExpr:
+    def test_returns_plain_title_when_no_lang(self):
+        assert contract_title_expr("ct", None) == "ct.title"
+
+    def test_returns_coalesce_for_valid_lang(self):
+        assert contract_title_expr("ct", "de") == "coalesce(ct.title_de, ct.title)"
+        assert contract_title_expr("x", "pl") == "coalesce(x.title_pl, x.title)"
+
+    def test_empty_string_lang_falls_back(self):
+        assert contract_title_expr("ct", "") == "ct.title"
 
 
 class TestIntegrationContract:

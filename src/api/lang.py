@@ -61,3 +61,17 @@ def authority_name_expr(alias: str, lang: str | None) -> str:
         return f"{alias}.name"
     # lang is from the whitelist; safe to inline.
     return f"coalesce({alias}.name_{lang}, {alias}.name)"
+
+
+def contract_title_expr(alias: str, lang: str | None) -> str:
+    """Cypher fragment selecting a Contract's title in the requested
+    language with a fallback to the stored original.
+
+    Mirrors ``authority_name_expr`` — same safety contract: ``lang`` must
+    have passed ``safe_lang`` (whitelisted two-letter code or None).
+    Contract titles are written by gmr-consolidator's
+    TranslationEnrichmentContract rule as ``title_<lang>``.
+    """
+    if not lang:
+        return f"{alias}.title"
+    return f"coalesce({alias}.title_{lang}, {alias}.title)"
