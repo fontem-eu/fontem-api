@@ -37,19 +37,29 @@ class MergeDecision(BaseModel):
 @inject
 def list_candidates(
     limit: int = Query(50, ge=1, le=200),
+    lang: str | None = Query(None),
     *,
     neo4j: FromDishka[Neo4jClient],
     source: FromDishka[ContractDataSource],
 ):
-    """List unreviewed SAME_AS merge candidates."""
-    with neo4j.session() as session:  
+    """List unreviewed SAME_AS merge candidates.
+
+    `lang` coalesces the `name` field with `name_<lang>` when the node
+    carries a translation (Authority nodes only — Company nodes never
+    have translations, so coalesce falls through to `dup.name` harmlessly).
+    """
+    from src.api.lang import authority_name_expr, safe_lang  # pylint: disable=import-outside-toplevel
+    effective = safe_lang(lang)
+    dup_name_expr = authority_name_expr("dup", effective)
+    can_name_expr = authority_name_expr("canonical", effective)
+    with neo4j.session() as session:
         rows = session.run(
             "MATCH (dup)-[r:SAME_AS {reviewed: false}]->(canonical) "
-            "RETURN dup.gmr_id AS dup_id, dup.name AS dup_name, "
+            f"RETURN dup.gmr_id AS dup_id, {dup_name_expr} AS dup_name, "
             "  dup.country AS dup_country, dup.lei AS dup_lei, "
             "  dup.vat AS dup_vat, "
             "  canonical.gmr_id AS canonical_id, "
-            "  canonical.name AS canonical_name, "
+            f"  {can_name_expr} AS canonical_name, "
             "  canonical.country AS canonical_country, "
             "  canonical.lei AS canonical_lei, "
             "  canonical.vat AS canonical_vat, "
@@ -69,18 +79,24 @@ def find_similar(
     entity_type: str = Query("company"),
     country: str | None = Query(None),
     limit: int = Query(10, ge=1, le=50),
+    lang: str | None = Query(None),
     *,
     neo4j: FromDishka[Neo4jClient],
     source: FromDishka[ContractDataSource],
 ):
     """Find similar entities (for manual matching / operator review)."""
-    with neo4j.session() as session:  
+    # Local import: the lang module is light but only needed on the
+    # Authority branch — keep the Company branch dependency-free.
+    from src.api.lang import authority_name_expr, safe_lang  # pylint: disable=import-outside-toplevel
+    with neo4j.session() as session:
         if entity_type == "authority":
+            auth_name = authority_name_expr("a", safe_lang(lang))
             rows = session.run(
                 "MATCH (a:Authority) "
                 "WHERE toLower(a.name) CONTAINS toLower($name) "
                 + ("AND a.country = $country " if country else "")
-                + "RETURN a.authority_id AS id, a.name AS name, "
+                + "RETURN a.authority_id AS id, "
+                f"  {auth_name} AS name, "
                 "  a.country AS country "
                 "LIMIT $limit",
                 name=name, country=country, limit=limit,

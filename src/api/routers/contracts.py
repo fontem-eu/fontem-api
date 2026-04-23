@@ -10,6 +10,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from src.analysis.person_data_source import PersonDataSource
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.contract_data_source import ContractDataSource
+from src.api.lang import authority_name_expr, safe_lang
 from src.data.graph.neo4j_client import Neo4jClient
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,24 +25,32 @@ def company_contracts(
     gmr_id: str,
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
+    lang: str | None = Query(None),
     *,
     source: FromDishka[ContractDataSource],
 ):
-    """Contracts awarded to a company."""
-    return source.get_company_contracts(gmr_id, years=years, limit=limit)
+    """Contracts awarded to a company. `lang` (ISO-639-1) swaps in the
+    translated Authority name when available, falls back to the stored
+    original."""
+    return source.get_company_contracts(
+        gmr_id, years=years, limit=limit, lang=safe_lang(lang),
+    )
 
 
 @router.get("/companies/{gmr_id}")
 @inject
 def company_profile(
     gmr_id: str,
+    lang: str | None = Query(None),
     *,
     source: FromDishka[ContractDataSource],
     person_source: FromDishka[PersonDataSource],
     neo4j: FromDishka[Neo4jClient],
 ):
     """Company profile with procurement summary, directors, and group."""
-    contracts = source.get_company_contracts(gmr_id, years=5, limit=5)
+    contracts = source.get_company_contracts(
+        gmr_id, years=5, limit=5, lang=safe_lang(lang),
+    )
     directors = person_source.get_company_directors(gmr_id)
 
     # Corporate group (via SUBSIDIARY_OF)
@@ -99,12 +108,13 @@ def authority_contracts(
     authority_id: str,
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
+    lang: str | None = Query(None),
     *,
     source: FromDishka[ContractDataSource],
 ):
     """Contracts issued by an authority."""
     return source.get_authority_contracts(
-        authority_id, years=years, limit=limit,
+        authority_id, years=years, limit=limit, lang=safe_lang(lang),
     )
 
 
@@ -112,11 +122,13 @@ def authority_contracts(
 @inject
 def authority_profile(
     authority_id: str,
+    lang: str | None = Query(None),
+    *,
     source: FromDishka[ContractDataSource],
 ):
     """Authority profile with spending summary."""
     contracts = source.get_authority_contracts(
-        authority_id, years=5, limit=5,
+        authority_id, years=5, limit=5, lang=safe_lang(lang),
     )
     return {
         "authority_id": authority_id,
@@ -144,10 +156,12 @@ def sector_summary(
 @inject
 def contract_detail(
     notice_id: str,
+    lang: str | None = Query(None),
+    *,
     source: FromDishka[ContractDataSource],
 ):
     """Full detail for a single contract."""
-    result = source.get_contract_detail(notice_id)
+    result = source.get_contract_detail(notice_id, lang=safe_lang(lang))
     if result is None:
         raise HTTPException(status_code=404, detail="Contract not found")
     return result
@@ -158,6 +172,7 @@ def contract_detail(
 def unified_search(  # pylint: disable=too-many-locals
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=50),
+    lang: str | None = Query(None),
     *,
     contract_source: FromDishka[ContractDataSource],
     neo4j: FromDishka[Neo4jClient],
@@ -214,12 +229,17 @@ def unified_search(  # pylint: disable=too-many-locals
                 else "edgar"
             )
 
-        # 3. Authorities
+        # 3. Authorities — name coalesces with translation if lang given.
+        # Search still matches on the original `a.name` field so results
+        # surface regardless of which language the user ultimately views
+        # them in (e.g. typing "ministero" still finds the Italian node
+        # even when the viewer's locale is German).
+        auth_name_expr = authority_name_expr("a", safe_lang(lang))
         auth_rows = session.run(
             "MATCH (a:Authority) "
             "WHERE toLower(a.name) CONTAINS toLower($q) "
             "RETURN a.authority_id AS authority_id, "
-            "  a.name AS name, a.country AS country "
+            f"  {auth_name_expr} AS name, a.country AS country "
             "LIMIT $limit",
             q=q, limit=limit,
         ).data()

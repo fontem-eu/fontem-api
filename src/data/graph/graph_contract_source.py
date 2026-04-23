@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from ...analysis.contract_data_source import ContractDataSource
+from ...api.lang import authority_name_expr
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,10 @@ class GraphContractSource(ContractDataSource):
 
     def get_company_contracts(
         self, gmr_id: str, years: int = 5, limit: int = 50,
+        lang: str | None = None,
     ) -> dict:
         """Return contracts awarded to a company."""
+        auth_name = authority_name_expr("a", lang)
         with self._neo4j.session() as session:
             company = session.run(
                 "MATCH (c:Company {gmr_id: $gid}) "
@@ -42,7 +45,7 @@ class GraphContractSource(ContractDataSource):
                 "  ct.award_date AS award_date, ct.cpv_main AS cpv, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
-                "  a.name AS authority, a.country AS authority_country, "
+                f"  {auth_name} AS authority, a.country AS authority_country, "
                 "  cpv.description AS cpv_description "
                 "ORDER BY ct.award_date DESC LIMIT $limit",
                 gid=gmr_id, limit=limit,
@@ -83,12 +86,14 @@ class GraphContractSource(ContractDataSource):
 
     def get_authority_contracts(
         self, authority_id: str, years: int = 5, limit: int = 50,
+        lang: str | None = None,
     ) -> dict:
         """Return contracts issued by an authority."""
+        auth_name = authority_name_expr("a", lang)
         with self._neo4j.session() as session:
             authority = session.run(
                 "MATCH (a:Authority {authority_id: $aid}) "
-                "RETURN a.name AS name, a.country AS country",
+                f"RETURN {auth_name} AS name, a.country AS country",
                 aid=authority_id,
             ).single()
             if not authority:
@@ -144,7 +149,9 @@ class GraphContractSource(ContractDataSource):
             "contracts": contracts,
         }
 
-    def get_contract_detail(self, notice_id: str) -> dict | None:
+    def get_contract_detail(
+        self, notice_id: str, lang: str | None = None,
+    ) -> dict | None:
         """Return full detail for a single contract."""
         with self._neo4j.session() as session:
             row = session.run(
@@ -157,6 +164,13 @@ class GraphContractSource(ContractDataSource):
         if not row:
             return None
         ct = row["ct"]
+        auth_node = row["a"]
+        # Full-node projection — coalesce in Python. `lang` is already
+        # whitelisted by the handler via safe_lang(), so the dynamic key
+        # lookup is safe.
+        auth_name = (
+            auth_node.get(f"name_{lang}") if lang else None
+        ) or auth_node["name"]
         return {
             "ted_notice_id": ct["ted_notice_id"],
             "ted_url": ct.get("ted_url"),
@@ -167,8 +181,8 @@ class GraphContractSource(ContractDataSource):
             "procedure_type": ct.get("procedure_type"),
             "award_date": ct.get("award_date"),
             "authority": {
-                "name": row["a"]["name"],
-                "country": row["a"].get("country"),
+                "name": auth_name,
+                "country": auth_node.get("country"),
             },
             "contractor": {
                 "gmr_id": row["c"]["gmr_id"],
