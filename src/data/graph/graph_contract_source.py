@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from ...analysis.contract_data_source import ContractDataSource
-from ...api.lang import authority_name_expr
+from ...api.lang import authority_name_expr, contract_title_expr
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ class GraphContractSource(ContractDataSource):
     ) -> dict:
         """Return contracts awarded to a company."""
         auth_name = authority_name_expr("a", lang)
+        title_expr = contract_title_expr("ct", lang)
         with self._neo4j.session() as session:
             company = session.run(
                 "MATCH (c:Company {gmr_id: $gid}) "
@@ -41,7 +42,7 @@ class GraphContractSource(ContractDataSource):
                 "-[:AWARDED_TO]->(c:Company {gmr_id: $gid}) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN ct.ted_notice_id AS notice_id, "
-                "  ct.title AS title, ct.value_eur AS value_eur, "
+                f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.award_date AS award_date, ct.cpv_main AS cpv, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
@@ -90,6 +91,7 @@ class GraphContractSource(ContractDataSource):
     ) -> dict:
         """Return contracts issued by an authority."""
         auth_name = authority_name_expr("a", lang)
+        title_expr = contract_title_expr("ct", lang)
         with self._neo4j.session() as session:
             authority = session.run(
                 "MATCH (a:Authority {authority_id: $aid}) "
@@ -104,7 +106,7 @@ class GraphContractSource(ContractDataSource):
                 "-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN ct.ted_notice_id AS notice_id, "
-                "  ct.title AS title, ct.value_eur AS value_eur, "
+                f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.award_date AS award_date, ct.cpv_main AS cpv, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
@@ -171,10 +173,13 @@ class GraphContractSource(ContractDataSource):
         auth_name = (
             auth_node.get(f"name_{lang}") if lang else None
         ) or auth_node["name"]
+        title = (
+            ct.get(f"title_{lang}") if lang else None
+        ) or ct.get("title")
         return {
             "ted_notice_id": ct["ted_notice_id"],
             "ted_url": ct.get("ted_url"),
-            "title": ct.get("title"),
+            "title": title,
             "description": ct.get("description"),
             "value_eur": ct.get("value_eur"),
             "cpv_main": ct.get("cpv_main"),
