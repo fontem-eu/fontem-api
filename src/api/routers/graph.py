@@ -75,11 +75,31 @@ def _node_id(node) -> str:
     )
 
 
+def _json_safe(value):
+    """Coerce a Neo4j property value into something FastAPI can JSON-
+    serialize. The driver returns its own types for temporals (neo4j.
+    time.DateTime, Date, Time, Duration) and those break the default
+    encoder — ISO-string them. Everything else passes through.
+
+    This started biting after the authority multilingual backfill
+    began writing `multilingual_updated_at: datetime()` on every
+    enriched Authority node, which the graph endpoint then tried to
+    dump into a response verbatim.
+    """
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    return value
+
+
 def _clean_props(props: dict) -> dict:
-    """Remove None values and internal IDs from properties."""
+    """Remove None values and internal IDs; JSON-safe the rest."""
     skip = {"gmr_id", "authority_id", "person_id", "ted_notice_id", "tr_id"}
     return {
-        k: v for k, v in props.items()
+        k: _json_safe(v) for k, v in props.items()
         if v is not None and k not in skip
     }
 
@@ -104,7 +124,9 @@ def _edge_to_graph_edge(rel) -> GraphEdge:
         source=_node_id(rel.start_node),
         target=_node_id(rel.end_node),
         type=rel.type,
-        properties={k: v for k, v in props.items() if v is not None},
+        properties={
+            k: _json_safe(v) for k, v in props.items() if v is not None
+        },
     )
 
 
