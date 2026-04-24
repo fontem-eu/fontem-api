@@ -56,11 +56,6 @@ jobs:
           path: .gmr-ci
           token: ${{ secrets.GMR_CI_READ_TOKEN }}
 
-      - name: Setup Cosign
-        run: |
-          curl -sL https://nexus.void42.internal/repository/github-releases/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 -o /usr/local/bin/cosign
-          chmod +x /usr/local/bin/cosign
-
       - id: sbom
         name: Generate + upload SBOM
         uses: ./.gmr-ci/actions/sbom-generate
@@ -80,15 +75,9 @@ jobs:
           registry-password: ${{ secrets.REGISTRY_PASSWORD }}
           sbom-path: ${{ steps.sbom.outputs.sbom-path }}
 
-      - name: Deploy to staging
-        env:
-          TAG: ${{ steps.image.outputs.tag }}
-        run: |
-          git clone --depth=1 https://oauth2:${{ secrets.REGISTRY_PASSWORD }}@contribute.void42.internal/golden/gitops.git /tmp/gitops
-          cd /tmp/gitops
-          sed -i "s/version: \".*\"/version: \"$TAG\"/" staging/gmr-api.yaml
-          git config user.name "GMR CI"
-          git config user.email "ci@void42.internal"
-          git add staging/gmr-api.yaml
-          git diff --cached --quiet || git commit -m "ci: deploy gmr-api $TAG to staging"
-          git push origin main
+      - uses: ./.gmr-ci/actions/gitops-bump
+        with:
+          service: gmr-api
+          tag: ${{ steps.image.outputs.tag }}
+          env: staging
+          registry-password: ${{ secrets.REGISTRY_PASSWORD }}
