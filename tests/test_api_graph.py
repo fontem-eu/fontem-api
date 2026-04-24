@@ -10,6 +10,7 @@ from __future__ import annotations
 
 # pylint: disable=missing-function-docstring,redefined-outer-name
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
@@ -655,3 +656,70 @@ def test_detail_mode_excludes_summary_rels():
     resp = client.get("/graph/comp-aaa?depth=1&summary=false")
     cleanup_dishka()
     assert resp.status_code == 200
+
+
+# ── Regression: Neo4j temporal types must be ISO-serialized ────
+# The authority multilingual backfill writes `multilingual_updated_at:
+# datetime()` on every enriched Authority. Before the fix, the graph
+# endpoint returned those nodes verbatim — FastAPI choked on the
+# neo4j.time.DateTime instance and 500'd. The prod smoke suite caught
+# this via BROWSE-08 on Siemens AG (who is linked to dozens of
+# enriched authorities). Duck-typed: anything with isoformat() works,
+# covering both neo4j.time.DateTime and stdlib datetime.
+
+def test_node_with_datetime_property_serializes_as_iso():
+    """A node whose properties contain a datetime-like value must be
+    returned as an ISO string, not a raw object (which would 500)."""
+    auth_with_dt = FakeNode(
+        labels=["Authority"],
+        props={
+            "authority_id": "auth-dt",
+            "name": "Ville de Paris",
+            "country": "FRA",
+            # This is the property that used to break the response.
+            "multilingual_updated_at": datetime(
+                2026, 4, 22, 12, 0, 0, tzinfo=timezone.utc,
+            ),
+        },
+        element_id="auth-dt-elem",
+    )
+    center = FakeNode(
+        labels=["Company"],
+        props={"gmr_id": "comp-with-auth", "name": "Acme"},
+        element_id="acme-elem",
+    )
+    # Direct edge from center to the Authority with a DateTime prop.
+    rel = FakeRelationship(
+        start=auth_with_dt, end=center, rel_type="CLIENT_OF",
+        props={"detected_at": datetime(2026, 1, 1, tzinfo=timezone.utc)},
+    )
+    path = FakePath([center, auth_with_dt], [rel])
+
+    def handler(query, **kwargs):
+        if "labels(n)[0]" in query:
+            return FakeResult({"label": "Company"})
+        if "RETURN n LIMIT 1" in query:
+            return FakeResult({"n": center})
+        if "RETURN path" in query:
+            return FakeResult([{"path": path}])
+        return FakeResult(None)
+
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    resp = client.get("/graph/comp-with-auth?depth=1")
+    cleanup_dishka()
+    assert resp.status_code == 200, resp.text
+
+    body = resp.json()
+    # Authority node made it into the response
+    auth_nodes = [n for n in body["nodes"] if n["type"] == "Authority"]
+    assert len(auth_nodes) == 1
+    dt_value = auth_nodes[0]["properties"]["multilingual_updated_at"]
+    # ISO-8601 string, not a dict / object / timestamp integer
+    assert isinstance(dt_value, str)
+    assert dt_value.startswith("2026-04-22T12:00:00")
+
+    # Edge properties get the same treatment
+    assert len(body["edges"]) == 1
+    edge_dt = body["edges"][0]["properties"]["detected_at"]
+    assert isinstance(edge_dt, str)
+    assert edge_dt.startswith("2026-01-01T")
