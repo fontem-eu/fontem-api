@@ -1,6 +1,9 @@
 # edgar-gmr-etl conventions
 
-See also: [/config/repos/CLAUDE.md](/config/repos/CLAUDE.md) for workspace-wide rules.
+See also:
+- [/config/repos/CLAUDE.md](/config/repos/CLAUDE.md) — workspace-wide rules
+- BookStack Developer Guide — https://docs.void42.internal/books/developer-guide
+  Platform architecture, SSO, CI/CD, deploy runbook, debug playbook, secrets, PR workflow.
 
 ## Full gate (this repo)
 ```
