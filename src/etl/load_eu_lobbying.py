@@ -54,20 +54,44 @@ SET l.name            = row.name,
     l.last_updated    = row.last_updated
 """
 
-# Match lobbyist to existing Company using full-text index (fuzzy).
-# Requires: CREATE FULLTEXT INDEX company_name_ft IF NOT EXISTS FOR (c:Company) ON EACH [c.name]
-# Sanitize name: strip Lucene special chars that break full-text queries.
+# Minimum name length for fuzzy lobbyist→company matching. Below this,
+# topical name overlap dominates the signal — see the false positives
+# we observed: Federación Española del Vino → Federación Española de
+# Triatlón (both 6+ chars but the *prefix* match is what fooled the
+# old score>2.0 floor; the higher floor below catches that).
+MIN_NAME_LEN = 6
+
+# Match lobbyist → company using the full-text index. Hardened guards:
+# 1. Both sides must declare a country, equal after ISO normalisation
+#    (no NULL-bypass — the previous OR-chain disabled the guard whenever
+#    either side was NULL, and l.country_iso was NULL on every existing
+#    lobbyist node).
+# 2. Score floor lifted 2.0 → 4.0 (single-token overlap was ~2.0).
+# 3. REPRESENTS edges carry reviewed:false so the manual-review UI can
+#    stage them. NEVER auto-confident — every match here is a candidate.
+# 4. Loader is idempotent: ON CREATE writes the metadata, ON MATCH
+#    keeps a human's reviewed=true sticky.
 MATCH_COMPANY = """
 UNWIND $batch AS row
 MATCH (l:Lobbyist {tr_id: row.tr_id})
-WITH l
-WHERE l.name IS NOT NULL AND size(l.name) > 3
-WITH l, reduce(s = l.name, c IN ['+','-','&&','||','!','(',')','{','}','[',']','^','"','~','*','?',':','\\\\','/'] | replace(s, c, ' ')) AS clean_name
-WHERE size(trim(clean_name)) > 3
-CALL db.index.fulltext.queryNodes('company_name_ft', clean_name) YIELD node AS c, score
-WHERE score > 2.0 AND (c.country IS NULL OR l.country_iso IS NULL OR c.country = l.country_iso)
-WITH l, c ORDER BY score DESC LIMIT 1
-MERGE (l)-[:REPRESENTS]->(c)
+WHERE l.name IS NOT NULL
+  AND size(l.name) >= $min_name_len
+  AND coalesce(l.country_iso, '') <> ''
+WITH l,
+     reduce(s = l.name, c IN ['+','-','&&','||','!','(',')','{','}',
+            '[',']','^','"','~','*','?',':','\\\\','/']
+            | replace(s, c, ' ')) AS clean_name
+WHERE size(trim(clean_name)) >= $min_name_len
+CALL db.index.fulltext.queryNodes('company_name_ft', clean_name)
+     YIELD node AS c, score
+WHERE score > 4.0
+  AND coalesce(c.country, '') = l.country_iso
+WITH l, c, score ORDER BY score DESC LIMIT 1
+MERGE (l)-[r:REPRESENTS]->(c)
+ON CREATE SET r.confidence = round(score * 1000) / 1000.0,
+              r.method = 'fulltext_lobbyist',
+              r.detected_at = datetime(),
+              r.reviewed = false
 """
 
 # Ensure full-text index exists
@@ -244,7 +268,9 @@ def load_eu_lobbying(neo4j_uri: str, neo4j_user: str, neo4j_password: str) -> No
         matched = 0
         for i in range(0, len(entities), BATCH_SIZE):
             batch = entities[i : i + BATCH_SIZE]
-            result = session.run(MATCH_COMPANY, batch=batch)
+            result = session.run(
+                MATCH_COMPANY, batch=batch, min_name_len=MIN_NAME_LEN,
+            )
             summary = result.consume()
             matched += summary.counters.relationships_created
             if (i + BATCH_SIZE) % 2000 < BATCH_SIZE:

@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 import time
 
 import httpx
@@ -33,41 +32,40 @@ CDP_DATASET_ID = os.environ.get("CDP_DATASET_ID", "maxh-kwc2")
 
 BATCH_SIZE = 500
 
+# Minimum company-name length for fuzzy CDP matching. CDP rows arrive
+# with the legal organisation name, which is rarely shorter than this;
+# anything below the floor is suspect.
+MIN_NAME_LEN = 6
+
+# Exact match path: same name, same country. Safe — the only reason to
+# guard further is if CDP ever ships rows with empty country, which
+# would otherwise cross-pollute properties between same-named entities
+# in different jurisdictions.
 UPDATE_COMPANY_EXACT = """
 UNWIND $batch AS row
 MATCH (c:Company)
-WHERE c.name = row.company_name AND c.country = row.country
+WHERE c.name = row.company_name
+  AND c.country = row.country
+  AND coalesce(row.country, '') <> ''
 SET c.cdp_score        = row.cdp_score,
     c.scope1_emissions = row.scope1_emissions,
     c.scope2_emissions = row.scope2_emissions,
     c.reporting_year   = row.reporting_year
 """
 
-MATCH_COMPANY_FUZZY = """
-UNWIND $batch AS row
-WITH row
-WHERE row.company_name IS NOT NULL AND size(row.company_name) > 3
-WITH row,
-     reduce(n = row.company_name, c IN ['+','-','&&','||','!','(',')','{','}',
-            '[',']','^','"','~','*','?',':','\\\\','/']
-            | replace(n, c, ' ')) AS clean_name
-WHERE size(trim(clean_name)) > 3
-CALL db.index.fulltext.queryNodes('company_name_ft', clean_name)
-     YIELD node AS c, score
-WHERE score > 2.0
-  AND (row.country IS NULL OR c.country IS NULL OR c.country = row.country)
-WITH c, row, score ORDER BY score DESC LIMIT 1
-SET c.cdp_score        = row.cdp_score,
-    c.scope1_emissions = row.scope1_emissions,
-    c.scope2_emissions = row.scope2_emissions,
-    c.reporting_year   = row.reporting_year
-"""
-
-CREATE_FT_INDEX = """
-CREATE FULLTEXT INDEX company_name_ft IF NOT EXISTS
-FOR (c:Company) ON EACH [c.name]
-"""
-
+# Fuzzy path REMOVED. Previous version SET cdp_score / emissions on the
+# top-scoring candidate from a name fulltext index with score>2.0 and
+# a NULL-bypassing country guard — same shape of bug as the sanctions
+# matcher. There's no value-side recovery for "wrong Company has
+# someone else's CO2 number" since the data is just SET on the node;
+# we can't review-queue a property mutation.
+#
+# When the central /resolve service lands on gmr-consolidator, this
+# loader migrates to: POST /resolve with the CDP organisation row;
+# only SET properties on a confident match (LEI tier or name+country
+# tier). Until then, exact name+country is the only path. CDP rows
+# without a clean Company match are skipped — silently miss > silently
+# corrupt.
 
 def fetch_cdp_data(year, limit):
     """Query CDP SODA API for climate scores."""
@@ -121,36 +119,34 @@ def fetch_cdp_data(year, limit):
 
 
 def load_into_neo4j(driver, records):
-    """SET CDP properties on matching Company nodes."""
+    """SET CDP properties on Company nodes that match by exact name+country.
+
+    Fuzzy matching used to live here but was removed — see the
+    MATCH_COMPANY_FUZZY comment block above. Migration to /resolve is
+    tracked in fix/lobbying-cdp-match-guards.
+    """
     exact_updated = 0
-    fuzzy_updated = 0
+    skipped = 0
     batch = []
     t0 = time.time()
 
     with driver.session() as session:
-        session.run(CREATE_FT_INDEX)
-        logger.info("Full-text index ensured")
-
         for rec in records:
             batch.append(rec)
             if len(batch) >= BATCH_SIZE:
                 result = session.run(UPDATE_COMPANY_EXACT, batch=batch)
                 exact_updated += result.consume().counters.properties_set // 4
-                result = session.run(MATCH_COMPANY_FUZZY, batch=batch)
-                fuzzy_updated += result.consume().counters.properties_set // 4
+                skipped += len(batch) - result.consume().counters.properties_set // 4
                 batch = []
 
         if batch:
             result = session.run(UPDATE_COMPANY_EXACT, batch=batch)
             exact_updated += result.consume().counters.properties_set // 4
-            result = session.run(MATCH_COMPANY_FUZZY, batch=batch)
-            fuzzy_updated += result.consume().counters.properties_set // 4
 
     elapsed = time.time() - t0
     return {
         "total": len(records),
         "exact_updated": exact_updated,
-        "fuzzy_updated": fuzzy_updated,
         "elapsed_s": round(elapsed, 1),
     }
 
@@ -201,10 +197,10 @@ def main(argv=None):
         driver.close()
 
     logger.info(
-        "Done: %d CDP records, %d exact matches, %d fuzzy matches in %.1fs",
+        "Done: %d CDP records, %d exact matches in %.1fs "
+        "(fuzzy path removed — migrate to /resolve)",
         summary["total"],
         summary["exact_updated"],
-        summary["fuzzy_updated"],
         summary["elapsed_s"],
     )
 
