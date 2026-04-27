@@ -63,11 +63,20 @@ def list_datasets() -> list[dict[str, Any]]:
 
 
 @router.get("/series")
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 def fetch_series(
     dataset: str = Query(..., description="Dataset code, e.g. nama_10r_3gdp"),
-    geo: list[str] = Query(
-        ..., min_length=1,
-        description="One or more NUTS codes; matches geo_code exactly",
+    geo: list[str] | None = Query(
+        None,
+        description="One or more NUTS codes; matches geo_code exactly. "
+                    "Mutually exclusive with `nuts_level` — supply one or "
+                    "the other.",
+    ),
+    nuts_level: int | None = Query(
+        None, ge=0, le=3,
+        description="Restrict to all geo codes at this NUTS level (0..3). "
+                    "Used by the Atlas choropleth which fetches a whole "
+                    "level at once instead of enumerating codes.",
     ),
     start: int | None = Query(
         None, description="Inclusive start year (e.g. 2010)",
@@ -80,9 +89,22 @@ def fetch_series(
         description='JSONB filter — e.g. {"sex":"T","age":"Y15-74"}',
     ),
 ) -> dict[str, Any]:
+    """Time-series rows for one dataset, filtered by geo or NUTS level."""
+    if not geo and nuts_level is None:
+        raise HTTPException(
+            status_code=400,
+            detail="must supply either `geo` or `nuts_level`",
+        )
     db = _db()
-    where: list[str] = ["dataset_code = %s", "geo_code = ANY(%s)"]
-    params: list[Any] = [dataset, geo]
+    where: list[str] = ["dataset_code = %s"]
+    params: list[Any] = [dataset]
+    if geo:
+        where.append("geo_code = ANY(%s)")
+        params.append(geo)
+    if nuts_level is not None:
+        # NUTS code length encodes level: country=2, NUTS-1=3, NUTS-2=4, NUTS-3=5.
+        where.append("char_length(geo_code) = %s")
+        params.append(nuts_level + 2)
     if start is not None:
         where.append("time >= make_date(%s, 1, 1)")
         params.append(start)
@@ -124,6 +146,7 @@ def fetch_series(
     return {
         "dataset": dataset,
         "geo": geo,
+        "nuts_level": nuts_level,
         "start": start,
         "end": end,
         "dimensions_filter": dimensions,
