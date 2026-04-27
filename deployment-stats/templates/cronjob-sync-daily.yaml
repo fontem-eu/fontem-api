@@ -31,7 +31,7 @@ spec:
             - name: regcred
           containers:
             - name: sync
-              image: {{ .Values.cronjobs.image | required ".Values.cronjobs.image is required" }}
+              image: "{{ .Values.cronjobs.imageRepository }}:{{ .Values.cronjobs.imageTag | required ".Values.cronjobs.imageTag is required" }}"
               env:
                 - name: STATS_DATABASE_URL
                   value: "postgresql+asyncpg://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@fontem-stats-postgres:5432/{{ .Values.database.name }}"

@@ -70,13 +70,12 @@ service:
 # empty and the cronjobs run without pushing — graceful degrade.
 kumaSecretName: fontem-stats-kuma
 
-# CronJob image must already include the src/stats_etl/ package — the
-# same image gmr-api uses, since both ship from this repo. Override per
-# env in the gitops/<env>/fontem-stats.yaml values file with the
-# current build tag.
+# CronJob image. The same gmr-api image carries the src/stats_etl/ code
+# (both ship from edgar-gmr-etl), so we just need its tag. Override
+# `cronjobs.imageTag` per env in gitops/<env>/fontem-stats.yaml.
 cronjobs:
-  # Required: e.g. "contribute.void42.internal/golden/gmr-api:v123abcd"
-  image: ""
+  imageRepository: contribute.void42.internal/golden/gmr-api
+  imageTag: ""   # required — e.g. "ve7da9af"
   daily:
     # Default 03:00 UTC; well after Eurostat's nightly publish window.
     schedule: "0 3 * * *"
