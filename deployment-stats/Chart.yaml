@@ -1,0 +1,5 @@
+apiVersion: v2
+name: fontem-stats
+version: 0.1.0
+description: Postgres + TimescaleDB + PostGIS instance backing the Eurostat / regional-statistics layer
+appVersion: "16"

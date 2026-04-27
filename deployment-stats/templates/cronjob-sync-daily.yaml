@@ -1,0 +1,71 @@
+# Daily incremental sync — runs only datasets whose upstream `updated`
+# timestamp moved past our last successful sync. Cheap: one HEAD per
+# dataset.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fontem-stats-sync-daily
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fontem-stats-sync
+    cadence: daily
+spec:
+  schedule: {{ .Values.cronjobs.daily.schedule | default "0 3 * * *" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ .Values.cronjobs.daily.deadlineSeconds | default 3600 }}
+      template:
+        metadata:
+          labels:
+            app: fontem-stats-sync
+            cadence: daily
+          annotations:
+            linkerd.io/inject: disabled
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: regcred
+          containers:
+            - name: sync
+              image: "{{ .Values.cronjobs.imageRepository }}:{{ .Values.cronjobs.imageTag | required ".Values.cronjobs.imageTag is required" }}"
+              env:
+                - name: STATS_DATABASE_URL
+                  value: "postgresql+asyncpg://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@fontem-stats-postgres:5432/{{ .Values.database.name }}"
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secretName }}
+                      key: POSTGRES_PASSWORD
+                - name: KUMA_PUSH_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.kumaSecretName | default "fontem-stats-kuma" }}
+                      key: kuma_push_url_daily
+                      optional: true
+              resources:
+                requests: { cpu: 100m, memory: 256Mi }
+                limits: { cpu: 500m, memory: 768Mi }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  # Default to "down" — if the pod dies for any reason
+                  # the trap pushes a down signal before exit. We only
+                  # flip to "up" when the CLI exits 0.
+                  KUMA_STATUS=down
+                  KUMA_SUMMARY=unknown
+                  push_kuma() {
+                    [ -z "$KUMA_PUSH_URL" ] && return 0
+                    curl -fsS -m 10 "$KUMA_PUSH_URL?status=$KUMA_STATUS&msg=$KUMA_SUMMARY&ping=" || true
+                  }
+                  trap push_kuma EXIT
+                  out=$(python -m src.stats_etl sync --stale-after 1d 2>&1); rc=$?
+                  echo "$out"
+                  KUMA_SUMMARY=$(echo "$out" | grep -oE '[0-9]+ synced|[0-9]+ skipped|[0-9]+ failed' \
+                    | tr '\n' ' ' | sed 's/ $//' | tr ' ' '+')
+                  KUMA_SUMMARY=${KUMA_SUMMARY:-unknown}
+                  [ "$rc" -eq 0 ] && KUMA_STATUS=up
+                  exit $rc

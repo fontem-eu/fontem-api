@@ -1,0 +1,86 @@
+# Default values for the fontem-stats chart.
+#
+# Sized for a small single-node cluster: requests are deliberately tiny
+# so the pod schedules on a constrained node, limits are conservative
+# enough that a runaway query won't OOM the host. See `pgConfig` below
+# for the matching shared_buffers / work_mem tuning.
+
+# Image pinned to a specific TimescaleDB-HA pg16 release. PostGIS comes
+# bundled in the -ha variant; we don't enable Patroni clustering features.
+# Override `image.tag` per-env in gitops/<env>/fontem-stats.yaml.
+image:
+  repository: timescale/timescaledb-ha
+  tag: pg16
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+# StatefulSet PVC. Backed by a manually-provisioned NFS PV (see
+# gitops/infra/<env>.yaml). volumeName must match the PV name.
+storage:
+  size: 50Gi
+  volumeName: fontem-stats-data-pv-gmr
+
+# Resource budget. Single-node cluster, light analytical workload.
+# memory limits assume Postgres can fit shared_buffers + work_mem +
+# OS cache headroom. Bump after measuring with the full ETL load in.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 768Mi
+
+# Postgres tunables; mounted as postgresql.conf via ConfigMap. Kept
+# tiny on purpose — the workload is bulk inserts + occasional aggregate
+# scans, not high-concurrency OLTP.
+pgConfig:
+  shared_buffers: "128MB"
+  work_mem: "8MB"
+  maintenance_work_mem: "64MB"
+  effective_cache_size: "384MB"
+  max_connections: "50"
+  # WAL settings — small DB, infrequent writes, recovery time not
+  # critical (this is derivative data; we can rebuild from Eurostat).
+  wal_level: "minimal"
+  max_wal_senders: "0"
+  archive_mode: "off"
+
+# Database / role / extensions installed on first boot. The image runs
+# any SQL files in /docker-entrypoint-initdb.d/ exactly once on a fresh
+# data dir, so this lands the schema + extensions cleanly without a
+# separate Job.
+database:
+  name: fontem_stats
+  user: fontem_stats
+  # password comes from the Vault-managed secret below
+
+# Vault-synced credentials; the secret is created by VaultStaticSecret
+# in gitops/infra/<env>.yaml at path gmr/fontem-stats-postgres.
+secretName: fontem-stats-credentials
+
+# Service exposes Postgres internally only — no Ingress, no LoadBalancer.
+service:
+  port: 5432
+
+# Optional Kuma heartbeat secret for the sync CronJobs. The secret must
+# carry `kuma_push_url_daily` and `kuma_push_url_weekly` keys (one per
+# Kuma monitor). If the secret doesn't exist, the env vars resolve to
+# empty and the cronjobs run without pushing — graceful degrade.
+kumaSecretName: fontem-stats-kuma
+
+# CronJob image. The same gmr-api image carries the src/stats_etl/ code
+# (both ship from edgar-gmr-etl), so we just need its tag. Override
+# `cronjobs.imageTag` per env in gitops/<env>/fontem-stats.yaml.
+cronjobs:
+  imageRepository: contribute.void42.internal/golden/gmr-api
+  imageTag: ""   # required — e.g. "ve7da9af"
+  daily:
+    # Default 03:00 UTC; well after Eurostat's nightly publish window.
+    schedule: "0 3 * * *"
+    deadlineSeconds: 3600
+  weekly:
+    # Sunday 04:00 UTC, after the daily — staggered so they never race.
+    schedule: "0 4 * * 0"
+    deadlineSeconds: 7200
