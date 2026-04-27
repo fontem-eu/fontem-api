@@ -53,28 +53,56 @@ SET s.name             = row.name,
     s.eu_reference     = row.eu_reference
 """
 
+# Minimum name length for any sanction-to-company match. Anything shorter
+# is almost always an acronym (e.g. "AMD", "TSA", "LRA", "NADA", "CRL")
+# that collides with unrelated EU companies. The EU XML stores the short
+# code as the primary `name` and the actual entity name in `aliases`,
+# which is why naive name equality blew up.
+MIN_NAME_LEN = 6
+
+# Exact match: company name == sanction name AND country agrees AND name
+# is long enough to be specific. Country guard catches the cross-regime
+# false positives (a French Company "AMD" cannot be the Iranian-regime
+# sanctioned entity "AMD"). When the sanction record carries no
+# nationality (legitimate gap in the upstream data), we still require
+# the company to declare its own country and treat the absent
+# nationality as a hard mismatch — better silent miss than defamation.
 MATCH_COMPANY_EXACT = """
 UNWIND $batch AS row
 MATCH (s:SanctionedEntity {entity_id: row.entity_id})
+WHERE s.name IS NOT NULL
+  AND size(s.name) >= $min_name_len
+  AND coalesce(s.nationality, '') <> ''
 WITH s, row
 MATCH (c:Company)
 WHERE c.name = s.name
-MERGE (c)-[:SANCTIONED {source: 'eu_consolidated', since: row.designation_date}]->(s)
+  AND coalesce(c.country, '') = s.nationality
+MERGE (c)-[r:SANCTIONED {source: 'eu_consolidated'}]->(s)
+ON CREATE SET r.since = row.designation_date,
+              r.match_method = 'exact_name_country',
+              r.reviewed = false
 """
 
+# Fuzzy path: full-text scored hits, but ALWAYS gated by country and
+# minimum length, ALWAYS recorded as SAME_AS {reviewed: false} for the
+# manual review queue, never used to create a SANCTIONED edge directly.
+# Score threshold lifted from 1.5 → 4.0; the previous bar admitted
+# anything with a single-token overlap.
 MATCH_COMPANY_FUZZY = """
 UNWIND $batch AS row
 MATCH (s:SanctionedEntity {entity_id: row.entity_id})
-WITH s, row
-WHERE s.name IS NOT NULL AND size(s.name) > 3
+WHERE s.name IS NOT NULL
+  AND size(s.name) >= $min_name_len
+  AND coalesce(s.nationality, '') <> ''
 WITH s, row,
      reduce(n = s.name, c IN ['+','-','&&','||','!','(',')','{','}',
             '[',']','^','"','~','*','?',':','\\\\','/']
             | replace(n, c, ' ')) AS clean_name
-WHERE size(trim(clean_name)) > 3
+WHERE size(trim(clean_name)) >= $min_name_len
 CALL db.index.fulltext.queryNodes('company_name_ft', clean_name)
      YIELD node AS c, score
-WHERE score > 1.5
+WHERE score > 4.0
+  AND coalesce(c.country, '') = s.nationality
 WITH s, c, score ORDER BY score DESC LIMIT 1
 MERGE (s)-[:SAME_AS {
     confidence: 0.6,
@@ -256,9 +284,13 @@ def load_into_neo4j(driver, entities):
             batch.append(entity)
             if len(batch) >= BATCH_SIZE:
                 session.run(MERGE_ENTITY, batch=batch)
-                result = session.run(MATCH_COMPANY_EXACT, batch=batch)
+                result = session.run(
+                    MATCH_COMPANY_EXACT, batch=batch, min_name_len=MIN_NAME_LEN,
+                )
                 matched_exact += result.consume().counters.relationships_created
-                result = session.run(MATCH_COMPANY_FUZZY, batch=batch)
+                result = session.run(
+                    MATCH_COMPANY_FUZZY, batch=batch, min_name_len=MIN_NAME_LEN,
+                )
                 matched_fuzzy += result.consume().counters.relationships_created
                 total += len(batch)
                 batch = []
@@ -267,9 +299,13 @@ def load_into_neo4j(driver, entities):
 
         if batch:
             session.run(MERGE_ENTITY, batch=batch)
-            result = session.run(MATCH_COMPANY_EXACT, batch=batch)
+            result = session.run(
+                MATCH_COMPANY_EXACT, batch=batch, min_name_len=MIN_NAME_LEN,
+            )
             matched_exact += result.consume().counters.relationships_created
-            result = session.run(MATCH_COMPANY_FUZZY, batch=batch)
+            result = session.run(
+                MATCH_COMPANY_FUZZY, batch=batch, min_name_len=MIN_NAME_LEN,
+            )
             matched_fuzzy += result.consume().counters.relationships_created
             total += len(batch)
 
