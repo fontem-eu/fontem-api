@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fontem-stats-init-sql
+  namespace: {{ .Release.Namespace }}
+data:
+  # Mounted at /docker-entrypoint-initdb.d/ which Postgres' image runs
+  # exactly once on a fresh data directory. Idempotent guards everywhere
+  # so a re-run on a non-empty volume (rare; Recreate strategy + same
+  # PV) doesn't error.
+  00-extensions.sql: |
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+    CREATE EXTENSION IF NOT EXISTS postgis;
+
+  10-schema.sql: |
+    CREATE SCHEMA IF NOT EXISTS fontem_stats;
+    SET search_path = fontem_stats, public;
+
+    -- ── Catalog: every tracked dataset, one row each ────────────
+    CREATE TABLE IF NOT EXISTS fontem_stats.dataset (
+        code              text         PRIMARY KEY,
+        label             text         NOT NULL,
+        theme             text         NOT NULL,
+        source            text         NOT NULL DEFAULT 'eurostat',
+        source_url        text         NOT NULL,
+        nuts_levels       smallint[]   NOT NULL,
+        dim_ids           text[]       NOT NULL,
+        dim_sizes         int[]        NOT NULL,
+        time_unit         text         NOT NULL DEFAULT 'year',
+        update_freq       interval     NOT NULL,
+        enabled           boolean      NOT NULL DEFAULT true,
+        notes             text,
+        created_at        timestamptz  NOT NULL DEFAULT now(),
+        updated_at        timestamptz  NOT NULL DEFAULT now()
+    );
+
+    -- ── Sync history: one row per loader invocation ─────────────
+    CREATE TABLE IF NOT EXISTS fontem_stats.sync_run (
+        id                bigserial    PRIMARY KEY,
+        dataset_code      text         NOT NULL REFERENCES fontem_stats.dataset(code),
+        started_at        timestamptz  NOT NULL DEFAULT now(),
+        finished_at       timestamptz,
+        status            text         NOT NULL CHECK (status IN
+                                         ('running','success','failed','skipped')),
+        upstream_modified timestamptz,
+        rows_inserted     bigint       DEFAULT 0,
+        rows_updated      bigint       DEFAULT 0,
+        rows_total        bigint       DEFAULT 0,
+        error_message     text
+    );
+    CREATE INDEX IF NOT EXISTS sync_run_dataset_started_idx
+        ON fontem_stats.sync_run (dataset_code, started_at DESC);
+    CREATE INDEX IF NOT EXISTS sync_run_alert_idx
+        ON fontem_stats.sync_run (status, started_at DESC)
+        WHERE status IN ('running','failed');
+
+    -- ── Observations: one universal hypertable for all datasets ─
+    CREATE TABLE IF NOT EXISTS fontem_stats.observation (
+        dataset_code  text             NOT NULL REFERENCES fontem_stats.dataset(code),
+        time          timestamptz      NOT NULL,
+        geo_code      text             NOT NULL,
+        dimensions    jsonb            NOT NULL DEFAULT '{}'::jsonb,
+        value         double precision,
+        flags         text[],
+        PRIMARY KEY (dataset_code, time, geo_code, dimensions)
+    );
+    -- 5-year chunks: most queries span 1-10y; this gives 1-2 chunks/query.
+    SELECT create_hypertable(
+        'fontem_stats.observation', 'time',
+        chunk_time_interval => INTERVAL '5 years',
+        if_not_exists => TRUE
+    );
+    CREATE INDEX IF NOT EXISTS observation_dataset_geo_time_idx
+        ON fontem_stats.observation (dataset_code, geo_code, time DESC);
+    CREATE INDEX IF NOT EXISTS observation_geo_time_idx
+        ON fontem_stats.observation (geo_code, time DESC)
+        INCLUDE (dataset_code, value);
+    CREATE INDEX IF NOT EXISTS observation_dimensions_gin
+        ON fontem_stats.observation USING GIN (dimensions jsonb_path_ops);
+
+    -- Compress old data after a year. Re-runs are safe: ALTER and
+    -- add_compression_policy both no-op when already configured.
+    DO $$ BEGIN
+        ALTER TABLE fontem_stats.observation SET (
+            timescaledb.compress,
+            timescaledb.compress_segmentby = 'dataset_code, geo_code',
+            timescaledb.compress_orderby   = 'time DESC'
+        );
+    EXCEPTION WHEN others THEN NULL; END $$;
+
+    DO $$ BEGIN
+        PERFORM add_compression_policy('fontem_stats.observation',
+            INTERVAL '1 year');
+    EXCEPTION WHEN duplicate_object THEN NULL;
+                 WHEN others THEN NULL; END $$;
+
+    -- ── NUTS regions with PostGIS geometry ──────────────────────
+    CREATE TABLE IF NOT EXISTS fontem_stats.nuts_region (
+        code         text                          PRIMARY KEY,
+        level        smallint                      NOT NULL CHECK (level BETWEEN 0 AND 3),
+        name         text                          NOT NULL,
+        name_native  text,
+        parent_code  text                          REFERENCES fontem_stats.nuts_region(code),
+        country_code char(2)                       NOT NULL,
+        geometry     geometry(MultiPolygon, 4326)  NOT NULL,
+        area_km2     double precision              GENERATED ALWAYS AS
+                                                     (ST_Area(geometry::geography) / 1e6) STORED,
+        nuts_version text                          NOT NULL,
+        valid_from   date                          NOT NULL,
+        valid_until  date,
+        updated_at   timestamptz                   NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS nuts_region_geom_gix
+        ON fontem_stats.nuts_region USING GIST (geometry);
+    CREATE INDEX IF NOT EXISTS nuts_region_level_idx
+        ON fontem_stats.nuts_region (level);
+    CREATE INDEX IF NOT EXISTS nuts_region_parent_idx
+        ON fontem_stats.nuts_region (parent_code);
+    CREATE INDEX IF NOT EXISTS nuts_region_country_level_idx
+        ON fontem_stats.nuts_region (country_code, level);
+
+    -- ── NUTS revision crosswalk ─────────────────────────────────
+    CREATE TABLE IF NOT EXISTS fontem_stats.nuts_region_xref (
+        from_version text  NOT NULL,
+        from_code    text  NOT NULL,
+        to_version   text  NOT NULL,
+        to_code      text  NOT NULL,
+        relation     text  NOT NULL CHECK (relation IN
+                       ('identical','renamed','split','merged','absorbed')),
+        PRIMARY KEY (from_version, from_code, to_version, to_code)
+    );
+
+    -- ── Permissions ────────────────────────────────────────────
+    -- The application role owns its schema; DDL via Alembic-style
+    -- migrations later, not by privileged users.
+    GRANT ALL ON SCHEMA fontem_stats TO {{ .Values.database.user }};
+    GRANT ALL ON ALL TABLES IN SCHEMA fontem_stats TO {{ .Values.database.user }};
+    GRANT ALL ON ALL SEQUENCES IN SCHEMA fontem_stats TO {{ .Values.database.user }};
+    ALTER DEFAULT PRIVILEGES IN SCHEMA fontem_stats
+        GRANT ALL ON TABLES TO {{ .Values.database.user }};
+    ALTER DEFAULT PRIVILEGES IN SCHEMA fontem_stats
+        GRANT ALL ON SEQUENCES TO {{ .Values.database.user }};

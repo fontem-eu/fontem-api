@@ -205,3 +205,68 @@ def graph_connectedness(source: FromDishka[DataQualitySource]):
     layer (1h TTL) because the underlying Cypher is a full scan
     across every entity label."""
     return source.get_graph_connectedness()
+
+
+@router.get("/eurostat")
+def eurostat_freshness():
+    """Per-dataset freshness for the Eurostat / regional-stats layer.
+
+    Reads directly from the fontem_stats Postgres store rather than going
+    through the dishka-injected source — this layer is in a different
+    database than everything else and the wiring is intentionally simple.
+    Returns 503 if STATS_DATABASE_URL is unset (e.g., in dev/dast env).
+    """
+    import os
+    if "STATS_DATABASE_URL" not in os.environ:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="stats store unavailable (STATS_DATABASE_URL unset)",
+        )
+    from src.stats_etl.db import StatsDatabase
+    db = StatsDatabase()
+    with db.connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                d.code, d.label, d.theme, d.nuts_levels,
+                d.update_freq::text AS update_freq,
+                d.enabled,
+                r.started_at         AS last_sync_started_at,
+                r.upstream_modified  AS last_upstream_modified,
+                r.rows_total         AS last_sync_rows,
+                EXTRACT(EPOCH FROM (now() - r.started_at))::int AS sync_age_sec
+            FROM fontem_stats.dataset d
+            LEFT JOIN LATERAL (
+                SELECT started_at, upstream_modified, rows_total
+                FROM fontem_stats.sync_run
+                WHERE dataset_code = d.code AND status = 'success'
+                ORDER BY started_at DESC LIMIT 1
+            ) r ON true
+            ORDER BY d.theme, d.code
+            """,
+        )
+        cols = [desc.name for desc in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        # Aggregate counters for the dashboard headline.
+        cur.execute(
+            "SELECT COUNT(*) AS total_obs FROM fontem_stats.observation",
+        )
+        total_obs = cur.fetchone()[0]
+    by_theme: dict[str, list] = {}
+    for r in rows:
+        by_theme.setdefault(r["theme"], []).append(r)
+    enabled = sum(1 for r in rows if r["enabled"])
+    fresh = sum(
+        1 for r in rows
+        if r["sync_age_sec"] is not None and r["sync_age_sec"] < 8 * 86400
+    )
+    never = sum(1 for r in rows if r["last_sync_started_at"] is None)
+    return {
+        "total_datasets": len(rows),
+        "enabled": enabled,
+        "fresh_within_8d": fresh,
+        "never_synced": never,
+        "total_observations": total_obs,
+        "by_theme": by_theme,
+    }

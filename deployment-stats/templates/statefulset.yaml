@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fontem-stats-postgres
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # No service mesh injection — Postgres traffic is intra-cluster only,
+    # consumers connect via the ClusterIP service. Linkerd adds latency
+    # we don't need on bulk inserts.
+    linkerd.io/inject: disabled
+spec:
+  serviceName: fontem-stats-postgres
+  replicas: {{ .Values.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: fontem-stats-postgres
+  # No rolling — single replica, recreate on update so we never have
+  # two pods racing on the same NFS PV.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: fontem-stats-postgres
+      annotations:
+        linkerd.io/inject: disabled
+        # Restart pod when initdb scripts ConfigMap changes — the
+        # *.sql files only run on a fresh data dir, but mounting the
+        # latest version means a re-init from a wiped PV picks up the
+        # current schema rather than whatever was committed at chart
+        # install time.
+        checksum/init-sql: {{ include (print $.Template.BasePath "/configmap-init-sql.yaml") . | sha256sum }}
+        checksum/pg-conf: {{ include (print $.Template.BasePath "/configmap-postgresql-conf.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        # postgres image runs as uid 999 by default; align fsGroup so
+        # the NFS-backed PV is writable.
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.database.name | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.database.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: pg-conf
+              mountPath: /etc/postgresql/conf.d
+              readOnly: true
+          # Ask Postgres to load our custom config snippet via -c
+          # config_file=... is heavy-handed; the timescaledb-ha image
+          # already includes /etc/postgresql/conf.d/* via the main
+          # postgresql.conf, so just dropping the file in is enough.
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.database.user }}", "-d", "{{ .Values.database.name }}"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.database.user }}", "-d", "{{ .Values.database.name }}"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: init-sql
+          configMap:
+            name: fontem-stats-init-sql
+        - name: pg-conf
+          configMap:
+            name: fontem-stats-postgresql-conf
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        # Empty storageClassName matches the manually-provisioned NFS PV
+        # in gitops/infra/<env>.yaml. volumeName binds it explicitly.
+        storageClassName: ""
+        volumeName: {{ .Values.storage.volumeName | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}

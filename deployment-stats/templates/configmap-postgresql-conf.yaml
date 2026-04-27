@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fontem-stats-postgresql-conf
+  namespace: {{ .Release.Namespace }}
+data:
+  # Custom postgresql.conf snippets, included from the image's main config
+  # via /etc/postgresql/conf.d/. Keeps everything else at TimescaleDB
+  # defaults. Tuned for a small workload: bulk inserts overnight, the
+  # occasional analytical scan during the day.
+  custom.conf: |
+    # ── Memory ─────────────────────────────────────────────────────
+    shared_buffers = {{ .Values.pgConfig.shared_buffers | default "128MB" }}
+    work_mem = {{ .Values.pgConfig.work_mem | default "8MB" }}
+    maintenance_work_mem = {{ .Values.pgConfig.maintenance_work_mem | default "64MB" }}
+    effective_cache_size = {{ .Values.pgConfig.effective_cache_size | default "384MB" }}
+    max_connections = {{ .Values.pgConfig.max_connections | default "50" }}
+
+    # ── WAL ───────────────────────────────────────────────────────
+    # Single-replica, derivative data. We can rebuild from Eurostat
+    # if we ever lose the volume; no need for streaming replication.
+    wal_level = {{ .Values.pgConfig.wal_level | default "minimal" | quote }}
+    max_wal_senders = {{ .Values.pgConfig.max_wal_senders | default "0" }}
+    archive_mode = {{ .Values.pgConfig.archive_mode | default "off" | quote }}
+
+    # ── TimescaleDB / extensions ──────────────────────────────────
+    shared_preload_libraries = 'timescaledb'
+
+    # ── Logging ───────────────────────────────────────────────────
+    log_min_duration_statement = 1000   # ms — slow query log
+    log_line_prefix = '%t [%p] %u@%d '
+    log_lock_waits = on
