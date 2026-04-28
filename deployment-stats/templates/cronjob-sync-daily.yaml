@@ -62,6 +62,21 @@ spec:
                     curl -fsS -m 10 "$KUMA_PUSH_URL?status=$KUMA_STATUS&msg=$KUMA_SUMMARY&ping=" || true
                   }
                   trap push_kuma EXIT
+                  set -e
+                  # Idempotent bootstrap: register the curated 26-dataset
+                  # seed (UPSERT — re-runs are no-ops once the catalog
+                  # is current) and refresh the NUTS polygons (PostGIS
+                  # WKT MERGE-style upsert keyed on (level, code)).
+                  # Bundles every "first deploy" step into the same
+                  # CronJob you already have to monitor anyway, so a
+                  # fresh fontem-stats Postgres is fully usable after
+                  # one daily run with zero manual kubectl-exec.
+                  echo "[bootstrap] register-seed"
+                  python -m src.stats_etl register-seed
+                  echo "[bootstrap] nuts-polygons"
+                  python -m src.stats_etl nuts-polygons --version 2024 || \
+                    echo "::warning:: nuts-polygons failed (continuing — sync still runs)"
+                  set +e
                   out=$(python -m src.stats_etl sync --stale-after 1d 2>&1); rc=$?
                   echo "$out"
                   KUMA_SUMMARY=$(echo "$out" | grep -oE '[0-9]+ synced|[0-9]+ skipped|[0-9]+ failed' \

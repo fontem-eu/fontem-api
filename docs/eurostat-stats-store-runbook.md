@@ -17,11 +17,16 @@ On the storage host (whatever box owns `/srv/nfs`):
 
 ```sh
 mkdir -p /srv/nfs/fontem-stats-prod   # or fontem-stats-staging
-chown 999:999 /srv/nfs/fontem-stats-prod
 # Add to /etc/exports if not already covered by a wildcard:
 echo '/srv/nfs/fontem-stats-prod 10.0.0.0/8(rw,sync,no_subtree_check,no_root_squash)' >> /etc/exports
 exportfs -ra
 ```
+
+No `chown` needed: the StatefulSet sets `securityContext.fsGroup: 999`,
+which makes kubelet recursively chown the mounted volume to the
+postgres group on first start. This is the only side of the chart
+where pods need write access; consumers (gmr-api, the sync CronJobs)
+read via the database connection, never the filesystem.
 
 The matching `PersistentVolume` resource lives in
 [gitops/infra/prod.yaml](../../gitops/infra/prod.yaml) (and one per env).
@@ -60,29 +65,32 @@ The init scripts in the ConfigMap run on first boot and create the
 schema, extensions, hypertable, and indexes. Subsequent restarts skip
 init (Postgres image's documented behaviour).
 
-### 4. Seed the catalog
+### 4. First daily-sync run bootstraps the catalog automatically
 
-Once the pod is `Ready`, run the seed once:
-
-```sh
-kubectl -n gmr exec -it deploy/gmr-api -- \
-    python -m src.stats_etl register-seed
-```
-
-That writes 26 catalog rows. After this, the daily CronJob picks up
-everything and starts pulling.
-
-### 5. NUTS polygons (one-off)
-
-Geometry doesn't come from Eurostat's stats API; it comes from GISCO.
-Pull once per NUTS revision:
+The daily CronJob runs `register-seed` and `nuts-polygons` as the
+first two steps of every run before the actual sync (both are
+idempotent — `ON CONFLICT` on the catalog rows, MERGE-style upsert
+on the polygons). Fresh deploys are fully usable after the next
+03:00 UTC run with no manual exec; you can trigger one immediately
+with:
 
 ```sh
-kubectl -n gmr exec -it deploy/gmr-api -- \
-    python -m src.stats_etl nuts-polygons --version 2024
+kubectl -n gmr create job --from=cronjob/fontem-stats-sync-daily \
+    fontem-stats-sync-bootstrap
+kubectl -n gmr wait --for=condition=complete \
+    job/fontem-stats-sync-bootstrap --timeout=30m
+kubectl -n gmr logs job/fontem-stats-sync-bootstrap --tail=200
 ```
 
-### 6. Backfill Neo4j NUTS hierarchy
+If you'd rather run the bootstrap steps individually (e.g. to debug
+one in isolation), the same commands still work via:
+
+```sh
+kubectl -n gmr exec -it deploy/gmr-api -- python -m src.stats_etl register-seed
+kubectl -n gmr exec -it deploy/gmr-api -- python -m src.stats_etl nuts-polygons --version 2024
+```
+
+### 5. Backfill Neo4j NUTS hierarchy
 
 After step 5, populate the NUTS-1/2/3 nodes in the graph:
 
