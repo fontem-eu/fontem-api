@@ -1,6 +1,15 @@
+{{/*
+OpenFIGI has a free anonymous tier — the loader runs without the API
+key, just at a lower rate limit. Mark the env's secretKeyRef as
+optional so the cronjob still starts when openfigi-credentials hasn't
+been seeded yet (greenfield environments, etc.).
+*/}}
 {{- $openfigiEnv := list (dict
       "name" "OPENFIGI_API_KEY"
-      "valueFrom" (dict "secretKeyRef" (dict "name" "openfigi-credentials" "key" "api_key"))) -}}
+      "valueFrom" (dict "secretKeyRef" (dict
+          "name" "openfigi-credentials"
+          "key" "api_key"
+          "optional" true))) -}}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-openfigi"
       "schedule"        "0 8 * * 1"
