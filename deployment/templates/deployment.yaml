@@ -97,13 +97,19 @@ spec:
             # `unconfigured` on /atlas/health while returning 503 on
             # data routes — graceful degrade.
             {{- if .Values.fontemStats.enabled }}
-            - name: STATS_DATABASE_URL
-              value: "postgresql://{{ .Values.fontemStats.user }}:$(STATS_POSTGRES_PASSWORD)@{{ .Values.fontemStats.host }}:5432/{{ .Values.fontemStats.database }}"
+            # STATS_POSTGRES_PASSWORD must come BEFORE STATS_DATABASE_URL
+            # — Kubernetes evaluates `$(VAR)` substitutions in declaration
+            # order, so the URL referencing the password only expands if
+            # the password env is defined first. Swapping the order
+            # silently lands a literal `$(STATS_POSTGRES_PASSWORD)` in the
+            # connection string, which then 28000-FATALs on every connect.
             - name: STATS_POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.fontemStats.secretName | default "fontem-stats-credentials" }}
                   key: POSTGRES_PASSWORD
+            - name: STATS_DATABASE_URL
+              value: "postgresql://{{ .Values.fontemStats.user }}:$(STATS_POSTGRES_PASSWORD)@{{ .Values.fontemStats.host }}:5432/{{ .Values.fontemStats.database }}"
             {{- end }}
 
           volumeMounts:

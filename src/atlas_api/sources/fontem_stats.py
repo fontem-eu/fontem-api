@@ -23,16 +23,31 @@ class FontemStatsSource:
     name = "fontem-stats-postgres"
 
     def __init__(self, dsn: str | None) -> None:
-        self._dsn = (
+        # Strip the asyncpg dialect — psycopg3 (sync) doesn't speak it.
+        normalised = (
             dsn.replace("postgresql+asyncpg://", "postgresql://") if dsn else None
         )
+        # `$(VAR)` survives untouched if the Kubernetes env-var ordering
+        # puts the URL before the variable it references — once observed
+        # in prod (gmr-api with STATS_DATABASE_URL declared before
+        # STATS_POSTGRES_PASSWORD). Detect and fail clean rather than
+        # passing the literal to libpq, which 28P01s with the actual
+        # username and a useless detail.
+        if normalised and "$(" in normalised:
+            self._dsn = None
+            self._unsubstituted = True
+        else:
+            self._dsn = normalised
+            self._unsubstituted = False
 
     @property
     def configured(self) -> bool:
+        """True when the DSN is set and free of unsubstituted `$(VAR)`s."""
         return self._dsn is not None
 
     @contextmanager
     def _connect(self):
+        """Yield a psycopg connection with a 5s connect timeout."""
         if not self._dsn:
             raise RuntimeError("STATS_DATABASE_URL not set")
         conn = psycopg.connect(self._dsn, connect_timeout=5)
@@ -45,6 +60,18 @@ class FontemStatsSource:
 
     def health(self) -> SourceHealth:
         if not self.configured:
+            if self._unsubstituted:
+                return SourceHealth(
+                    name=self.name,
+                    status="unconfigured",
+                    detail=(
+                        "STATS_DATABASE_URL contains an unsubstituted "
+                        "$(VAR) reference — the env-var that the URL "
+                        "references is declared after it in the pod "
+                        "spec. Reorder the env list so the password "
+                        "var comes first."
+                    ),
+                )
             return SourceHealth(
                 name=self.name,
                 status="unconfigured",
