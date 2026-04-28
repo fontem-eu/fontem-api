@@ -34,33 +34,47 @@ spec:
         checksum/pg-conf: {{ include (print $.Template.BasePath "/configmap-postgresql-conf.yaml") . | sha256sum }}
     spec:
       securityContext:
-        # postgres image runs as uid 999 by default; fsGroup is set so
-        # local-backed PVs are recursively chown'd by kubelet. Doesn't
-        # help on NFS — kubelet skips fsGroup recursion on remote mounts
-        # (and even when it tries, NFS uid mapping silently swallows it).
-        # That's why the initContainer below runs first.
-        fsGroup: 999
+        # timescale/timescaledb-ha:pg16 ships with the postgres user as
+        # uid 1000 (NOT 999 like the upstream library/postgres image).
+        # `docker inspect` confirms `User=postgres → uid=1000`. fsGroup
+        # is here for the local-backed-PV path (kubelet recursively
+        # chowns); on NFS it's a no-op and the initContainer below
+        # carries the actual fix.
+        fsGroup: 1000
       initContainers:
         # One-shot chown so the NFS-backed PV is writable by the
-        # postgres user (uid 999). Runs as root inside the pod and
-        # writes through the NFS export's `no_root_squash` to the host
-        # filesystem. Idempotent: re-runs are a no-op once ownership
-        # already matches.
+        # postgres user (uid 1000). Runs as root inside the pod and
+        # writes through the NFS export's `no_root_squash`. Idempotent:
+        # re-runs are a no-op once ownership already matches.
         - name: chown-data
           image: docker.io/library/busybox:1.37
-          # `chown -R` traverses what may be a sizeable data dir on
-          # restart; -h ensures any symlinks the pgdata layout creates
-          # are followed correctly. The `|| :` after find guards against
-          # a transient stale-NFS-handle on first mount.
           command: ["sh", "-c"]
           args:
             - |
               set -e
-              echo "chown 999:999 on /var/lib/postgresql/data (NFS mount)"
-              chown -R 999:999 /var/lib/postgresql/data || \
-                find /var/lib/postgresql/data -mindepth 1 -exec chown 999:999 {} + || :
+              echo "chown 1000:1000 on /var/lib/postgresql/data (NFS mount)"
+              chown -R 1000:1000 /var/lib/postgresql/data || \
+                find /var/lib/postgresql/data -mindepth 1 -exec chown 1000:1000 {} + || :
               chmod 700 /var/lib/postgresql/data
               echo "ready: $(stat -c '%u:%g %a' /var/lib/postgresql/data)"
+
+              # Smoke-check: actually try to write to the data dir as
+              # uid 1000 (the postgres user inside the timescaledb-ha
+              # image). Catches the class of mismatch where the chart
+              # is targeting a different uid than the running image —
+              # the actual bug that took us 3 deploys to find. Failing
+              # here gives a clear, named error instead of an opaque
+              # "mkdir: Permission denied" buried in postgres logs.
+              adduser -D -u 1000 -H -s /bin/sh pgtest 2>/dev/null || true
+              if ! su -s /bin/sh pgtest -c 'touch /var/lib/postgresql/data/.smoke && rm /var/lib/postgresql/data/.smoke'; then
+                echo "::error:: uid 1000 cannot write to /var/lib/postgresql/data."
+                echo "  Likely cause: the configured fsGroup/initContainer chown does"
+                echo "  not match the image's runtime user. Verify with:"
+                echo "    docker inspect docker.io/timescale/timescaledb-ha:{{ .Values.image.tag }} \\"
+                echo "      --format '{{ "{{" }}.Config.User{{ "}}" }}'"
+                exit 1
+              fi
+              echo "uid 1000 write-check OK"
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
