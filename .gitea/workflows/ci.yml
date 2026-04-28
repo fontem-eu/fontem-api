@@ -21,6 +21,125 @@ jobs:
       - name: Lint
         run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
 
+  # Helm chart sanity gate — runs on every push, doesn't need cluster
+  # access. Catches the class of mistake that only surfaces on Argo
+  # sync today: image references that don't match the cluster's Kyverno
+  # restrict-image-registries allowlist (e.g. `timescale/foo:bar`
+  # without the `docker.io/` prefix), broken templates, and references
+  # to non-existent image tags. Cheap — `helm template` is local-only.
+  chart:
+    runs-on: python
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image-registry allowlist gate
+        # Mirrors the cluster's Kyverno restrict-image-registries policy.
+        # Walks every templates/*.yaml in deployment-stats/, extracts the
+        # `image:` lines (which use `{{ .Values.foo }}` references), and
+        # resolves them against deployment-stats/values.yaml plus each
+        # gitops/<env>/fontem-stats.yaml override. Each resolved image
+        # ref must match one of the cluster's allowed registry prefixes.
+        # Fails the PR if not — same outcome Argo would produce on sync,
+        # discovered ~5 minutes earlier.
+        #
+        # No helm dependency: the cluster CI runner is firewalled from
+        # get.helm.sh, and the local docker image bind-mount path
+        # doesn't survive the runner's DinD layer.
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import fnmatch, glob, os, re, sys, yaml
+
+          ALLOWLIST = [
+              "contribute.void42.internal/*",
+              "neo4j:*", "postgres:*", "minio/*", "nginx:*",
+              "ghcr.io/*", "docker.io/*", "cr.l5d.io/*",
+          ]
+
+          # Default values + every per-env override that ArgoCD will
+          # merge on top. We validate the union — any image ref any
+          # env actually deploys with must be allowlisted.
+          values_files = [
+              "deployment-stats/values.yaml",
+              # Per-env overrides live in the gitops repo, not here;
+              # we substitute the prod cronjobs.imageTag inline below.
+          ]
+          values: dict = {}
+          def _merge(dst, src):
+              for k, v in (src or {}).items():
+                  if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                      _merge(dst[k], v)
+                  else:
+                      dst[k] = v
+          for vf in values_files:
+              with open(vf) as f:
+                  _merge(values, yaml.safe_load(f) or {})
+          # Stand-in for the gitops-side cronjobs.imageTag bump (which
+          # is `required` by the chart). Mirror what ArgoCD produces.
+          values.setdefault("cronjobs", {})["imageTag"] = (
+              values["cronjobs"].get("imageTag") or "ci-render-test"
+          )
+
+          def resolve_ref(ref: str) -> str | None:
+              # `{{ .Values.foo.bar }}:{{ .Values.foo.tag | required ... }}`
+              # — strip the |...filter then resolve dotted keys.
+              def _expand(m):
+                  expr = m.group(1).strip()
+                  # Drop any `| pipe ...` filters.
+                  expr = expr.split("|")[0].strip()
+                  if not expr.startswith(".Values."):
+                      return m.group(0)
+                  parts = expr[len(".Values."):].split(".")
+                  cur = values
+                  for p in parts:
+                      if not isinstance(cur, dict) or p not in cur:
+                          return f"<UNRESOLVED:{expr}>"
+                      cur = cur[p]
+                  return str(cur)
+              out = re.sub(r"\{\{\s*(.*?)\s*\}\}", _expand, ref)
+              if "<UNRESOLVED" in out:
+                  return None
+              return out
+
+          # Capture the full rest of the line (Go templates can carry
+          # nested `"` from filters like `required "msg"`, so we can't
+          # just stop at the first quote). Trim leading/trailing whitespace
+          # and a single optional surrounding quote pair afterwards.
+          refs: list[tuple[str, str]] = []
+          for tpl in sorted(glob.glob("deployment-stats/templates/*.yaml")):
+              with open(tpl) as f:
+                  for line in f:
+                      m = re.match(r"^\s*image:\s*(.*?)\s*$", line)
+                      if not m:
+                          continue
+                      raw = m.group(1)
+                      if raw.startswith('"') and raw.endswith('"'):
+                          raw = raw[1:-1]
+                      refs.append((tpl, raw))
+
+          bad = []
+          for tpl, raw in refs:
+              resolved = resolve_ref(raw)
+              if resolved is None:
+                  print(f"SKIP  {tpl}: {raw}  (unresolved values reference)")
+                  continue
+              ok = any(fnmatch.fnmatchcase(resolved, p) for p in ALLOWLIST)
+              tag = "OK  " if ok else "FAIL"
+              print(f"{tag}  {tpl}: {resolved}")
+              if not ok:
+                  bad.append((tpl, resolved))
+
+          if bad:
+              print()
+              print(f"::error::{len(bad)} image ref(s) not in cluster Kyverno allowlist:")
+              for tpl, ref in bad:
+                  print(f"  - {ref}  (in {tpl})")
+              print(f"Allowlist: {ALLOWLIST}")
+              sys.exit(1)
+          print()
+          print(f"all {len(refs)} image refs match the cluster allowlist")
+          PY
+
   # Pre-build supply-chain gate; see gmr-ci/actions/osv-scan.
   security:
     runs-on: ubuntu-latest

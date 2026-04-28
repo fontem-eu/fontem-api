@@ -2,3 +2,14 @@ version: "v41f487e"
 domain: localhost
 apiIngress: "true"
 replicas: 1
+
+# Connection details for the fontem-stats Postgres deployment, used by
+# the /api/atlas/* router family. Disabled by default so dev/dast — and
+# any environment that doesn't have the stats stack provisioned — boots
+# without referencing a secret that doesn't exist.
+fontemStats:
+  enabled: false
+  host: fontem-stats-postgres
+  user: fontem_stats
+  database: fontem_stats
+  secretName: fontem-stats-credentials

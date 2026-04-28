@@ -90,6 +90,22 @@ spec:
                   name: neo4j-credentials
                   key: NEO4J_PASSWORD
 
+            # Fontem stats Postgres (TimescaleDB+PostGIS) — read by the
+            # /api/atlas/* surface (src/atlas_api/). Optional: when the
+            # secret is absent (dev/dast or before the stats stack is
+            # provisioned), the env var stays empty and Atlas reports
+            # `unconfigured` on /atlas/health while returning 503 on
+            # data routes — graceful degrade.
+            {{- if .Values.fontemStats.enabled }}
+            - name: STATS_DATABASE_URL
+              value: "postgresql://{{ .Values.fontemStats.user }}:$(STATS_POSTGRES_PASSWORD)@{{ .Values.fontemStats.host }}:5432/{{ .Values.fontemStats.database }}"
+            - name: STATS_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.fontemStats.secretName | default "fontem-stats-credentials" }}
+                  key: POSTGRES_PASSWORD
+            {{- end }}
+
           volumeMounts:
             - name: edgar-data
               mountPath: /edgar-data

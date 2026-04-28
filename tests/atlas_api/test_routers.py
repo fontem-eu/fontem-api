@@ -1,0 +1,201 @@
+"""Tests for the Atlas API routers.
+
+Patches the FontemStatsSource methods so the routers exercise their
+contracts (validation, status codes, response shape) without needing
+a live Postgres. Source-level SQL is exercised separately if/when we
+add integration tests.
+"""
+from __future__ import annotations
+
+# pylint: disable=missing-function-docstring
+
+import os
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from src.atlas_api.app import build_app
+from src.atlas_api.schemas import Observation, SnapshotCell, SourceHealth
+
+
+def _client(stats_dsn: str | None = "postgresql://test:test@h/d"):
+    """Build an isolated standalone app — no shared state with gmr-api."""
+    with patch.dict("os.environ", {} if stats_dsn is None
+                    else {"STATS_DATABASE_URL": stats_dsn}, clear=False):
+        if stats_dsn is None:
+            os.environ.pop("STATS_DATABASE_URL", None)
+        app = build_app()
+    return TestClient(app)
+
+
+# ── /health ──────────────────────────────────────────────────────────
+
+
+def test_health_unconfigured_when_no_dsn():
+    client = _client(stats_dsn=None)
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert any(s["status"] == "unconfigured" for s in body["sources"])
+
+
+def test_health_ok_when_source_pingable():
+    fake = SourceHealth(name="fontem-stats-postgres", status="ok", latency_ms=2.1)
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.health",
+        return_value=fake,
+    ):
+        r = _client().get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["sources"][0]["latency_ms"] == 2.1
+
+
+# ── /datasets ────────────────────────────────────────────────────────
+
+
+def test_datasets_503_when_unconfigured():
+    r = _client(stats_dsn=None).get("/datasets")
+    assert r.status_code == 503
+
+
+def test_datasets_returns_summary():
+    rows = [
+        {
+            "code": "nama_10r_2gdp", "label": "GDP × NUTS-2", "theme": "economy",
+            "nuts_levels": [2], "time_unit": "year", "update_freq": "1 year",
+            "enabled": True, "notes": None,
+            "last_sync_started_at": None, "last_upstream_modified": None,
+            "last_sync_rows": None,
+        },
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.list_datasets",
+        return_value=rows,
+    ):
+        r = _client().get("/datasets")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 1
+    assert body[0]["code"] == "nama_10r_2gdp"
+
+
+def test_dataset_detail_404_when_missing():
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.get_dataset_detail",
+        return_value=None,
+    ):
+        r = _client().get("/datasets/nope")
+    assert r.status_code == 404
+
+
+def test_dataset_detail_returns_observed_range():
+    detail = {
+        "code": "demo_r_pjangrp3", "label": "Pop", "theme": "population",
+        "nuts_levels": [2, 3], "time_unit": "year", "update_freq": "1 year",
+        "enabled": True, "notes": None,
+        "last_sync_started_at": None, "last_upstream_modified": None,
+        "last_sync_rows": 12345,
+        "observation_count": 12345, "earliest_year": 2010,
+        "latest_year": 2024, "distinct_dim_combos": 6,
+    }
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.get_dataset_detail",
+        return_value=detail,
+    ):
+        r = _client().get("/datasets/demo_r_pjangrp3")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["earliest_year"] == 2010
+    assert body["latest_year"] == 2024
+    assert body["distinct_dim_combos"] == 6
+
+
+# ── /series ──────────────────────────────────────────────────────────
+
+
+def test_series_requires_geo_or_nuts_level():
+    r = _client().get("/series?dataset=x")
+    assert r.status_code == 400
+    assert "geo" in r.json()["detail"].lower()
+
+
+def test_series_invalid_dimensions_json_400():
+    r = _client().get("/series?dataset=x&geo=DE&dimensions=not-json")
+    assert r.status_code == 400
+    assert "dimensions" in r.json()["detail"].lower()
+
+
+def test_series_returns_payload():
+    obs = [
+        Observation(
+            geo_code="DE21",
+            year=2023,
+            time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            dimensions={"unit": "MIO_EUR"},
+            value=100.0, flags=None,
+        ),
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.fetch_series",
+        return_value=obs,
+    ):
+        r = _client().get("/series?dataset=nama_10r_2gdp&nuts_level=2")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["truncated"] is False
+    assert body["data"][0]["geo_code"] == "DE21"
+
+
+def test_series_truncated_when_at_limit():
+    # Build N observations equal to the configured limit so `truncated` flips True.
+    one = Observation(
+        geo_code="DE21",
+        year=2023,
+        time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        dimensions={},
+        value=1.0, flags=None,
+    )
+    obs = [one] * 100_000
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.fetch_series",
+        return_value=obs,
+    ):
+        r = _client().get("/series?dataset=x&nuts_level=2")
+    assert r.json()["truncated"] is True
+
+
+# ── /snapshot ────────────────────────────────────────────────────────
+
+
+def test_snapshot_returns_cells_and_available_combos():
+    cells = [SnapshotCell(geo_code="DE21", value=100.0)]
+    available = [{"unit": "MIO_EUR"}]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.snapshot",
+        return_value=(cells, available),
+    ):
+        r = _client().get(
+            "/snapshot?dataset=nama_10r_2gdp&year=2023&nuts_level=2",
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["available_dim_combos"] == [{"unit": "MIO_EUR"}]
+    assert body["cells"][0]["geo_code"] == "DE21"
+
+
+def test_snapshot_validates_dimensions_json():
+    r = _client().get(
+        "/snapshot?dataset=x&year=2023&nuts_level=2&dimensions=not-json",
+    )
+    assert r.status_code == 400
+
+
+def test_snapshot_nuts_level_bounded():
+    r = _client().get("/snapshot?dataset=x&year=2023&nuts_level=4")
+    assert r.status_code == 422
