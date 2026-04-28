@@ -94,11 +94,29 @@ spec:
                   # Default-down: if the pod is killed (OOM, deadline,
                   # node eviction) the trap emits a down ping before
                   # exit. Status only flips to "up" on rc=0.
+                  #
+                  # We push via python urllib rather than curl — the
+                  # gmr-api Docker image is python:3.12-slim with no
+                  # curl. Python is guaranteed present (it's how we run
+                  # the loader anyway).
                   KUMA_STATUS=down
                   KUMA_SUMMARY=running
                   push_kuma() {
                     [ -z "$KUMA_PUSH_URL" ] && return 0
-                    curl -fsS -m 10 "$KUMA_PUSH_URL?status=$KUMA_STATUS&msg=$KUMA_SUMMARY&ping=" || true
+                    python3 -c "
+                  import os, sys, urllib.parse, urllib.request
+                  url = os.environ['KUMA_PUSH_URL']
+                  qs = urllib.parse.urlencode({
+                      'status': os.environ.get('KUMA_STATUS', 'down'),
+                      'msg':    os.environ.get('KUMA_SUMMARY', 'unknown'),
+                      'ping':   '',
+                  })
+                  full = url + ('&' if '?' in url else '?') + qs
+                  try:
+                      urllib.request.urlopen(full, timeout=10).read()
+                  except Exception as e:  # noqa: BLE001
+                      sys.stderr.write(f'kuma push failed: {e}\n')
+                  " || true
                   }
                   trap push_kuma EXIT
                   set +e
@@ -111,5 +129,6 @@ spec:
                     | sed 's/[^A-Za-z0-9 .,=-]/_/g' | tr ' ' '+' | head -c 200)
                   KUMA_SUMMARY=${KUMA_SUMMARY:-rc=$rc}
                   [ "$rc" -eq 0 ] && KUMA_STATUS=up
+                  export KUMA_STATUS KUMA_SUMMARY
                   exit $rc
 {{- end -}}
