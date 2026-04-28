@@ -24,7 +24,12 @@ CONSOLIDATOR_URL = os.environ.get(
     "CONSOLIDATOR_URL",
     "http://gmr-consolidator.gmr.svc.cluster.local:8000",
 )
-HOOK_TIMEOUT = float(os.environ.get("CONSOLIDATOR_HOOK_TIMEOUT", "5"))
+# 30s default — the consolidator pod runs both the rule engine and the
+# resolver, and the rule engine is sometimes saturated by long sweeps.
+# A 5s ceiling caused every /resolve call from the sanctions ETL to
+# time out during the first manual trigger; 30s tolerates the wait
+# without making transient consolidator hiccups fatal to the ETL.
+HOOK_TIMEOUT = float(os.environ.get("CONSOLIDATOR_HOOK_TIMEOUT", "30"))
 
 log = logging.getLogger(__name__)
 

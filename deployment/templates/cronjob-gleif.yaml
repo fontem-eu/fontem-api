@@ -1,0 +1,19 @@
+{{/*
+GLEIF Level 1 — LEI registry, the Tier-1 anchor for the resolver's
+identity service. Weekly cadence; the GLEIF feed publishes daily
+deltas but a weekly full-rebuild keeps Company.lei → gmr_id stable
+without having to engineer delta merging.
+*/}}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "etl-gleif"
+      "schedule"        "0 3 * * 0"
+      "module"          "src.etl.load_gleif"
+      "args"            (list)
+      "deadlineSeconds" 14400
+      "cpuRequest"      "500m"
+      "cpuLimit"        "2"
+      "memRequest"      "1Gi"
+      "memLimit"        "4Gi"
+      "extraEnv"        (list)
+      "Values"          .Values
+      "Release"         .Release) -}}

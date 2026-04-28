@@ -1,51 +1,13 @@
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: etl-cdp
-  namespace: {{ .Release.Namespace }}
-spec:
-  schedule: "0 4 1 1,4,7,10 *"      # quarterly 1st at 04:00 UTC
-  concurrencyPolicy: Forbid
-  suspend: true
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      activeDeadlineSeconds: 3600
-      backoffLimit: 1
-      template:
-        spec:
-          restartPolicy: Never
-          imagePullSecrets:
-            - name: regcred
-          containers:
-            - name: etl-cdp
-              image: contribute.void42.internal/golden/gmr-api:{{ .Values.version }}
-              imagePullPolicy: Always
-              env:
-                - name: NEO4J_URI
-                  valueFrom:
-                    secretKeyRef:
-                      name: neo4j-credentials
-                      key: NEO4J_URI
-                - name: NEO4J_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: neo4j-credentials
-                      key: NEO4J_USER
-                - name: NEO4J_PASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: neo4j-credentials
-                      key: NEO4J_PASSWORD
-              command:
-                - python
-                - -m
-                - src.etl.load_cdp
-              resources:
-                requests:
-                  cpu: 250m
-                  memory: 512Mi
-                limits:
-                  cpu: "1"
-                  memory: 2Gi
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "etl-cdp"
+      "schedule"        "0 4 1 1,4,7,10 *"
+      "module"          "src.etl.load_cdp"
+      "args"            (list)
+      "deadlineSeconds" 3600
+      "cpuRequest"      "250m"
+      "cpuLimit"        "1"
+      "memRequest"      "512Mi"
+      "memLimit"        "2Gi"
+      "extraEnv"        (list)
+      "Values"          .Values
+      "Release"         .Release) -}}

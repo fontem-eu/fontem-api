@@ -1,57 +1,13 @@
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: etl-nuts
-  namespace: {{ .Release.Namespace }}
-spec:
-  schedule: "0 2 1 * *"              # monthly 1st at 02:00 UTC
-  concurrencyPolicy: Forbid
-  suspend: true
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      activeDeadlineSeconds: 3600
-      backoffLimit: 1
-      template:
-        spec:
-          restartPolicy: Never
-          imagePullSecrets:
-            - name: regcred
-          containers:
-            - name: etl-nuts
-              image: contribute.void42.internal/golden/gmr-api:{{ .Values.version }}
-              imagePullPolicy: Always
-              env:
-                - name: NEO4J_URI
-                  valueFrom:
-                    secretKeyRef:
-                      name: neo4j-credentials
-                      key: NEO4J_URI
-                - name: NEO4J_USER
-                  valueFrom:
-                    secretKeyRef:
-                      name: neo4j-credentials
-                      key: NEO4J_USER
-                - name: NEO4J_PASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: neo4j-credentials
-                      key: NEO4J_PASSWORD
-              # Eurostat's HTTPS endpoint for the NUTS CSV is unreachable from
-              # our cluster (TLS handshake times out). Use the CSV bundled in
-              # the image — refresh by updating src/etl/data/NUTS_AT_2024.csv
-              # when a new Eurostat revision comes out.
-              command:
-                - python
-                - -m
-                - src.etl.load_nuts
-                - --file
-                - /app/src/etl/data/NUTS_AT_2024.csv
-              resources:
-                requests:
-                  cpu: 250m
-                  memory: 512Mi
-                limits:
-                  cpu: "1"
-                  memory: 2Gi
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "etl-nuts"
+      "schedule"        "0 2 1 * *"
+      "module"          "src.etl.load_nuts"
+      "args"            (list)
+      "deadlineSeconds" 3600
+      "cpuRequest"      "250m"
+      "cpuLimit"        "1"
+      "memRequest"      "512Mi"
+      "memLimit"        "2Gi"
+      "extraEnv"        (list)
+      "Values"          .Values
+      "Release"         .Release) -}}
