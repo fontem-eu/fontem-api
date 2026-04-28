@@ -1,7 +1,8 @@
 """Tests for the TED company matcher."""
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from src.etl.ted_matcher import TedMatcher
+from src.etl._hooks import ResolveMatch, ResolveResult
+from src.etl.ted_matcher import FUZZY_ACCEPT_CONF, TedMatcher
 
 
 def _mock_session(vat_cache=None):
@@ -50,10 +51,12 @@ def test_layer1_vat_cache_hit():
 
 
 def test_layer5_creates_new_with_vat():
-    """Layer 5: unknown company with VAT creates new node."""
+    """Layer 5: unknown company with VAT creates new node when /resolve
+    returns no match."""
     session = _mock_session()
     matcher = TedMatcher(session)
-    result = matcher.match_company("Unknown Corp", "FR", vat="FR999")
+    with patch("src.etl.ted_matcher.resolve_entity", return_value=None):
+        result = matcher.match_company("Unknown Corp", "FR", vat="FR999")
     assert result.layer == 5
     assert result.created_new is True
     assert result.gmr_id  # should be a valid UUID string
@@ -63,15 +66,17 @@ def test_layer5_creates_new_without_vat():
     """Layer 5: unknown company without VAT falls back to name."""
     session = _mock_session()
     matcher = TedMatcher(session)
-    result = matcher.match_company("Mystery Inc", "US")
+    with patch("src.etl.ted_matcher.resolve_entity", return_value=None):
+        result = matcher.match_company("Mystery Inc", "US")
     assert result.layer == 5
     assert result.created_new is True
 
 
 def test_stats_tracking():
-    """Match stats are tracked correctly."""
+    """Match stats are tracked correctly. Two cache hits → both Layer 1."""
     session = _mock_session(vat_cache={"DE1": "gid1", "DE2": "gid2"})
     matcher = TedMatcher(session)
+    # Cache hits skip /resolve entirely, so no patching needed.
     matcher.match_company("A", "DE", vat="DE1")
     matcher.match_company("B", "DE", vat="DE2")
     summary = matcher.stats.summary()
@@ -80,11 +85,13 @@ def test_stats_tracking():
 
 
 def test_authority_id_deterministic():
-    """Authority IDs are deterministic for the same name + country."""
+    """Authority IDs are deterministic for the same name + country
+    when no resolver match exists."""
     session = _mock_session()
     matcher = TedMatcher(session)
-    id1 = matcher.match_authority("Ministry of X", "DE")
-    id2 = matcher.match_authority("Ministry of X", "DE")
+    with patch("src.etl.ted_matcher.resolve_entity", return_value=None):
+        id1 = matcher.match_authority("Ministry of X", "DE")
+        id2 = matcher.match_authority("Ministry of X", "DE")
     assert id1 == id2
 
 
@@ -92,6 +99,132 @@ def test_authority_id_differs_by_country():
     """Different countries produce different authority IDs."""
     session = _mock_session()
     matcher = TedMatcher(session)
-    id_de = matcher.match_authority("Ministry of X", "DE")
-    id_fr = matcher.match_authority("Ministry of X", "FR")
+    with patch("src.etl.ted_matcher.resolve_entity", return_value=None):
+        id_de = matcher.match_authority("Ministry of X", "DE")
+        id_fr = matcher.match_authority("Ministry of X", "FR")
     assert id_de != id_fr
+
+
+# ─────────────────────────────────────────────────────────────────────
+# /resolve integration — Layer 2 (deterministic) and Layer 3 (fuzzy
+# accept) and the fall-through to Layer 5 on ambiguous low-conf.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _resolve_match(gmr_id_value, tier, conf):
+    return ResolveResult(
+        hint="matched",
+        match=ResolveMatch(
+            gmr_id=gmr_id_value, name="x", country="DEU", lei=None,
+            tier=tier, confidence=conf,
+        ),
+        candidates=[],
+        normalised_country="DEU",
+    )
+
+
+def _resolve_ambiguous(top_conf, second_conf=None):
+    candidates = [
+        ResolveMatch(gmr_id="top", name="A", country="DEU", lei=None,
+                     tier="fuzzy", confidence=top_conf),
+    ]
+    if second_conf is not None:
+        candidates.append(
+            ResolveMatch(gmr_id="second", name="B", country="DEU", lei=None,
+                         tier="fuzzy", confidence=second_conf),
+        )
+    return ResolveResult(
+        hint="ambiguous", match=None, candidates=candidates,
+        normalised_country="DEU",
+    )
+
+
+def test_layer2_resolver_lei_match():
+    """When /resolve returns a hard-id match, layer is 2."""
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch(
+        "src.etl.ted_matcher.resolve_entity",
+        return_value=_resolve_match("gmr-lei", "lei", 1.0),
+    ):
+        result = matcher.match_company("Some Corp", "DE", vat="DE99")
+    assert result.layer == 2
+    assert result.gmr_id == "gmr-lei"
+    assert result.resolver_tier == "lei"
+
+
+def test_layer2_resolver_name_country_match():
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch(
+        "src.etl.ted_matcher.resolve_entity",
+        return_value=_resolve_match("gmr-nc", "name_country", 0.95),
+    ):
+        result = matcher.match_company("Long Specific Name Inc", "DE")
+    assert result.layer == 2
+    assert result.resolver_tier == "name_country"
+
+
+def test_layer3_resolver_fuzzy_single_high_confidence_accepted():
+    """Single fuzzy candidate above the floor — accept it (matches the
+    old Dice>0.85 behaviour but with the resolver's country guard)."""
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch(
+        "src.etl.ted_matcher.resolve_entity",
+        return_value=_resolve_ambiguous(top_conf=0.92),
+    ):
+        result = matcher.match_company("Borderline Match GmbH", "DE")
+    assert result.layer == 3
+    assert result.gmr_id == "top"
+    assert result.confidence >= FUZZY_ACCEPT_CONF
+
+
+def test_layer5_when_fuzzy_top_below_floor():
+    """A weak fuzzy hit must NOT auto-match — fall through to Layer 5."""
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch(
+        "src.etl.ted_matcher.resolve_entity",
+        return_value=_resolve_ambiguous(top_conf=0.50),
+    ):
+        result = matcher.match_company("Weak Fuzzy Match", "DE")
+    assert result.layer == 5
+    assert result.created_new is True
+
+
+def test_layer5_when_two_fuzzy_above_floor():
+    """Two candidates both above the floor means we can't pick one
+    deterministically — fall through to Layer 5 rather than guess."""
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch(
+        "src.etl.ted_matcher.resolve_entity",
+        return_value=_resolve_ambiguous(top_conf=0.92, second_conf=0.90),
+    ):
+        result = matcher.match_company("Ambiguous Match", "DE")
+    assert result.layer == 5
+
+
+def test_layer5_when_resolver_unavailable():
+    """Transport failure → resolver_failures stat increments and we
+    fall through to Layer 5 (silent miss > silent corruption)."""
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch("src.etl.ted_matcher.resolve_entity", return_value=None):
+        result = matcher.match_company("Any Long Name Inc", "DE")
+    assert result.layer == 5
+    assert matcher.stats.resolver_failures == 1
+
+
+def test_authority_resolver_match_short_circuits_uuid():
+    """Authority resolution uses /resolve when available; falls back to
+    deterministic UUID otherwise."""
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch(
+        "src.etl.ted_matcher.resolve_entity",
+        return_value=_resolve_match("auth-existing", "name_country", 0.95),
+    ):
+        out = matcher.match_authority("Ministry of Existing", "DE")
+    assert out == "auth-existing"

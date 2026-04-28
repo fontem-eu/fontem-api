@@ -24,6 +24,7 @@ import httpx
 from neo4j import GraphDatabase
 
 from . import gmr_id
+from ._hooks import resolve_entity
 
 logger = logging.getLogger(__name__)
 
@@ -53,70 +54,37 @@ SET s.name             = row.name,
     s.eu_reference     = row.eu_reference
 """
 
-# Minimum name length for any sanction-to-company match. Anything shorter
-# is almost always an acronym (e.g. "AMD", "TSA", "LRA", "NADA", "CRL")
-# that collides with unrelated EU companies. The EU XML stores the short
-# code as the primary `name` and the actual entity name in `aliases`,
-# which is why naive name equality blew up.
+# Sanction → Company linking is delegated to gmr-consolidator's
+# /resolve endpoint. Each SanctionedEntity record carries a primary
+# `name` (often a short acronym) and a list of `aliases` (the actual
+# multilingual entity names). We try /resolve once with the primary
+# name, then fall back to each alias if no confident match. All
+# guards (MIN_NAME_LEN=6, country agreement, score floor) live in
+# the resolver — a single source of truth for matching.
+
+# The MIN_NAME_LEN constant is kept local for backward-compatible
+# imports in test_load_eu_sanctions.py; the resolver enforces the
+# same value internally.
 MIN_NAME_LEN = 6
 
-# Exact match: company name == sanction name AND country agrees AND name
-# is long enough to be specific. Country guard catches the cross-regime
-# false positives (a French Company "AMD" cannot be the Iranian-regime
-# sanctioned entity "AMD"). When the sanction record carries no
-# nationality (legitimate gap in the upstream data), we still require
-# the company to declare its own country and treat the absent
-# nationality as a hard mismatch — better silent miss than defamation.
-MATCH_COMPANY_EXACT = """
-UNWIND $batch AS row
+# Cypher to write SANCTIONED edges from resolver results. Sanctions
+# matches always start as `reviewed=false` regardless of tier, because
+# the consequence of a wrong attribution is severe (defamation risk)
+# and the upstream data is too sparse to lean on hard IDs alone (the
+# EU sanctions list carries no LEIs).
+MERGE_SANCTIONED = """
+UNWIND $rows AS row
 MATCH (s:SanctionedEntity {entity_id: row.entity_id})
-WHERE s.name IS NOT NULL
-  AND size(s.name) >= $min_name_len
-  AND coalesce(s.nationality, '') <> ''
-WITH s, row
-MATCH (c:Company)
-WHERE c.name = s.name
-  AND coalesce(c.country, '') = s.nationality
+MATCH (c:Company {gmr_id: row.gmr_id})
 MERGE (c)-[r:SANCTIONED {source: 'eu_consolidated'}]->(s)
 ON CREATE SET r.since = row.designation_date,
-              r.match_method = 'exact_name_country',
+              r.tier = row.tier,
+              r.confidence = row.confidence,
+              r.matched_via_alias = row.matched_via_alias,
+              r.method = 'resolver',
+              r.detected_at = datetime(),
               r.reviewed = false
 """
-
-# Fuzzy path: full-text scored hits, but ALWAYS gated by country and
-# minimum length, ALWAYS recorded as SAME_AS {reviewed: false} for the
-# manual review queue, never used to create a SANCTIONED edge directly.
-# Score threshold lifted from 1.5 → 4.0; the previous bar admitted
-# anything with a single-token overlap.
-MATCH_COMPANY_FUZZY = """
-UNWIND $batch AS row
-MATCH (s:SanctionedEntity {entity_id: row.entity_id})
-WHERE s.name IS NOT NULL
-  AND size(s.name) >= $min_name_len
-  AND coalesce(s.nationality, '') <> ''
-WITH s, row,
-     reduce(n = s.name, c IN ['+','-','&&','||','!','(',')','{','}',
-            '[',']','^','"','~','*','?',':','\\\\','/']
-            | replace(n, c, ' ')) AS clean_name
-WHERE size(trim(clean_name)) >= $min_name_len
-CALL db.index.fulltext.queryNodes('company_name_ft', clean_name)
-     YIELD node AS c, score
-WHERE score > 4.0
-  AND coalesce(c.country, '') = s.nationality
-WITH s, c, score ORDER BY score DESC LIMIT 1
-MERGE (s)-[:SAME_AS {
-    confidence: 0.6,
-    method: 'sanction_name_match',
-    detected_at: datetime(),
-    reviewed: false
-}]->(c)
-"""
-
-CREATE_FT_INDEX = """
-CREATE FULLTEXT INDEX company_name_ft IF NOT EXISTS
-FOR (c:Company) ON EACH [c.name]
-"""
-
 
 NS = "http://eu.europa.ec/fpi/fsd/export"
 
@@ -267,31 +235,72 @@ def parse_sanctions_xml(xml_bytes):
         }
 
 
+def _resolve_sanction_to_company(entity: dict) -> dict | None:
+    """Try /resolve with the sanction's primary name, then each alias.
+
+    Returns a row dict ready for MERGE_SANCTIONED, or None if no
+    confident match was found across name + aliases.
+
+    The EU XML stores the short code in `name` (e.g. "AMD") and the
+    real legal entity name in `aliases` (e.g. "Aran Modern Devices").
+    Iterating aliases lets us catch real matches that the primary
+    name alone would miss; the resolver's MIN_NAME_LEN guard rejects
+    each acronym attempt automatically.
+    """
+    nationality = entity.get("nationality") or ""
+    if not nationality:
+        return None
+    candidates = [entity.get("name") or ""]
+    candidates.extend(entity.get("aliases") or [])
+    for idx, candidate_name in enumerate(candidates):
+        if not candidate_name:
+            continue
+        result = resolve_entity(
+            entity_type="Company",
+            name=candidate_name,
+            country=nationality,
+        )
+        if result is None or result.match is None:
+            continue
+        if result.hint != "matched":
+            continue
+        return {
+            "entity_id": entity["entity_id"],
+            "gmr_id": result.match.gmr_id,
+            "designation_date": entity["designation_date"],
+            "tier": result.match.tier,
+            "confidence": result.match.confidence,
+            "matched_via_alias": idx > 0,
+        }
+    return None
+
+
 def load_into_neo4j(driver, entities):
-    """MERGE SanctionedEntity nodes and match against Company nodes."""
+    """MERGE SanctionedEntity nodes; resolve each via /resolve and write
+    a SANCTIONED edge for confident matches only.
+
+    The previous in-cypher MATCH_COMPANY_EXACT / _FUZZY paths produced
+    8 false positives in production (defamation risk). The /resolve
+    service is now the single guard implementation; this loader only
+    persists what the resolver confidently identifies.
+    """
     total = 0
-    matched_exact = 0
-    matched_fuzzy = 0
+    matched = 0
+    matched_via_alias = 0
+    no_match = 0
     batch = []
     t0 = time.time()
 
     with driver.session() as session:
         session.run(CONSTRAINT_CYPHER)
-        session.run(CREATE_FT_INDEX)
-        logger.info("Constraints and indexes ensured")
+        logger.info("Constraints ensured")
 
+        all_entities: list[dict] = []
         for entity in entities:
             batch.append(entity)
+            all_entities.append(entity)
             if len(batch) >= BATCH_SIZE:
                 session.run(MERGE_ENTITY, batch=batch)
-                result = session.run(
-                    MATCH_COMPANY_EXACT, batch=batch, min_name_len=MIN_NAME_LEN,
-                )
-                matched_exact += result.consume().counters.relationships_created
-                result = session.run(
-                    MATCH_COMPANY_FUZZY, batch=batch, min_name_len=MIN_NAME_LEN,
-                )
-                matched_fuzzy += result.consume().counters.relationships_created
                 total += len(batch)
                 batch = []
                 if total % 2000 < BATCH_SIZE:
@@ -299,21 +308,34 @@ def load_into_neo4j(driver, entities):
 
         if batch:
             session.run(MERGE_ENTITY, batch=batch)
-            result = session.run(
-                MATCH_COMPANY_EXACT, batch=batch, min_name_len=MIN_NAME_LEN,
-            )
-            matched_exact += result.consume().counters.relationships_created
-            result = session.run(
-                MATCH_COMPANY_FUZZY, batch=batch, min_name_len=MIN_NAME_LEN,
-            )
-            matched_fuzzy += result.consume().counters.relationships_created
             total += len(batch)
+
+        # Resolve sanctions → companies via /resolve. One HTTP call per
+        # alias-attempt; most sanctions have no Company match at all so
+        # this fans out fast. EU sanctions list is small (~3k entries).
+        logger.info("Resolving sanction → company links via /resolve ...")
+        rows: list[dict] = []
+        for entity in all_entities:
+            row = _resolve_sanction_to_company(entity)
+            if row is None:
+                no_match += 1
+                continue
+            rows.append(row)
+            matched += 1
+            if row["matched_via_alias"]:
+                matched_via_alias += 1
+
+        if rows:
+            for i in range(0, len(rows), BATCH_SIZE):
+                chunk = rows[i : i + BATCH_SIZE]
+                session.run(MERGE_SANCTIONED, rows=chunk)
 
     elapsed = time.time() - t0
     return {
         "total": total,
-        "matched_exact": matched_exact,
-        "matched_fuzzy": matched_fuzzy,
+        "matched": matched,
+        "matched_via_alias": matched_via_alias,
+        "no_match": no_match,
         "elapsed_s": round(elapsed, 1),
     }
 
@@ -383,10 +405,12 @@ def main(argv=None):
         driver.close()
 
     logger.info(
-        "Done: %d entities, %d exact matches, %d fuzzy matches in %.1fs",
+        "Done: %d entities, %d resolver matches (%d via alias), "
+        "%d no_match in %.1fs",
         summary["total"],
-        summary["matched_exact"],
-        summary["matched_fuzzy"],
+        summary["matched"],
+        summary["matched_via_alias"],
+        summary["no_match"],
         summary["elapsed_s"],
     )
 

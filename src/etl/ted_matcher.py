@@ -1,14 +1,18 @@
 """
-TED Company Matcher — 5-layer identity resolution
-===================================================
-Maps an eForms Organization to an existing or new Company node gmr_id.
+TED Company / Authority Matcher
+================================
+Maps an eForms Organization to an existing or new gmr_id, calling
+gmr-consolidator's /resolve endpoint for the deterministic tiers.
+Layer 5 (create new node) stays local because /resolve is read-only
+by design — it never invents new gmr_ids.
 
-Layers (highest to lowest confidence):
-  1. VAT direct match (cached on Company.vat)
-  2. VIES validation + enrichment (targeted, not bulk)
-  3. GLEIF registration lookup
-  4. Fuzzy name match (Neo4j full-text + Dice similarity)
-  5. Create new Company node
+Layers:
+  1. VAT direct match (in-process cache, hot path)
+  2. /resolve LEI/VAT/CIK or name+country tiers
+  3. /resolve fuzzy candidates (single high-confidence top candidate
+     accepted; otherwise treated as no-match to avoid the false
+     positives the old Dice-only matcher allowed)
+  4. Layer 5: deterministic new gmr_id from VAT or normalised name
 """
 from __future__ import annotations
 
@@ -16,8 +20,16 @@ import logging
 from dataclasses import dataclass, field
 
 from . import gmr_id
+from ._hooks import resolve_entity
 
 logger = logging.getLogger(__name__)
+
+
+# Confidence floor for accepting a /resolve fuzzy candidate as the
+# match. The resolver caps fuzzy confidence at ~0.94; a single
+# candidate above this floor is what the old Dice-based Layer 4
+# would have accepted. Below this we fall through to a new node.
+FUZZY_ACCEPT_CONF = 0.85
 
 
 @dataclass
@@ -28,6 +40,7 @@ class MatchResult:
     layer: int
     confidence: float
     created_new: bool = False
+    resolver_tier: str | None = None
 
 
 @dataclass
@@ -38,7 +51,7 @@ class MatcherStats:
         default_factory=lambda: {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
     )
     total: int = 0
-    vies_failures: int = 0
+    resolver_failures: int = 0
 
     def record(self, layer: int):
         """Record a match at the given layer."""
@@ -50,7 +63,7 @@ class MatcherStats:
         return {
             "total": self.total,
             "by_layer": dict(self.layer_counts),
-            "vies_failures": self.vies_failures,
+            "resolver_failures": self.resolver_failures,
         }
 
 
@@ -60,7 +73,8 @@ class TedMatcher:
     Parameters
     ----------
     session:
-        An active Neo4j session for lookups.
+        An active Neo4j session for warming the VAT cache. (Lookups
+        themselves go through /resolve.)
     """
 
     def __init__(self, session) -> None:
@@ -90,76 +104,63 @@ class TedMatcher:
     def match_company(
         self, name: str, country: str, vat: str | list | None = None,
     ) -> MatchResult:
-        """Resolve an organization to a gmr_id using the 5-layer strategy."""
+        """Resolve an organization to a gmr_id."""
         # Normalize VAT: eforms may return a list in older formats
         if isinstance(vat, list):
             vat = vat[0] if vat else None
 
-        # Layer 1: VAT direct match (cached)
+        # Layer 1: VAT direct match (cached). Skips an HTTP round-trip
+        # for repeated awardees within a single ingestion run.
         if vat and vat in self._vat_cache:
             self.stats.record(1)
             return MatchResult(
                 gmr_id=self._vat_cache[vat], layer=1, confidence=1.0,
             )
 
-        # Layer 2: VIES — skipped for now (targeted enrichment, not bulk)
-        # Will be added as a separate pass for high-value unmatched
-
-        # Layer 3: GLEIF LEI lookup by VAT
-        if vat:
-            result = self._session.run(
-                "MATCH (c:Company) WHERE c.vat = $vat "
-                "RETURN c.gmr_id AS gid LIMIT 1",
-                vat=vat,
-            ).single()
-            if result:
-                gid = result["gid"]
-                self._vat_cache[vat] = gid
+        # Layer 2 + 3: ask /resolve. The resolver handles VAT lookup
+        # (Tier 2), name+country (Tier 3), and fuzzy candidates (Tier 4)
+        # with the same guards used everywhere else (MIN_NAME_LEN=6,
+        # country normalisation, score floor 4.0).
+        result = resolve_entity(
+            entity_type="Company", name=name, country=country, vat=vat,
+        )
+        if result is None:
+            self.stats.resolver_failures += 1
+        elif result.hint == "matched" and result.match is not None:
+            tier = result.match.tier
+            layer = 2 if tier in ("lei", "vat", "cik", "name_country") else 3
+            self.stats.record(layer)
+            if vat:
+                self._vat_cache[vat] = result.match.gmr_id
+            return MatchResult(
+                gmr_id=result.match.gmr_id,
+                layer=layer,
+                confidence=result.match.confidence,
+                resolver_tier=tier,
+            )
+        elif result.hint == "ambiguous" and result.candidates:
+            # Single high-confidence top candidate matches the old
+            # Dice>0.85 behaviour without the unguarded Layer 4 issues.
+            top = result.candidates[0]
+            second = result.candidates[1] if len(result.candidates) > 1 else None
+            if (
+                top.confidence >= FUZZY_ACCEPT_CONF
+                and (second is None or second.confidence < FUZZY_ACCEPT_CONF)
+            ):
                 self.stats.record(3)
-                return MatchResult(gmr_id=gid, layer=3, confidence=0.95)
-
-        # Layer 4: Fuzzy name match (requires full-text index)
-        if name and country:
-            try:
-                result = self._session.run(
-                    "CALL db.index.fulltext.queryNodes("
-                    "  'companyNameIndex', $name + '~'"
-                    ") YIELD node, score "
-                    "WHERE node.country = $country AND score > 0.3 "
-                    "WITH node, apoc.text.sorensenDiceSimilarity("
-                    "  toLower($name), toLower(node.name_normalized)"
-                    ") AS dice "
-                    "WHERE dice > 0.85 "
-                    "RETURN node.gmr_id AS gid, dice "
-                    "ORDER BY dice DESC LIMIT 1",
-                    name=name, country=country,
-                ).single()
-            except Exception:  # pylint: disable=broad-exception-caught
-                # Full-text index may not exist yet — skip to Layer 5
-                result = None
-            if result:
-                gid = result["gid"]
                 if vat:
-                    self._vat_cache[vat] = gid
-                    # Set VAT on the matched node for future Layer 1 hits
-                    self._session.run(
-                        "MATCH (c:Company {gmr_id: $gid}) SET c.vat = $vat",
-                        gid=gid, vat=vat,
-                    )
-                self.stats.record(4)
+                    self._vat_cache[vat] = top.gmr_id
                 return MatchResult(
-                    gmr_id=gid, layer=4, confidence=result["dice"],
+                    gmr_id=top.gmr_id, layer=3, confidence=top.confidence,
+                    resolver_tier="fuzzy",
                 )
 
-        # Layer 5: Create new node
+        # Layer 5: create new node with deterministic UUID
         if vat:
             gid = gmr_id.from_vat(country or "XX", vat)
+            self._vat_cache[vat] = gid
         else:
             gid = gmr_id.from_name(country or "XX", name or "UNKNOWN")
-
-        if vat:
-            self._vat_cache[vat] = gid
-
         self.stats.record(5)
         return MatchResult(
             gmr_id=gid, layer=5, confidence=0.0, created_new=True,
@@ -170,9 +171,16 @@ class TedMatcher:
     ) -> str:
         """Resolve an authority to an authority_id.
 
-        Uses the same fuzzy approach but against Authority nodes.
-        Falls back to generating a deterministic UUID.
+        Tries /resolve for the deterministic tiers; falls back to a
+        deterministic UUID derived from (country, name) for new
+        authorities.
         """
+        result = resolve_entity(
+            entity_type="Authority", name=name, country=country,
+        )
+        if result is not None and result.hint == "matched" and result.match is not None:
+            return result.match.gmr_id
+
         import uuid  # pylint: disable=import-outside-toplevel
         namespace = gmr_id.GMR_NAMESPACE
         canonical = f"ted_auth:{(country or 'XX').upper()}:{(name or '').strip().upper()}"
