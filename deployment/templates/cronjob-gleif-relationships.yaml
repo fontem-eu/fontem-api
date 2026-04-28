@@ -1,0 +1,17 @@
+{{/*
+GLEIF Level 2 — LEI parent/child relationships. Runs after the
+Level 1 weekly load (Sunday 03:00 + 4h slot for L1 to finish).
+*/}}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "etl-gleif-relationships"
+      "schedule"        "0 7 * * 0"
+      "module"          "src.etl.load_gleif_relationships"
+      "args"            (list)
+      "deadlineSeconds" 7200
+      "cpuRequest"      "250m"
+      "cpuLimit"        "1"
+      "memRequest"      "1Gi"
+      "memLimit"        "3Gi"
+      "extraEnv"        (list)
+      "Values"          .Values
+      "Release"         .Release) -}}
