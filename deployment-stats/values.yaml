@@ -8,8 +8,13 @@
 # Image pinned to a specific TimescaleDB-HA pg16 release. PostGIS comes
 # bundled in the -ha variant; we don't enable Patroni clustering features.
 # Override `image.tag` per-env in gitops/<env>/fontem-stats.yaml.
+#
+# Fully-qualified `docker.io/...` form is required: the cluster's
+# Kyverno restrict-image-registries policy allowlists `docker.io/*` but
+# not bare-namespace short forms (containerd resolves both to the same
+# image, but Kyverno sees the literal string in the Pod spec).
 image:
-  repository: timescale/timescaledb-ha
+  repository: docker.io/timescale/timescaledb-ha
   tag: pg16
   pullPolicy: IfNotPresent
 

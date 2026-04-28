@@ -21,6 +21,65 @@ jobs:
       - name: Lint
         run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
 
+  # Helm chart sanity gate — runs on every push, doesn't need cluster
+  # access. Catches the class of mistake that only surfaces on Argo
+  # sync today: image references that don't match the cluster's Kyverno
+  # restrict-image-registries allowlist (e.g. `timescale/foo:bar`
+  # without the `docker.io/` prefix), broken templates, and references
+  # to non-existent image tags. Cheap — `helm template` is local-only.
+  chart:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz \
+            | tar -xz -C /tmp linux-amd64/helm
+          install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+      - name: Render fontem-stats chart with prod values
+        run: |
+          # Provide a stand-in cronjobs.imageTag so `required` clears.
+          # Renders against the chart's own defaults plus the prod
+          # values (which is what Argo merges in production).
+          helm template fontem-stats deployment-stats \
+            --values deployment-stats/values.yaml \
+            --set cronjobs.imageTag=ci-render-test \
+            > /tmp/rendered.yaml
+          echo "rendered $(wc -l < /tmp/rendered.yaml) lines"
+      - name: Image-registry allowlist gate
+        # Mirrors the cluster's Kyverno restrict-image-registries policy.
+        # Every `image:` referenced in the rendered chart must match one
+        # of the allowed prefixes. Fail-fast at PR time instead of
+        # discovering on Argo sync.
+        run: |
+          python3 - <<'PY'
+          import re, sys, fnmatch
+          ALLOWLIST = [
+              "contribute.void42.internal/*",
+              "neo4j:*", "postgres:*", "minio/*", "nginx:*",
+              "ghcr.io/*", "docker.io/*", "cr.l5d.io/*",
+          ]
+          bad = []
+          with open("/tmp/rendered.yaml") as f:
+              for line in f:
+                  m = re.match(r'^\s*image:\s*"?([^"\s]+)"?', line)
+                  if not m:
+                      continue
+                  ref = m.group(1)
+                  if any(fnmatch.fnmatchcase(ref, p) for p in ALLOWLIST):
+                      print(f"OK   {ref}")
+                  else:
+                      print(f"FAIL {ref}")
+                      bad.append(ref)
+          if bad:
+              print()
+              print(f"::error::{len(bad)} image reference(s) not in cluster Kyverno allowlist:")
+              for b in bad: print(f"  - {b}")
+              print(f"Allowlist: {ALLOWLIST}")
+              sys.exit(1)
+          PY
+
   # Pre-build supply-chain gate; see gmr-ci/actions/osv-scan.
   security:
     runs-on: ubuntu-latest
