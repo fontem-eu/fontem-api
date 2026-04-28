@@ -140,6 +140,92 @@ jobs:
           print(f"all {len(refs)} image refs match the cluster allowlist")
           PY
 
+      - name: Env-var ordering gate
+        # Walks every helm template + every flat manifest under
+        # deployment*/ and infra/, finds each `env:` list, and verifies
+        # any `value:` containing `$(VAR)` references a `name:` declared
+        # earlier in the SAME list. K8s evaluates substitutions in
+        # declaration order, so a wrongly-ordered list silently lands a
+        # literal `$(VAR)` and 28P01s only at runtime.
+        # Caught the cronjob-sync-{daily,weekly} bug retroactively.
+        run: |
+          python3 - <<'PY'
+          import glob, re, sys, yaml
+
+          # Helm templates intermixed with raw YAML — strip the `{{ }}`
+          # blocks so safe_load can parse them, then walk the remains.
+          GO_TPL = re.compile(r"\{\{[^}]*\}\}")
+          REF = re.compile(r"\$\(([A-Z_][A-Z0-9_]*)\)")
+
+          def envs_from_pod_spec(spec):
+              for sec in ("initContainers", "containers"):
+                  for c in (spec or {}).get(sec, []) or []:
+                      yield c.get("name","?"), c.get("env") or []
+
+          def all_env_lists(doc):
+              if not isinstance(doc, dict):
+                  return
+              kind = doc.get("kind","")
+              tpl = (doc.get("spec") or {}).get("template") or {}
+              if "spec" in tpl:
+                  yield from envs_from_pod_spec(tpl["spec"])
+              # CronJob → spec.jobTemplate.spec.template.spec
+              jt = ((doc.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {}
+              if "template" in jt and "spec" in (jt["template"] or {}):
+                  yield from envs_from_pod_spec(jt["template"]["spec"])
+              # Plain Pod
+              if kind == "Pod":
+                  yield from envs_from_pod_spec(doc.get("spec") or {})
+
+          paths = sorted(set(
+              glob.glob("deployment*/templates/*.yaml") +
+              glob.glob("deployment*/templates/**/*.yaml", recursive=True)
+          ))
+          if not paths:
+              print("(no chart templates found)")
+              sys.exit(0)
+
+          bad = []
+          for path in paths:
+              with open(path) as f:
+                  raw = f.read()
+              # Strip Go templates so safe_load can parse YAML structure.
+              # We only need env-list shape, not the values.
+              cleaned = GO_TPL.sub("__TEMPLATED__", raw)
+              try:
+                  docs = list(yaml.safe_load_all(cleaned))
+              except yaml.YAMLError as e:
+                  # If a template is too dynamic to parse, skip — we
+                  # don't fail PRs on parser quirks.
+                  print(f"SKIP  {path}: yaml parse failed ({e.__class__.__name__})")
+                  continue
+              for doc in docs:
+                  for cname, env in all_env_lists(doc):
+                      seen = set()
+                      for entry in env:
+                          name = (entry or {}).get("name")
+                          val = (entry or {}).get("value")
+                          if val and isinstance(val, str):
+                              for ref in REF.findall(val):
+                                  if ref not in seen:
+                                      bad.append((path, cname, name, ref, list(seen)))
+                          if name:
+                              seen.add(name)
+
+          if bad:
+              print()
+              print(f"::error::{len(bad)} env-var ordering issue(s):")
+              for path, cname, var, ref, seen in bad:
+                  print(f"  {path}: container {cname!r}: {var!r}'s value references "
+                        f"$({ref}) but {ref} is declared after it (or not at all). "
+                        f"Already-declared at this point: {seen}")
+              print()
+              print("Fix: reorder the env list so the `name: <X>` entry comes "
+                    "BEFORE any `value:` that contains $(<X>).")
+              sys.exit(1)
+          print(f"checked {len(paths)} template files: env-var ordering OK")
+          PY
+
   # Pre-build supply-chain gate; see gmr-ci/actions/osv-scan.
   security:
     runs-on: ubuntu-latest

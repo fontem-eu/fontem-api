@@ -33,13 +33,17 @@ spec:
             - name: sync
               image: "{{ .Values.cronjobs.imageRepository }}:{{ .Values.cronjobs.imageTag | required ".Values.cronjobs.imageTag is required" }}"
               env:
-                - name: STATS_DATABASE_URL
-                  value: "postgresql+asyncpg://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@fontem-stats-postgres:5432/{{ .Values.database.name }}"
+                # POSTGRES_PASSWORD must come first — Kubernetes evaluates
+                # `$(VAR)` substitutions in env-list declaration order, so
+                # the URL referencing it only expands when the variable is
+                # already set.
                 - name: POSTGRES_PASSWORD
                   valueFrom:
                     secretKeyRef:
                       name: {{ .Values.secretName }}
                       key: POSTGRES_PASSWORD
+                - name: STATS_DATABASE_URL
+                  value: "postgresql+asyncpg://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@fontem-stats-postgres:5432/{{ .Values.database.name }}"
                 - name: KUMA_PUSH_URL
                   valueFrom:
                     secretKeyRef:
