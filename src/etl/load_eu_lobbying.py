@@ -20,6 +20,8 @@ from typing import Any
 import httpx
 from neo4j import GraphDatabase
 
+from src.etl._hooks import resolve_entity
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -54,49 +56,29 @@ SET l.name            = row.name,
     l.last_updated    = row.last_updated
 """
 
-# Minimum name length for fuzzy lobbyist→company matching. Below this,
-# topical name overlap dominates the signal — see the false positives
-# we observed: Federación Española del Vino → Federación Española de
-# Triatlón (both 6+ chars but the *prefix* match is what fooled the
-# old score>2.0 floor; the higher floor below catches that).
-MIN_NAME_LEN = 6
+# Lobbyist → Company linking is delegated to gmr-consolidator's
+# /resolve endpoint (src.etl._hooks.resolve_entity). The previous
+# in-cypher fulltext match wrote 16,161 REPRESENTS edges with a
+# NULL-bypassing country guard (50-70% false-positive rate), so we no
+# longer roll our own matching here. The resolver handles country
+# normalisation (full-name → ISO-3), MIN_NAME_LEN, and tier-tagged
+# confidence; this loader only writes REPRESENTS for confident
+# Tier-1/2/3 matches and skips Tier-4 fuzzy results entirely.
 
-# Match lobbyist → company using the full-text index. Hardened guards:
-# 1. Both sides must declare a country, equal after ISO normalisation
-#    (no NULL-bypass — the previous OR-chain disabled the guard whenever
-#    either side was NULL, and l.country_iso was NULL on every existing
-#    lobbyist node).
-# 2. Score floor lifted 2.0 → 4.0 (single-token overlap was ~2.0).
-# 3. REPRESENTS edges carry reviewed:false so the manual-review UI can
-#    stage them. NEVER auto-confident — every match here is a candidate.
-# 4. Loader is idempotent: ON CREATE writes the metadata, ON MATCH
-#    keeps a human's reviewed=true sticky.
-MATCH_COMPANY = """
-UNWIND $batch AS row
+# Cypher to write a single REPRESENTS edge once /resolve has handed us
+# an authoritative gmr_id. ON CREATE so a human-reviewed edge stays
+# sticky across re-runs.
+MERGE_REPRESENTS = """
+UNWIND $rows AS row
 MATCH (l:Lobbyist {tr_id: row.tr_id})
-WHERE l.name IS NOT NULL
-  AND size(l.name) >= $min_name_len
-  AND coalesce(l.country_iso, '') <> ''
-WITH l,
-     reduce(s = l.name, c IN ['+','-','&&','||','!','(',')','{','}',
-            '[',']','^','"','~','*','?',':','\\\\','/']
-            | replace(s, c, ' ')) AS clean_name
-WHERE size(trim(clean_name)) >= $min_name_len
-CALL db.index.fulltext.queryNodes('company_name_ft', clean_name)
-     YIELD node AS c, score
-WHERE score > 4.0
-  AND coalesce(c.country, '') = l.country_iso
-WITH l, c, score ORDER BY score DESC LIMIT 1
+MATCH (c:Company {gmr_id: row.gmr_id})
 MERGE (l)-[r:REPRESENTS]->(c)
-ON CREATE SET r.confidence = round(score * 1000) / 1000.0,
-              r.method = 'fulltext_lobbyist',
+ON CREATE SET r.confidence  = row.confidence,
+              r.tier        = row.tier,
+              r.method      = 'resolver',
               r.detected_at = datetime(),
-              r.reviewed = false
-"""
-
-# Ensure full-text index exists
-CREATE_FT_INDEX = """
-CREATE FULLTEXT INDEX company_name_ft IF NOT EXISTS FOR (c:Company) ON EACH [c.name]
+              r.reviewed    = CASE WHEN row.tier IN ['lei','vat','cik']
+                                   THEN true ELSE false END
 """
 
 # Country name normalization (TR uses full names, Company nodes use ISO)
@@ -259,24 +241,44 @@ def load_eu_lobbying(neo4j_uri: str, neo4j_user: str, neo4j_password: str) -> No
             session.run(MERGE_INTERESTS, batch=batch)
             logger.info("  %d / %d lobbyists loaded", min(i + BATCH_SIZE, len(entities)), len(entities))
 
-        # Create full-text index for fuzzy company matching
-        logger.info("Ensuring full-text index on Company.name...")
-        session.run(CREATE_FT_INDEX)
-
-        # Try to match to existing companies (full-text fuzzy search)
-        logger.info("Matching lobbyists to existing Company nodes...")
-        matched = 0
-        for i in range(0, len(entities), BATCH_SIZE):
-            batch = entities[i : i + BATCH_SIZE]
-            result = session.run(
-                MATCH_COMPANY, batch=batch, min_name_len=MIN_NAME_LEN,
+        # Lobbyist → Company resolution via /resolve. One HTTP call
+        # per lobbyist, keyed by name + ISO country. The resolver
+        # returns either a confident match (we write REPRESENTS) or
+        # ambiguous candidates / no_match (we skip).
+        logger.info("Resolving lobbyists against Company nodes via /resolve ...")
+        confident_rows: list[dict] = []
+        ambiguous = 0
+        no_match = 0
+        for entity in entities:
+            res = resolve_entity(
+                entity_type="Company",
+                name=entity["name"],
+                country=entity["country_iso"] or entity["country"],
             )
-            summary = result.consume()
-            matched += summary.counters.relationships_created
-            if (i + BATCH_SIZE) % 2000 < BATCH_SIZE:
-                logger.info("  %d / %d checked, %d matches so far",
-                            min(i + BATCH_SIZE, len(entities)), len(entities), matched)
-        logger.info("Company matching done: %d REPRESENTS relationships created", matched)
+            if res is None:
+                # transport failure — skip silently, don't write a
+                # REPRESENTS edge we couldn't validate
+                continue
+            if res.hint == "matched" and res.match is not None:
+                confident_rows.append({
+                    "tr_id": entity["tr_id"],
+                    "gmr_id": res.match.gmr_id,
+                    "tier": res.match.tier,
+                    "confidence": res.match.confidence,
+                })
+            elif res.hint == "ambiguous":
+                ambiguous += 1
+            else:
+                no_match += 1
+
+        if confident_rows:
+            for i in range(0, len(confident_rows), BATCH_SIZE):
+                chunk = confident_rows[i : i + BATCH_SIZE]
+                session.run(MERGE_REPRESENTS, rows=chunk)
+        logger.info(
+            "Resolver done: %d confident matches, %d ambiguous, %d no_match",
+            len(confident_rows), ambiguous, no_match,
+        )
 
     driver.close()
 
