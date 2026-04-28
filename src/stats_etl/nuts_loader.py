@@ -1,17 +1,29 @@
 """One-off loader for NUTS region polygons → PostGIS.
 
-Pulls the GISCO NUTS GeoJSON for all four levels at the given revision,
+Pulls the GISCO NUTS GeoJSON for all four levels at the given revision
+(or reads them from a local directory when GISCO is unreachable), then
 upserts into `fontem_stats.nuts_region`. Idempotent: re-runs replace
 geometry without disturbing FK references.
 
 GISCO publishes GeoJSON at multiple resolutions; we use 1:60M for
 display-quality without stratospheric file size (the 1:1M variant is
 ~120 MB; 1:60M is ~2 MB).
+
+Offline mode: when the cluster has no egress to gisco-services.ec.europa.eu
+(observed in our env), pre-stage the four files
+
+    NUTS_RG_60M_<version>_4326_LEVL_{0,1,2,3}.geojson
+
+into a local directory and point `--from-dir <path>` at it. The chart
+mounts a ConfigMap or NFS share; the loader reads the same shape it
+would have downloaded.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
+from pathlib import Path
 
 import httpx
 
@@ -26,7 +38,26 @@ GISCO_URL = (
 )
 
 
-def _fetch_level(version: str, level: int) -> dict:
+def _fetch_level(version: str, level: int, from_dir: str | None) -> dict:
+    """Return the GeoJSON for one NUTS level, from local dir or GISCO.
+
+    `from_dir` takes precedence: when set, every level must be present
+    on disk or we raise — half-online half-offline is asking for
+    silently-incomplete regions.
+    """
+    if from_dir:
+        path = Path(from_dir) / f"NUTS_RG_60M_{version}_4326_LEVL_{level}.geojson"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"offline mode: missing {path}. Stage all four "
+                f"NUTS_RG_60M_{version}_4326_LEVL_{{0,1,2,3}}.geojson files"
+                f" in {from_dir} (typically via a chart-mounted ConfigMap"
+                f" or NFS share)."
+            )
+        logger.info("loading NUTS-%d polygons from %s", level, path)
+        with path.open() as f:
+            return json.load(f)
+
     url = GISCO_URL.format(version=version, level=level)
     logger.info("fetching NUTS-%d polygons (%s)", level, url)
     r = httpx.get(url, timeout=120.0,
@@ -57,14 +88,17 @@ def _to_multipolygon_wkt(geometry: dict) -> str | None:
     return "MULTIPOLYGON(" + ", ".join(_poly(p) for p in polys) + ")"
 
 
-def run(version: str = "2024") -> int:
+def run(version: str = "2024", from_dir: str | None = None) -> int:
+    """Upsert NUTS polygons. `from_dir` skips the GISCO fetch for offline envs."""
+    if from_dir is None:
+        from_dir = os.environ.get("NUTS_GEOJSON_DIR") or None
     db = StatsDatabase()
     total = 0
     with db.connect() as conn, conn.cursor() as cur:
         # Upsert in two passes: parents first, then children — the FK
         # on parent_code requires the parent row to already exist.
         for level in (0, 1, 2, 3):
-            geo = _fetch_level(version, level)
+            geo = _fetch_level(version, level, from_dir)
             for feat in geo.get("features", []):
                 props = feat.get("properties", {})
                 code = props.get("NUTS_ID")

@@ -81,9 +81,13 @@ spec:
                   python -m src.stats_etl nuts-polygons --version 2024 || \
                     echo "::warning:: nuts-polygons failed (continuing — sync still runs)"
                   set +e
-                  out=$(python -m src.stats_etl sync --stale-after 1d 2>&1); rc=$?
-                  echo "$out"
-                  KUMA_SUMMARY=$(echo "$out" | grep -oE '[0-9]+ synced|[0-9]+ skipped|[0-9]+ failed' \
+                  # Stream sync output live (was: $(...) capture, which
+                  # buffered everything until completion and made debugging
+                  # mid-run impossible — the job looked hung for 30 min
+                  # while observations were actually flowing).
+                  python -m src.stats_etl sync --stale-after 1d 2>&1 | tee /tmp/sync.log
+                  rc=${PIPESTATUS[0]}
+                  KUMA_SUMMARY=$(grep -oE '[0-9]+ synced|[0-9]+ skipped|[0-9]+ failed' /tmp/sync.log \
                     | tr '\n' ' ' | sed 's/ $//' | tr ' ' '+')
                   KUMA_SUMMARY=${KUMA_SUMMARY:-unknown}
                   [ "$rc" -eq 0 ] && KUMA_STATUS=up

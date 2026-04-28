@@ -101,7 +101,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_nuts_polygons(args: argparse.Namespace) -> int:
     """Stub. Real implementation in nuts_loader; called via this CLI."""
     from . import nuts_loader   # local import — heavy deps (shapely)
-    return nuts_loader.run(version=args.version)
+    return nuts_loader.run(version=args.version, from_dir=args.from_dir)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -134,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
                             help="load NUTS polygons from GISCO into PostGIS")
     p_nuts.add_argument("--version", default="2024",
                         help="NUTS revision (default 2024)")
+    p_nuts.add_argument("--from-dir", default=None,
+                        help="offline mode: read pre-staged "
+                             "NUTS_RG_60M_<version>_4326_LEVL_{0,1,2,3}.geojson"
+                             " files from this directory instead of fetching"
+                             " from gisco-services.ec.europa.eu (also picks"
+                             " up NUTS_GEOJSON_DIR env var)")
     p_nuts.set_defaults(func=cmd_nuts_polygons)
 
     args = parser.parse_args(argv)
