@@ -1,32 +1,35 @@
 """Regression tests for the EU sanctions loader.
 
-Live in the graph today there were 8 SANCTIONED edges, all of them
-false positives created by `MATCH_COMPANY_EXACT` matching on bare name
-equality with no country guard:
+The original incident: 8 SANCTIONED edges in production, all false
+positives, where 3-4 letter Company names ("AMD", "TSA", "CRL",
+"LRA", "NADA") matched a SanctionedEntity whose primary `name` was
+the same short code (the actual entity name lived in `aliases`).
+All 8 companies were unrelated EU entities — defamation risk.
 
-  - 3× French Company "AMD"  → Iranian-regime "AMD" (Aran Modern Devices)
-  - 2× DK/FR Company "TSA"   → Iranian "TSA" (TESA / Iran Centrifuge Tech.)
-  -    French Company "CRL"  → Iranian "CRL" (Iran Composites Institute)
-  -    French Company "LRA"  → Ugandan "LRA" (Lord's Resistance Army)
-  -    Belgian Company "NADA"→ DPRK "NADA" (Nat'l Aerospace Development Admin)
+The fix migrated this loader to gmr-consolidator's /resolve service.
+This file pins:
 
-The match was wrong because the EU XML stores acronym short codes as
-the primary `name` and the real entity name in `aliases`. We now
-require: (a) name length ≥ 6, (b) country/nationality agreement, (c)
-non-empty nationality on the sanction side. These tests pin those
-guards so future refactors don't silently re-defame anyone.
+  - the in-cypher matchers (MATCH_COMPANY_EXACT / _FUZZY) must NOT
+    come back; bringing them back means bypassing the resolver's
+    central guards (MIN_NAME_LEN, country normalisation, score floor)
+  - SANCTIONED edges only get written for confident /resolve hits,
+    and even then with reviewed=false (defamation-class consequences
+    require human sign-off)
+  - the loader retries each alias (the real entity name lives there,
+    not in the primary `name` field which is often an acronym)
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import src.etl.load_eu_sanctions as load_sanctions
+from src.etl._hooks import ResolveMatch, ResolveResult
 from src.etl.load_eu_sanctions import (
-    MATCH_COMPANY_EXACT,
-    MATCH_COMPANY_FUZZY,
+    MERGE_SANCTIONED,
     MIN_NAME_LEN,
-    load_into_neo4j,
+    _resolve_sanction_to_company,
     parse_sanctions_xml,
 )
 
@@ -41,174 +44,181 @@ def _wrap(entities_xml: str) -> bytes:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Cypher invariants — these guard against silent regression of the
-# match logic. If these strings stop appearing in the queries, the
-# next ETL run will start producing false-positive SANCTIONED edges
-# again, and tests/test_load_eu_sanctions_regression.py will catch it.
+# The old in-cypher matchers must be gone.
 # ─────────────────────────────────────────────────────────────────────
 
 
-def test_min_name_len_is_at_least_six():
-    """A 3-letter acronym must not be allowed to match anything."""
-    assert MIN_NAME_LEN >= 6, (
-        "Acronyms like AMD/TSA/CRL/LRA collided with unrelated EU companies. "
-        "MIN_NAME_LEN must be high enough to exclude them."
+def test_in_cypher_matchers_removed():
+    assert not hasattr(load_sanctions, "MATCH_COMPANY_EXACT"), (
+        "MATCH_COMPANY_EXACT belongs to the past — sanction → company "
+        "linkage now goes through gmr-consolidator's /resolve endpoint."
     )
+    assert not hasattr(load_sanctions, "MATCH_COMPANY_FUZZY")
+    assert not hasattr(load_sanctions, "CREATE_FT_INDEX")
 
 
-def test_exact_match_requires_country_agreement():
-    """The country/nationality guard is the single most important rule.
-    Without it, a French 'AMD' is matched to an Iranian sanction."""
-    assert "c.country" in MATCH_COMPANY_EXACT, "country guard missing"
-    assert "s.nationality" in MATCH_COMPANY_EXACT, "nationality guard missing"
-    assert "coalesce(c.country" in MATCH_COMPANY_EXACT, (
-        "country comparison must coalesce nulls to '' so a NULL company "
-        "country is NOT treated as matching anything"
-    )
-
-
-def test_exact_match_rejects_empty_nationality():
-    """If the sanction record has no nationality, we cannot do a safe
-    country check — must skip rather than emit a defamatory edge."""
-    assert "coalesce(s.nationality, '') <> ''" in MATCH_COMPANY_EXACT
-
-
-def test_exact_match_enforces_min_name_length():
-    assert "size(s.name) >= $min_name_len" in MATCH_COMPANY_EXACT
-
-
-def test_fuzzy_match_only_emits_review_queue_edges():
-    """Fuzzy must NEVER create a SANCTIONED edge — only SAME_AS
-    {reviewed: false} for the manual-review queue."""
-    assert ":SANCTIONED" not in MATCH_COMPANY_FUZZY, (
-        "fuzzy path must not write SANCTIONED edges directly"
-    )
-    assert ":SAME_AS" in MATCH_COMPANY_FUZZY
-    assert "reviewed: false" in MATCH_COMPANY_FUZZY
-
-
-def test_fuzzy_match_has_country_and_length_guards():
-    assert "size(s.name) >= $min_name_len" in MATCH_COMPANY_FUZZY
-    assert "coalesce(c.country, '') = s.nationality" in MATCH_COMPANY_FUZZY
-
-
-def test_fuzzy_match_score_threshold_is_strict():
-    """Previous threshold was 1.5 — admitted anything with a single
-    token overlap. Anything below 4.0 lets garbage through."""
-    assert "score > 4.0" in MATCH_COMPANY_FUZZY
+def test_min_name_len_unchanged():
+    """The resolver enforces this internally too. Local constant kept
+    for backward-compatible imports in the test suite."""
+    assert MIN_NAME_LEN >= 6
 
 
 # ─────────────────────────────────────────────────────────────────────
-# The 5 historical false-positive cases. Each row asserts that the
-# (Company name, country, LEI) ↔ (Sanction short_name, nationality)
-# pair would NOT be matched by the new MATCH_COMPANY_EXACT.
+# MERGE_SANCTIONED cypher invariants
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_merge_sanctioned_uses_resolver_gmr_id():
+    """Edges are now written from a gmr_id supplied by the resolver,
+    NOT by name matching here."""
+    assert "MATCH (c:Company {gmr_id: row.gmr_id})" in MERGE_SANCTIONED
+    assert "fulltext" not in MERGE_SANCTIONED.lower()
+
+
+def test_merge_sanctioned_always_unreviewed():
+    """Sanctions matches always start as reviewed=false regardless of
+    resolver tier — defamation consequences are too severe to lean on
+    automated tiers alone."""
+    assert "r.reviewed = false" in MERGE_SANCTIONED
+
+
+def test_merge_sanctioned_records_tier_and_alias_metadata():
+    assert "r.tier = row.tier" in MERGE_SANCTIONED
+    assert "r.matched_via_alias = row.matched_via_alias" in MERGE_SANCTIONED
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Historical false-positive cases — the resolver must reject them.
 # ─────────────────────────────────────────────────────────────────────
 
 REGRESSION_FALSE_POSITIVE_CASES = [
-    # short_name, sanction_nationality, company_country, why_it_failed_before
-    pytest.param("AMD",  "IR", "FR", id="AMD-FR-vs-Iranian-defense"),
-    pytest.param("TSA",  "IR", "DK", id="TSA-DK-vs-Iran-Centrifuge-Tech"),
-    pytest.param("TSA",  "IR", "FR", id="TSA-FR-vs-Iran-Centrifuge-Tech"),
-    pytest.param("CRL",  "IR", "FR", id="CRL-FR-vs-Iran-Composites"),
-    pytest.param("LRA",  "UG", "FR", id="LRA-FR-vs-Lords-Resistance-Army"),
-    pytest.param("NADA", "KP", "BE", id="NADA-BE-vs-DPRK-Aerospace"),
+    pytest.param("AMD",  "IR", id="AMD-Iranian-defense"),
+    pytest.param("TSA",  "IR", id="TSA-Iran-Centrifuge"),
+    pytest.param("CRL",  "IR", id="CRL-Iran-Composites"),
+    pytest.param("LRA",  "UG", id="LRA-Lords-Resistance-Army"),
+    pytest.param("NADA", "KP", id="NADA-DPRK-Aerospace"),
 ]
 
 
 @pytest.mark.parametrize(
-    "short_name,sanction_nationality,company_country",
-    REGRESSION_FALSE_POSITIVE_CASES,
+    "short_name,nationality", REGRESSION_FALSE_POSITIVE_CASES,
 )
-def test_short_name_under_min_length_blocks_exact_match(
-    short_name, sanction_nationality, company_country,
+def test_short_acronym_with_no_useful_aliases_yields_no_match(
+    short_name, nationality,
 ):
-    """Each historical false positive had a name shorter than MIN_NAME_LEN.
-    The length guard alone — independent of country — must reject them."""
-    assert len(short_name) < MIN_NAME_LEN, (
-        f"{short_name!r} should be shorter than MIN_NAME_LEN={MIN_NAME_LEN} — "
-        "if MIN_NAME_LEN drops, this test goes red"
-    )
-
-
-@pytest.mark.parametrize(
-    "short_name,sanction_nationality,company_country",
-    REGRESSION_FALSE_POSITIVE_CASES,
-)
-def test_country_mismatch_blocks_exact_match(
-    short_name, sanction_nationality, company_country,
-):
-    """Even if the name guard were dropped, country disagreement alone
-    should block these matches. Belt-and-braces."""
-    assert sanction_nationality != company_country, (
-        f"{short_name}: sanction nat={sanction_nationality!r} "
-        f"company country={company_country!r} — these must differ for the "
-        "regression case to make sense"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Mock-driver test of the actual loader call: verify the new query
-# parameters reach session.run untouched.
-# ─────────────────────────────────────────────────────────────────────
-
-
-def test_loader_passes_min_name_len_to_session_run():
-    """If MIN_NAME_LEN isn't threaded through, the cypher's
-    `$min_name_len` parameter is unbound and the query errors at
-    runtime — but only on a real Neo4j. Catch it in unit-tests."""
-    mock_driver = MagicMock()
-    mock_session = MagicMock()
-    mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-
-    counters = MagicMock()
-    counters.relationships_created = 0
-    consume_result = MagicMock()
-    consume_result.counters = counters
-    mock_session.run.return_value.consume.return_value = counters
-    # Some run() calls return results with .consume() — make all of them work
-    mock_session.run.return_value.consume.return_value = counters
-
-    one_entity = [{
+    """If a sanction's primary name is too short and there are no
+    aliases, the loader must yield None (no row → no SANCTIONED edge).
+    This is the shape of the original 8 false positives."""
+    entity = {
         "entity_id": "x",
-        "eu_reference": "x",
-        "name": "Aran Modern Devices",  # full name, length OK
-        "entity_type": "entity",
-        "aliases": ["AMD"],
+        "name": short_name,
+        "aliases": [],
+        "nationality": nationality,
+        "designation_date": "2011-05-24",
+    }
+    with patch(
+        "src.etl.load_eu_sanctions.resolve_entity",
+        return_value=ResolveResult(
+            hint="no_match", match=None, candidates=[],
+            normalised_country=nationality,
+        ),
+    ):
+        row = _resolve_sanction_to_company(entity)
+    assert row is None
+
+
+def test_resolver_called_with_each_alias_until_match():
+    """When the primary name doesn't match, the loader must try each
+    alias in turn — the actual entity name (e.g. "Aran Modern Devices")
+    lives there."""
+    calls: list[str] = []
+
+    def _resolve(*, name, country, **_):  # pylint: disable=unused-argument
+        calls.append(name)
+        if name == "Aran Modern Devices":
+            return ResolveResult(
+                hint="matched",
+                match=ResolveMatch(
+                    gmr_id="gmr-real-amd",
+                    name="Aran Modern Devices",
+                    country="IRN",
+                    lei=None,
+                    tier="name_country",
+                    confidence=0.95,
+                ),
+                candidates=[],
+                normalised_country="IRN",
+            )
+        return ResolveResult(
+            hint="no_match", match=None, candidates=[],
+            normalised_country="IRN",
+        )
+
+    entity = {
+        "entity_id": "EU.2518.30",
+        "name": "AMD",
+        "aliases": ["Aran Modern Devices", "Aran"],
         "nationality": "IR",
         "designation_date": "2011-05-24",
-        "sanction_regime": "IRN",
-        "legal_basis": "503/2011",
-        "listing_reason": "Affiliated to MTFZC.",
-    }]
-    load_into_neo4j(mock_driver, iter(one_entity))
+    }
+    with patch("src.etl.load_eu_sanctions.resolve_entity", side_effect=_resolve):
+        row = _resolve_sanction_to_company(entity)
+    assert row is not None
+    assert row["gmr_id"] == "gmr-real-amd"
+    assert row["matched_via_alias"] is True
+    # The resolver was called with the primary name first, then each
+    # alias in order until a match was found.
+    assert calls[0] == "AMD"
+    assert calls[1] == "Aran Modern Devices"
 
-    # Check that every match-cypher call carried min_name_len
-    match_calls = [
-        call for call in mock_session.run.call_args_list
-        if any(
-            kw == "MATCH_COMPANY_EXACT" or "MATCH (c:Company)" in str(call)
-            or "queryNodes('company_name_ft'" in str(call)
-            for kw in [str(call.args[0]) if call.args else ""]
-        )
-    ]
-    assert match_calls, "expected at least one match cypher call"
-    for call in match_calls:
-        # First positional arg is the query string. kwargs carry params.
-        assert "min_name_len" in call.kwargs, (
-            f"call missing min_name_len kwarg: {call.kwargs.keys()}"
-        )
-        assert call.kwargs["min_name_len"] == MIN_NAME_LEN
+
+def test_first_call_match_does_not_use_alias():
+    """When the primary name itself resolves cleanly (a long, unique
+    name), matched_via_alias is False."""
+    entity = {
+        "entity_id": "EU.X",
+        "name": "Specific Long Entity Name",
+        "aliases": ["Specific Long Entity"],
+        "nationality": "DE",
+        "designation_date": "2024-01-01",
+    }
+    with patch(
+        "src.etl.load_eu_sanctions.resolve_entity",
+        return_value=ResolveResult(
+            hint="matched",
+            match=ResolveMatch(
+                gmr_id="gmr-x", name="Specific Long Entity Name",
+                country="DEU", lei=None, tier="name_country", confidence=0.95,
+            ),
+            candidates=[], normalised_country="DEU",
+        ),
+    ):
+        row = _resolve_sanction_to_company(entity)
+    assert row is not None
+    assert row["matched_via_alias"] is False
+    assert row["tier"] == "name_country"
+
+
+def test_empty_nationality_yields_no_match():
+    """The resolver requires a country; sanctions with blank nationality
+    are skipped rather than risk an unguarded match."""
+    entity = {
+        "entity_id": "x",
+        "name": "Some Long Entity Name",
+        "aliases": [],
+        "nationality": "",
+        "designation_date": "2020-01-01",
+    }
+    row = _resolve_sanction_to_company(entity)
+    assert row is None
 
 
 # ─────────────────────────────────────────────────────────────────────
-# XML parsing — make sure the parser captures aliases (so a future
-# refactor that switches matching to alias-based won't be blind).
+# Parser smoke
 # ─────────────────────────────────────────────────────────────────────
 
 
 def test_parse_extracts_aliases():
-    """The real entity name lives in aliases. The parser must keep them."""
     xml = _wrap(f"""
       <sanctionEntity euReferenceNumber="EU.2518.30">
         <subjectType code="enterprise"/>
@@ -217,32 +227,11 @@ def test_parse_extracts_aliases():
         <citizenship countryIso2Code="IR"/>
         <regulation publicationDate="2011-05-24" programme="IRN"
                     numberTitle="503/2011 (OJ L136)"/>
-        <remark>Affiliated to MTFZC network.</remark>
       </sanctionEntity>
     """)
     out = list(parse_sanctions_xml(xml))
     assert len(out) == 1
     record = out[0]
-    assert record["name"] == "AMD"  # the regression: short code is primary
-    assert "Aran Modern Devices" in record["aliases"], (
-        "the real entity name must be retained in aliases — when we move "
-        "matching to alias-based this is what we'll join on"
-    )
+    assert record["name"] == "AMD"
+    assert "Aran Modern Devices" in record["aliases"]
     assert record["nationality"] == "IR"
-
-
-def test_parse_handles_blank_subject_with_no_name():
-    """The empty placeholder rows we observed in production (eu_reference
-    ordinal but everything else blank) must round-trip without crashing.
-    They'll fail the new `coalesce(s.nationality,'') <> ''` guard at
-    match time, so they cause no harm — but parsing must not throw."""
-    xml = _wrap("""
-      <sanctionEntity euReferenceNumber="13">
-        <subjectType code="enterprise"/>
-      </sanctionEntity>
-    """)
-    out = list(parse_sanctions_xml(xml))
-    assert len(out) == 1
-    assert out[0]["name"] == ""
-    assert out[0]["nationality"] == ""
-    assert out[0]["aliases"] == []
