@@ -42,8 +42,8 @@ jobs:
           # values (which is what Argo merges in production).
           docker run --rm \
             -v "$(pwd):/wd" -w /wd \
-            alpine/helm:3.16.3 template fontem-stats deployment-stats \
-              --values deployment-stats/values.yaml \
+            alpine/helm:3.16.3 template fontem-stats /wd/deployment-stats \
+              --values /wd/deployment-stats/values.yaml \
               --set cronjobs.imageTag=ci-render-test \
             > /tmp/rendered.yaml
           echo "rendered $(wc -l < /tmp/rendered.yaml) lines"
