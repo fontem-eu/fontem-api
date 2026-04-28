@@ -32,19 +32,19 @@ jobs:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
-      - name: Install helm
-        run: |
-          curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz \
-            | tar -xz -C /tmp linux-amd64/helm
-          install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
       - name: Render fontem-stats chart with prod values
+        # Helm via the official docker image — the runner has docker but
+        # `get.helm.sh` egress is firewalled. The image pull runs via the
+        # cluster Nexus docker.io proxy, no extra creds needed.
         run: |
           # Provide a stand-in cronjobs.imageTag so `required` clears.
           # Renders against the chart's own defaults plus the prod
           # values (which is what Argo merges in production).
-          helm template fontem-stats deployment-stats \
-            --values deployment-stats/values.yaml \
-            --set cronjobs.imageTag=ci-render-test \
+          docker run --rm \
+            -v "$(pwd):/wd" -w /wd \
+            alpine/helm:3.16.3 template fontem-stats deployment-stats \
+              --values deployment-stats/values.yaml \
+              --set cronjobs.imageTag=ci-render-test \
             > /tmp/rendered.yaml
           echo "rendered $(wc -l < /tmp/rendered.yaml) lines"
       - name: Image-registry allowlist gate
