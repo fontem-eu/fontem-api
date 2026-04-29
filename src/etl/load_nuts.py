@@ -214,6 +214,16 @@ def main(argv=None):
     )
     try:
         summary = load_into_neo4j(driver, regions)
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="nuts",
+            label="EU NUTS regional hierarchy",
+            coverage_start=None,
+            coverage_end=None,
+            record_count=summary.get("total", 0),
+            expected_cadence_hours=24 * 35,  # monthly
+        )
     finally:
         driver.close()
 

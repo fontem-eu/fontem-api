@@ -294,6 +294,21 @@ def main(argv=None):
             summary = _load_from_file(driver, args.file)
         else:
             summary = _load_from_solr(driver, args.since)
+        # Coverage range is what's in the graph (cumulative across runs).
+        with driver.session() as session:
+            total_listings = session.run(
+                "MATCH (l:Listing) RETURN count(l) AS n"
+            ).single()["n"]
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="firds",
+            label="ESMA FIRDS instrument reference data",
+            coverage_start=None,
+            coverage_end=None,
+            record_count=int(total_listings),
+            expected_cadence_hours=25,  # daily
+        )
     finally:
         driver.close()
 

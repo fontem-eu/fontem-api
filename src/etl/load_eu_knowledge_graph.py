@@ -327,6 +327,25 @@ def main(argv=None):
     )
     try:
         summary = load_into_neo4j(driver, all_records)
+        # Cumulative coverage range across runs.
+        with driver.session() as session:
+            rng = session.run(
+                "MATCH (p:CohesionProject) "
+                "WHERE p.start_date IS NOT NULL "
+                "RETURN min(p.start_date) AS first, "
+                "  max(coalesce(p.end_date, p.start_date)) AS last, "
+                "  count(p) AS n"
+            ).single()
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="eu-knowledge-graph",
+            label="EU Knowledge Graph cohesion projects",
+            coverage_start=(rng["first"][:10] if rng and rng["first"] else None),
+            coverage_end=(rng["last"][:10] if rng and rng["last"] else None),
+            record_count=int(rng["n"]) if rng else summary.get("total", 0),
+            expected_cadence_hours=24 * 35,  # monthly (15th of month)
+        )
     finally:
         driver.close()
 

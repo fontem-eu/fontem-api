@@ -383,7 +383,29 @@ def main(argv=None):
         from .load_cpv import load_cpv_divisions  # pylint: disable=import-outside-toplevel
         load_cpv_divisions(driver)
 
-        load_contracts(driver, archive, currency_svc=currency_svc)
+        result = load_contracts(driver, archive, currency_svc=currency_svc)
+
+        # Source-freshness marker. Coverage range comes from the live
+        # graph (this is a monthly cumulative loader, so the range is
+        # the union of every successful run, not just this archive).
+        with driver.session() as session:
+            rng = session.run(
+                "MATCH (ct:Contract) "
+                "WHERE ct.publication_date IS NOT NULL "
+                "RETURN min(ct.publication_date) AS first, "
+                "  max(ct.publication_date) AS last, "
+                "  count(ct) AS n"
+            ).single()
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="contracts",
+            label="TED public procurement contracts",
+            coverage_start=(rng["first"][:10] if rng and rng["first"] else None),
+            coverage_end=(rng["last"][:10] if rng and rng["last"] else None),
+            record_count=int(rng["n"]) if rng else result["total"],
+            expected_cadence_hours=24 * 35,  # monthly archive, ~35d
+        )
     finally:
         driver.close()
 

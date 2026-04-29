@@ -231,7 +231,24 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     driver = GraphDatabase.driver(args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password))
     try:
-        load_us_financials(driver, Path(args.edgar_dir))
+        summary = load_us_financials(driver, Path(args.edgar_dir))
+        # Coverage = min/max year of FinancialYear nodes from EDGAR.
+        with driver.session() as session:
+            rng = session.run(
+                "MATCH (f:FinancialYear {source: 'EDGAR'}) "
+                "RETURN min(f.year) AS first, max(f.year) AS last, "
+                "  count(f) AS n"
+            ).single()
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="us-financials",
+            label="SEC EDGAR US company financials",
+            coverage_start=f"{rng['first']}-01-01" if rng and rng["first"] else None,
+            coverage_end=f"{rng['last']}-12-31" if rng and rng["last"] else None,
+            record_count=int(rng["n"]) if rng else summary.get("total", 0),
+            expected_cadence_hours=24 * 100,  # quarterly in practice
+        )
     finally:
         driver.close()
 

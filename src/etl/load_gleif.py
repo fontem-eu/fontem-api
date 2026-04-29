@@ -237,6 +237,16 @@ def main(argv=None):
         )
         try:
             summary = load_into_neo4j(driver, records)
+            from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+            _freshness.update_source(
+                driver,
+                source_id="gleif",
+                label="GLEIF Level 1 (LEI) registry",
+                coverage_start=None,
+                coverage_end=None,
+                record_count=summary.get("total", 0),
+                expected_cadence_hours=200,  # weekly
+            )
         finally:
             driver.close()
 

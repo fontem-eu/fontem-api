@@ -49,6 +49,24 @@ def freshness_stats(source: FromDishka[DataQualitySource]):
     return source.get_data_freshness()
 
 
+@router.get("/source-freshness")
+@inject
+def source_freshness(source: FromDishka[DataQualitySource]):
+    """Per-source freshness markers written by ETL loaders.
+
+    Each loader writes a ``:DataSource`` node at the end of a successful
+    run; this endpoint exposes those markers — ``coverage_start``,
+    ``coverage_end``, ``last_loaded``, ``record_count``,
+    ``expected_cadence_hours`` — plus a derived ``age_hours`` and
+    ``stale`` flag (``age_hours > expected_cadence_hours``).
+
+    Consumed by the data quality dashboard and by the Mistral assistant
+    so generated reports can cite the actual coverage of each dataset
+    rather than guessing.
+    """
+    return source.get_source_freshness()
+
+
 @router.get("/coverage")
 @inject
 def coverage_stats(source: FromDishka[DataQualitySource]):

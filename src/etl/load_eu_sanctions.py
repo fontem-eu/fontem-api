@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 import httpx
 from neo4j import GraphDatabase
 
-from . import gmr_id
+from . import _freshness, gmr_id
 from ._hooks import resolve_entity
 
 logger = logging.getLogger(__name__)
@@ -329,6 +329,23 @@ def load_into_neo4j(driver, entities):
             for i in range(0, len(rows), BATCH_SIZE):
                 chunk = rows[i : i + BATCH_SIZE]
                 session.run(MERGE_SANCTIONED, rows=chunk)
+
+    # Coverage range — earliest and latest designation_date across what
+    # we just loaded. The graph dashboard renders this; the assistant
+    # quotes it in its system-prompt preamble.
+    designation_dates = sorted(
+        e.get("designation_date") for e in all_entities
+        if e.get("designation_date")
+    )
+    _freshness.update_source(
+        driver,
+        source_id="sanctions",
+        label="EU consolidated sanctions",
+        coverage_start=designation_dates[0] if designation_dates else None,
+        coverage_end=designation_dates[-1] if designation_dates else None,
+        record_count=total,
+        expected_cadence_hours=25,
+    )
 
     elapsed = time.time() - t0
     return {

@@ -4,7 +4,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 
-class DataQualitySource(ABC):
+class DataQualitySource(ABC):  # pylint: disable=too-many-public-methods
     """Interface for querying platform data quality and health metrics.
 
     Provides the metrics displayed on the data quality dashboard.
@@ -56,3 +56,12 @@ class DataQualitySource(ABC):
             "generated_at": None,
             "cache_ttl_seconds": 0,
         }
+
+    def get_source_freshness(self) -> dict:
+        """Return the per-source freshness markers written by ETL loaders.
+
+        Default empty so existing tests/mocks keep working; the production
+        graph implementation reads ``:DataSource`` nodes seeded by
+        ``src.etl._freshness.update_source``.
+        """
+        return {"sources": [], "generated_at": None}

@@ -197,10 +197,53 @@ def main(argv=None):
     parser.add_argument("--end", default=None)
     parser.add_argument("--currencies", nargs="+", default=None,
                         help="Specific currencies to fetch (default: all)")
+    parser.add_argument("--neo4j-uri", default=os.environ.get("NEO4J_URI", "bolt://neo4j:7687"))
+    parser.add_argument("--neo4j-user", default=os.environ.get("NEO4J_USER", "neo4j"))
+    parser.add_argument("--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""))
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_all(args.rates_dir, args.start, args.end, args.currencies)
+
+    # Freshness marker — exchange rates write to NFS, not Neo4j, so the
+    # only way the dashboard learns about staleness is via an explicit
+    # marker. Best-effort; failures here don't affect the rate files
+    # already written to disk.
+    try:
+        # pylint: disable=import-outside-toplevel
+        from neo4j import GraphDatabase
+        from src.etl import _freshness
+        rates_dir = Path(args.rates_dir)
+        rate_count = 0
+        last_date: str | None = None
+        if rates_dir.exists():
+            for rates_file in (rates_dir / "rates").glob("*.json") if (rates_dir / "rates").exists() else rates_dir.glob("*.json"):
+                try:
+                    daily = json.loads(rates_file.read_text(encoding="utf-8"))
+                    rate_count += len(daily)
+                    if daily:
+                        local_max = max(daily.keys())
+                        if last_date is None or local_max > last_date:
+                            last_date = local_max
+                except (OSError, json.JSONDecodeError):
+                    continue
+        driver = GraphDatabase.driver(
+            args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password),
+        )
+        try:
+            _freshness.update_source(
+                driver,
+                source_id="exchange-rates",
+                label="ECB / Frankfurter daily exchange rates",
+                coverage_start=args.start,
+                coverage_end=last_date or args.end,
+                record_count=rate_count,
+                expected_cadence_hours=25,  # daily
+            )
+        finally:
+            driver.close()
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("freshness marker for exchange-rates failed", exc_info=True)
 
 
 if __name__ == "__main__":

@@ -887,3 +887,62 @@ class GraphDataQualitySource(DataQualitySource):
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "cache_ttl_seconds": _CONNECTEDNESS_TTL_SECONDS,
         }
+
+    # ── Per-source freshness ──────────────────────────────────────
+
+    def get_source_freshness(self) -> dict:
+        """Read ``:DataSource`` markers and compute age + stale flag.
+
+        ``last_loaded`` is a Neo4j ``datetime``; we convert to ISO string
+        and compute hours-since-load against ``expected_cadence_hours``
+        to derive the boolean ``stale`` flag the dashboard and assistant
+        rely on.
+        """
+        with self._neo4j.session() as session:
+            rows = session.run(
+                "MATCH (s:DataSource) "
+                "RETURN s.id AS id, s.label AS label, "
+                "  s.coverage_start AS coverage_start, "
+                "  s.coverage_end AS coverage_end, "
+                "  s.last_loaded AS last_loaded, "
+                "  s.record_count AS record_count, "
+                "  s.expected_cadence_hours AS expected_cadence_hours "
+                "ORDER BY s.id"
+            ).data()
+
+        now = datetime.now(timezone.utc)
+        sources: list[dict] = []
+        for r in rows:
+            last_loaded = r.get("last_loaded")
+            # neo4j DateTime → python datetime; .to_native() handles tz
+            last_loaded_dt = (
+                last_loaded.to_native()
+                if last_loaded is not None and hasattr(last_loaded, "to_native")
+                else last_loaded
+            )
+            age_hours: float | None = None
+            stale = False
+            last_loaded_iso: str | None = None
+            if isinstance(last_loaded_dt, datetime):
+                if last_loaded_dt.tzinfo is None:
+                    last_loaded_dt = last_loaded_dt.replace(tzinfo=timezone.utc)
+                age_hours = (now - last_loaded_dt).total_seconds() / 3600.0
+                last_loaded_iso = last_loaded_dt.isoformat()
+                cadence = r.get("expected_cadence_hours") or 25
+                # Stale = haven't loaded within the expected cadence.
+                stale = age_hours > cadence
+            sources.append({
+                "id": r["id"],
+                "label": r["label"],
+                "coverage_start": r.get("coverage_start"),
+                "coverage_end": r.get("coverage_end"),
+                "last_loaded": last_loaded_iso,
+                "record_count": r.get("record_count") or 0,
+                "expected_cadence_hours": r.get("expected_cadence_hours") or 25,
+                "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                "stale": stale,
+            })
+        return {
+            "sources": sources,
+            "generated_at": now.isoformat(),
+        }

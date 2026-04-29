@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 from neo4j import GraphDatabase
 
+from src.etl import _freshness
 from src.etl._hooks import resolve_entity
 
 logger = logging.getLogger(__name__)
@@ -279,6 +280,22 @@ def load_eu_lobbying(neo4j_uri: str, neo4j_user: str, neo4j_password: str) -> No
             "Resolver done: %d confident matches, %d ambiguous, %d no_match",
             len(confident_rows), ambiguous, no_match,
         )
+
+    # Coverage range — earliest registration_date and latest last_updated
+    # across what we just loaded. Lobbyists are weekly cadence.
+    reg_dates = sorted(e.get("registration_date") for e in entities
+                        if e.get("registration_date"))
+    last_updates = sorted(e.get("last_updated") for e in entities
+                          if e.get("last_updated"))
+    _freshness.update_source(
+        driver,
+        source_id="lobbying",
+        label="EU Transparency Register (lobbyists)",
+        coverage_start=reg_dates[0] if reg_dates else None,
+        coverage_end=last_updates[-1] if last_updates else None,
+        record_count=len(entities),
+        expected_cadence_hours=200,  # weekly
+    )
 
     driver.close()
 

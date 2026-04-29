@@ -182,6 +182,22 @@ def main(argv=None):
             "%d API errors in %.1fs",
             len(isins), len(all_enriched), updated, errors, elapsed,
         )
+        # Track total enriched listings (cumulative), not just this run.
+        with driver.session() as session:
+            total_enriched = session.run(
+                "MATCH (l:Listing) WHERE l.figi IS NOT NULL "
+                "RETURN count(l) AS n"
+            ).single()["n"]
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="openfigi",
+            label="OpenFIGI ticker/FIGI enrichment",
+            coverage_start=None,
+            coverage_end=None,
+            record_count=int(total_enriched),
+            expected_cadence_hours=200,  # weekly
+        )
     except httpx.HTTPError:
         logger.exception("Fatal HTTP error during OpenFIGI enrichment")
         sys.exit(1)

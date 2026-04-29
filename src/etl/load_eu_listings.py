@@ -248,6 +248,23 @@ def main(argv=None):
     try:
         load_listings(driver, entities)
         load_financials(driver, esef_dir / "summaries")
+        # ESEF financial-year coverage (cumulative across runs).
+        with driver.session() as session:
+            rng = session.run(
+                "MATCH (f:FinancialYear {source: 'ESEF'}) "
+                "RETURN min(f.year) AS first, max(f.year) AS last, "
+                "  count(f) AS n"
+            ).single()
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="esef",
+            label="EU ESEF financial filings (listings + financials)",
+            coverage_start=f"{rng['first']}-01-01" if rng and rng["first"] else None,
+            coverage_end=f"{rng['last']}-12-31" if rng and rng["last"] else None,
+            record_count=int(rng["n"]) if rng else len(entities),
+            expected_cadence_hours=24 * 100,  # quarterly in practice
+        )
     finally:
         driver.close()
 

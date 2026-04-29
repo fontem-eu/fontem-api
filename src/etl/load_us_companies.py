@@ -118,7 +118,17 @@ def main(argv=None):
         auth=(args.neo4j_user, args.neo4j_password),
     )
     try:
-        load_us_companies(driver, data)
+        loaded = load_us_companies(driver, data)
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="us-companies",
+            label="SEC EDGAR US public companies",
+            coverage_start=None,
+            coverage_end=None,
+            record_count=int(loaded or len(data)),
+            expected_cadence_hours=24 * 35,  # monthly cadence in practice
+        )
     finally:
         driver.close()
 

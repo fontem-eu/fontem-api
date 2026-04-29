@@ -148,3 +148,60 @@ def test_connectedness_endpoint_with_data():
     # frontend relies on this for chart labels.
     buckets = [b["bucket"] for b in company["histogram"]]
     assert buckets == ["0", "1", "2-5", "6-10", "11-50", "51-100", "101-500", "500+"]
+
+
+def test_source_freshness_default_shape():
+    """GET /data-quality/source-freshness returns the empty default
+    when no override is supplied — every mock that doesn't fill it in
+    still gets a usable response."""
+    client = make_test_client(data_quality_source=MockDataQualitySource())
+    resp = client.get("/data-quality/source-freshness")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    assert resp.json() == {"sources": [], "generated_at": None}
+
+
+def test_source_freshness_with_data():
+    """A mock that fills in :DataSource markers exposes them through
+    the endpoint exactly as written, with the stale flag honoured."""
+
+    class FreshnessMock(MockDataQualitySource):
+        def get_source_freshness(self):
+            return {
+                "sources": [
+                    {
+                        "id": "sanctions",
+                        "label": "EU consolidated sanctions",
+                        "coverage_start": "2026-01-01",
+                        "coverage_end": "2026-04-29",
+                        "last_loaded": "2026-04-29T07:00:00+00:00",
+                        "record_count": 3015,
+                        "expected_cadence_hours": 25,
+                        "age_hours": 2.5,
+                        "stale": False,
+                    },
+                    {
+                        "id": "openfigi",
+                        "label": "OpenFIGI ticker enrichment",
+                        "coverage_start": None,
+                        "coverage_end": None,
+                        "last_loaded": "2026-03-01T08:00:00+00:00",
+                        "record_count": 12345,
+                        "expected_cadence_hours": 200,
+                        "age_hours": 1416.0,
+                        "stale": True,
+                    },
+                ],
+                "generated_at": "2026-04-29T09:30:00+00:00",
+            }
+
+    client = make_test_client(data_quality_source=FreshnessMock())
+    resp = client.get("/data-quality/source-freshness")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["sources"]) == 2
+    by_id = {s["id"]: s for s in data["sources"]}
+    assert by_id["sanctions"]["stale"] is False
+    assert by_id["openfigi"]["stale"] is True
+    assert data["generated_at"] == "2026-04-29T09:30:00+00:00"

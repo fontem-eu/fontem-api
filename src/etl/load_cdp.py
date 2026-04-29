@@ -193,6 +193,16 @@ def main(argv=None):
     )
     try:
         summary = load_into_neo4j(driver, records)
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="cdp",
+            label="CDP corporate climate scores",
+            coverage_start=f"{args.year}-01-01",
+            coverage_end=f"{args.year}-12-31",
+            record_count=summary.get("total", 0),
+            expected_cadence_hours=24 * 100,  # quarterly
+        )
     finally:
         driver.close()
 

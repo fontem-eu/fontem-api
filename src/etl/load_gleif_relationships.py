@@ -189,7 +189,17 @@ def main(argv=None):
     try:
         with zf.open(xml_name) as xml_stream:
             records = parse_relationships(xml_stream)
-            load_relationships(driver, records)
+            summary = load_relationships(driver, records)
+        from src.etl import _freshness  # pylint: disable=import-outside-toplevel
+        _freshness.update_source(
+            driver,
+            source_id="gleif-relationships",
+            label="GLEIF Level 2 (parent/subsidiary) relationships",
+            coverage_start=None,
+            coverage_end=None,
+            record_count=summary.get("total", 0),
+            expected_cadence_hours=200,  # weekly
+        )
     finally:
         driver.close()
 
