@@ -115,6 +115,43 @@ SEED_DATASETS: list[Dataset] = [
     _ds("reg_area3", "NUTS-3 area km² (one-off)",
         "geometry", [2, 3], update_freq="10 years",
         notes="static; updates only at NUTS revisions"),
+
+    # ── Migration (NUTS-0) ──────────────────────────────────────
+    # Eurostat migration data is country-level only; sub-national
+    # detail isn't published in this dataset family. We pin to [0]
+    # so the Atlas picker constrains the level toggle accordingly.
+    # `migr_asyappctzm` is the monthly applicant series — by far the
+    # most timely public European migration data, ~6-week lag.
+    _ds("migr_imm1ctz", "Immigration × age × sex × citizenship",
+        "migration", [0]),
+    _ds("migr_imm8", "Immigration × broad group of citizenship",
+        "migration", [0]),
+    _ds("migr_emi1ctz", "Emigration × age × sex × citizenship",
+        "migration", [0]),
+    _ds("migr_acq", "Acquisitions of citizenship × former citizenship",
+        "migration", [0]),
+    _ds("migr_pop1ctz", "Population on 1 Jan × citizenship",
+        "migration", [0]),
+    _ds("migr_pop3ctb", "Population × citizenship × country of birth",
+        "migration", [0]),
+    _ds("migr_asyappctzm", "Asylum applicants (monthly) × citizenship",
+        "migration", [0], update_freq="1 month", time_unit="month"),
+    _ds("migr_asydcfsta", "First-instance asylum decisions × citizenship",
+        "migration", [0]),
+
+    # ── Crime + justice (NUTS-0) ────────────────────────────────
+    # Be cautious comparing across countries — recording rules and
+    # offence definitions vary. Eurostat publishes the figures; the
+    # platform should surface the methodology footnote alongside.
+    _ds("crim_off_cat", "Recorded offences by offence category",
+        "crime", [0],
+        notes="reporting differs by country; use as a within-country trend"),
+    _ds("crim_hom_vrel", "Homicide victims × relationship to perpetrator",
+        "crime", [0]),
+    _ds("crim_pris_pop", "Prison population × sex",
+        "crime", [0]),
+    _ds("crim_just_age", "Persons in criminal justice × age",
+        "crime", [0]),
 ]
 
 

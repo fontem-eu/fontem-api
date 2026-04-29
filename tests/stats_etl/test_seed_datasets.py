@@ -17,10 +17,12 @@ def test_seed_size_and_uniqueness():
 
 def test_seed_themes_cover_expected_buckets():
     """Plan-level promise: population, economy, labour, education, health,
-    rd, social, digital, tourism, transport, geometry."""
+    rd, social, digital, tourism, transport, geometry — plus migration
+    and crime once they were added."""
     themes = {d.theme for d in SEED_DATASETS}
     expected = {"population", "health", "economy", "labour", "education",
-                "rd", "social", "digital", "tourism", "transport", "geometry"}
+                "rd", "social", "digital", "tourism", "transport", "geometry",
+                "migration", "crime"}
     missing = expected - themes
     assert not missing, f"themes missing from seed: {missing}"
 
