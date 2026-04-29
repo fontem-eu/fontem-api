@@ -68,7 +68,13 @@ class Observation(BaseModel):
     time: datetime
     dimensions: dict[str, Any]
     value: float | None
-    flags: str | None = None
+    # Eurostat flags are 1-character codes ("p"=provisional, "e"=estimate,
+    # "b"=break in series, etc.). The DB stores them as `text[]` (a row
+    # can carry several at once); this field carries the raw array so
+    # the UI can decide whether to render them as a footnote or icon.
+    # Empty array and NULL are both valid — Pydantic coerces None to None
+    # and an empty list stays empty.
+    flags: list[str] | None = None
 
 
 class SeriesResponse(BaseModel):

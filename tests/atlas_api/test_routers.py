@@ -151,6 +151,58 @@ def test_series_returns_payload():
     assert body["data"][0]["geo_code"] == "DE21"
 
 
+def test_series_passes_eurostat_flag_arrays_through():
+    """Eurostat flag codes ship as a `text[]` Postgres array — every
+    /atlas/series response in prod was 500'ing because the response
+    schema typed `flags` as a single string. This test pins the
+    contract: `["p"]`, `["b","e"]`, and an empty `[]` all serialise
+    cleanly through the response model.
+    """
+    obs = [
+        Observation(
+            geo_code="DE21", year=2023,
+            time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            dimensions={"unit": "MIO_EUR"}, value=100.0,
+            flags=["p"],
+        ),
+        Observation(
+            geo_code="FR10", year=2023,
+            time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            dimensions={"unit": "MIO_EUR"}, value=200.0,
+            flags=["b", "e"],
+        ),
+        Observation(
+            geo_code="IT10", year=2023,
+            time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            dimensions={"unit": "MIO_EUR"}, value=300.0,
+            flags=[],
+        ),
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.fetch_series",
+        return_value=obs,
+    ):
+        r = _client().get("/series?dataset=nama_10r_2gdp&nuts_level=2")
+    assert r.status_code == 200, r.text
+    rows = r.json()["data"]
+    assert rows[0]["flags"] == ["p"]
+    assert rows[1]["flags"] == ["b", "e"]
+    assert rows[2]["flags"] == []
+
+
+def test_observation_rejects_legacy_string_flags():
+    """We changed the schema from `str | None` to `list[str] | None` —
+    pin the new contract so a regression to the old shape fails loudly
+    in pytest instead of in prod."""
+    import pytest
+    with pytest.raises(Exception):
+        Observation(
+            geo_code="DE21", year=2023,
+            time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            dimensions={}, value=1.0, flags="p",
+        )
+
+
 def test_series_truncated_when_at_limit():
     # Build N observations equal to the configured limit so `truncated` flips True.
     one = Observation(
