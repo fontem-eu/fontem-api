@@ -90,6 +90,26 @@ def test_materialise_drops_before_rebuilding():
     assert delete_idx < aggregate_idx
 
 
+def test_materialise_uses_batched_delete_subqueries():
+    """Regression for the OOM that killed the bootstrap Job in prod:
+    a single-transaction DELETE of millions of summary edges blew
+    past Neo4j's `db.memory.transaction.max` (256 MiB default) and
+    failed with a TransientError. Both DROPs must use
+    `CALL { ... } IN TRANSACTIONS` so the deletes commit in chunks."""
+    session, captured = _capturing_session()
+    materialize.materialize(_capturing_driver(session))
+
+    deletes = [c for c in captured if "DELETE r" in c["cypher"]]
+    for d in deletes:
+        cypher = d["cypher"]
+        assert "CALL { WITH r DELETE r }" in cypher, (
+            f"DELETE not batched in transactions: {cypher!r} — this "
+            "blew the prod transaction memory limit on the trade-edges "
+            "bootstrap. Use CALL { ... } IN TRANSACTIONS OF N ROWS."
+        )
+        assert "IN TRANSACTIONS OF" in cypher
+
+
 def test_materialise_writes_both_edge_directions():
     """Each pair gets a CLIENT_OF (Authority->Company) AND a SUPPLIER_OF
     (Company->Authority). Without both, the graph view's bi-directional
