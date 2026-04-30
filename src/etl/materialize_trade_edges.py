@@ -36,10 +36,23 @@ def materialize(driver):
     t0 = time.time()
 
     with driver.session() as session:
-        # Drop existing edges so we can re-run idempotently
+        # Drop existing edges so we can re-run idempotently. Batched
+        # via `CALL { ... } IN TRANSACTIONS` because a single-tx
+        # DELETE of millions of summary edges blows past Neo4j's
+        # `db.memory.transaction.max` (256 MiB by default), failing
+        # the run with a TransientError. The chunk size matches the
+        # CREATE batch below — 2000 edges per sub-transaction.
         logger.info("Dropping existing CLIENT_OF / SUPPLIER_OF edges...")
-        session.run("MATCH ()-[r:CLIENT_OF]->() DELETE r")
-        session.run("MATCH ()-[r:SUPPLIER_OF]->() DELETE r")
+        session.run(
+            "MATCH ()-[r:CLIENT_OF]->() "
+            "CALL { WITH r DELETE r } "
+            f"IN TRANSACTIONS OF {BATCH_SIZE} ROWS"
+        )
+        session.run(
+            "MATCH ()-[r:SUPPLIER_OF]->() "
+            "CALL { WITH r DELETE r } "
+            f"IN TRANSACTIONS OF {BATCH_SIZE} ROWS"
+        )
 
         # Aggregate: for each (authority, company) pair, count contracts
         # and sum values, then create the summary edges.
