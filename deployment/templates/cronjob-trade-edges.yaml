@@ -1,0 +1,29 @@
+{{/*
+Re-materialise CLIENT_OF / SUPPLIER_OF summary edges nightly.
+
+Why:
+  The script does a full DROP-and-rebuild of the (Authority -> Company)
+  trade summary from the AWARDED + AWARDED_TO graph. The consolidator
+  refreshes these edges incrementally on every merge, but other paths
+  also mutate AWARDED — manual entity-resolution merges, contract ETL
+  reruns, dedup_companies — and they don't all wire into the
+  consolidator. This nightly job is the defence-in-depth bound on
+  staleness for those paths.
+
+  Schedule: 09:00 UTC, after the EU sanctions / lobbying / TED loaders
+  have settled (07:00–08:00 windows). Runs in <2 min on a 2M-row
+  graph; the deadline is generous.
+*/}}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "etl-trade-edges"
+      "schedule"        "0 9 * * *"
+      "module"          "src.etl.materialize_trade_edges"
+      "args"            (list)
+      "deadlineSeconds" 1800
+      "cpuRequest"      "250m"
+      "cpuLimit"        "1"
+      "memRequest"      "512Mi"
+      "memLimit"        "2Gi"
+      "extraEnv"        (list)
+      "Values"          .Values
+      "Release"         .Release) -}}
