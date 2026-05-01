@@ -54,8 +54,19 @@ def test_parse_period_month():
 
 
 def test_parse_period_month_no_dash():
-    # TSV bulk download omits the dash (e.g. asylum-applicants monthly).
+    # Some TSV bulks omit the dash entirely.
     assert _parse_period("2024M07") == datetime(2024, 7, 1, tzinfo=timezone.utc)
+
+
+def test_parse_period_month_iso_form():
+    # MIGR_ASYAPPCTZM (and other monthly TSVs) use bare ISO YYYY-MM.
+    assert _parse_period("2008-01") == datetime(2008, 1, 1, tzinfo=timezone.utc)
+    assert _parse_period("2024-12") == datetime(2024, 12, 1, tzinfo=timezone.utc)
+
+
+def test_parse_period_quarter_distinct_from_iso_month():
+    # Sanity: 2024-Q3 must not be mis-parsed as YYYY-MM.
+    assert _parse_period("2024-Q3") == datetime(2024, 7, 1, tzinfo=timezone.utc)
 
 
 def test_parse_period_quarter():

@@ -182,17 +182,26 @@ def _parse_cell(raw: str) -> tuple[float | None, list[str]]:
 def _parse_period(period: str) -> datetime | None:
     """Map Eurostat time strings to UTC datetime aligned at start.
 
-    Eurostat ships two notations for sub-annual periods: SDMX-JSON uses
-    a dash (``2024-M07``) while the TSV bulk download omits it
-    (``2024M07``). Both are accepted here.
+    Eurostat is inconsistent about the monthly form across endpoints
+    and dataset families. We see all three of these in the wild:
 
-    Supports: 2024, 2024Q3 / 2024-Q3, 2024M07 / 2024-M07,
-    2024W12 / 2024-W12, 2024S1 / 2024-S1.
+      - ``2024-01``  — bare ISO YYYY-MM (e.g. ``MIGR_ASYAPPCTZM`` TSV)
+      - ``2024-M01`` — SDMX-JSON style with explicit M marker
+      - ``2024M01``  — same with the dash dropped (some TSV bulks)
+
+    Quarterly / weekly / semestral forms are similarly accepted with
+    or without the dash.
     """
     period = period.strip()
     if not period:
         return None
     try:
+        # YYYY-MM form: 4-digit year, dash, two digits. Distinct from
+        # 2024-Q3 / 2024-M07 because the chars after the dash are
+        # purely numeric.
+        if len(period) == 7 and period[4] == "-" and period[5:].isdigit():
+            year, month = period.split("-", 1)
+            return datetime(int(year), int(month), 1, tzinfo=timezone.utc)
         if "M" in period:
             sep = "-M" if "-M" in period else "M"
             year, month = period.split(sep, 1)
