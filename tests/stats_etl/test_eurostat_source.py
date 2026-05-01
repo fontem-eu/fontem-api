@@ -53,9 +53,18 @@ def test_parse_period_month():
     assert _parse_period("2024-M07") == datetime(2024, 7, 1, tzinfo=timezone.utc)
 
 
+def test_parse_period_month_no_dash():
+    # TSV bulk download omits the dash (e.g. asylum-applicants monthly).
+    assert _parse_period("2024M07") == datetime(2024, 7, 1, tzinfo=timezone.utc)
+
+
 def test_parse_period_quarter():
     assert _parse_period("2024-Q3") == datetime(2024, 7, 1, tzinfo=timezone.utc)
     assert _parse_period("2024-Q1") == datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+def test_parse_period_quarter_no_dash():
+    assert _parse_period("2024Q3") == datetime(2024, 7, 1, tzinfo=timezone.utc)
 
 
 def test_parse_period_week():
@@ -64,8 +73,16 @@ def test_parse_period_week():
     assert p == datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
+def test_parse_period_week_no_dash():
+    assert _parse_period("2024W01") == datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
 def test_parse_period_semester():
     assert _parse_period("2024-S2") == datetime(2024, 7, 1, tzinfo=timezone.utc)
+
+
+def test_parse_period_semester_no_dash():
+    assert _parse_period("2024S2") == datetime(2024, 7, 1, tzinfo=timezone.utc)
 
 
 def test_parse_period_invalid():

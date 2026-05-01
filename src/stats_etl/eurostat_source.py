@@ -182,26 +182,35 @@ def _parse_cell(raw: str) -> tuple[float | None, list[str]]:
 def _parse_period(period: str) -> datetime | None:
     """Map Eurostat time strings to UTC datetime aligned at start.
 
-    Supports: 2024, 2024-Q3, 2024-M07, 2024-W12, 2024-S1.
+    Eurostat ships two notations for sub-annual periods: SDMX-JSON uses
+    a dash (``2024-M07``) while the TSV bulk download omits it
+    (``2024M07``). Both are accepted here.
+
+    Supports: 2024, 2024Q3 / 2024-Q3, 2024M07 / 2024-M07,
+    2024W12 / 2024-W12, 2024S1 / 2024-S1.
     """
     period = period.strip()
     if not period:
         return None
     try:
         if "M" in period:
-            year, month = period.split("-M")
+            sep = "-M" if "-M" in period else "M"
+            year, month = period.split(sep, 1)
             return datetime(int(year), int(month), 1, tzinfo=timezone.utc)
         if "Q" in period:
-            year, q = period.split("-Q")
+            sep = "-Q" if "-Q" in period else "Q"
+            year, q = period.split(sep, 1)
             month = (int(q) - 1) * 3 + 1
             return datetime(int(year), month, 1, tzinfo=timezone.utc)
         if "W" in period:
-            year, week = period.split("-W")
+            sep = "-W" if "-W" in period else "W"
+            year, week = period.split(sep, 1)
             return datetime.fromisocalendar(int(year), int(week), 1).replace(
                 tzinfo=timezone.utc,
             )
         if "S" in period:
-            year, sem = period.split("-S")
+            sep = "-S" if "-S" in period else "S"
+            year, sem = period.split(sep, 1)
             month = (int(sem) - 1) * 6 + 1
             return datetime(int(year), month, 1, tzinfo=timezone.utc)
         # Default: bare year
