@@ -10,9 +10,7 @@ its own service when traffic or feature scope justifies it.
 |---|---|
 | `GET /atlas/health` | Probes the fontem_stats Postgres connection and reports per-source status. |
 | `GET /atlas/datasets` | Catalog: every enabled dataset + last successful sync. |
-| `GET /atlas/datasets/{code}` | One dataset's full metadata + freshness + observed time range. |
 | `GET /atlas/series` | Time-series rows for one dataset — filter by `geo[]`, `nuts_level`, `start`, `end`, `dimensions`. |
-| `GET /atlas/snapshot` | One value per geo for a single (dataset, year, NUTS level) — the choropleth-shaped query. |
 
 ## Module layout
 
@@ -27,7 +25,6 @@ atlas_api/
     health.py
     datasets.py
     series.py
-    snapshot.py
   __main__.py      — `python -m src.atlas_api` for standalone runs
 ```
 

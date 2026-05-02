@@ -16,7 +16,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from src.atlas_api.app import build_app
-from src.atlas_api.schemas import Observation, SnapshotCell, SourceHealth
+from src.atlas_api.schemas import Observation, SourceHealth
 
 
 def _client(stats_dsn: str | None = "postgresql://test:test@h/d"):
@@ -81,37 +81,6 @@ def test_datasets_returns_summary():
     body = r.json()
     assert len(body) == 1
     assert body[0]["code"] == "nama_10r_2gdp"
-
-
-def test_dataset_detail_404_when_missing():
-    with patch(
-        "src.atlas_api.sources.fontem_stats.FontemStatsSource.get_dataset_detail",
-        return_value=None,
-    ):
-        r = _client().get("/datasets/nope")
-    assert r.status_code == 404
-
-
-def test_dataset_detail_returns_observed_range():
-    detail = {
-        "code": "demo_r_pjangrp3", "label": "Pop", "theme": "population",
-        "nuts_levels": [2, 3], "time_unit": "year", "update_freq": "1 year",
-        "enabled": True, "notes": None,
-        "last_sync_started_at": None, "last_upstream_modified": None,
-        "last_sync_rows": 12345,
-        "observation_count": 12345, "earliest_year": 2010,
-        "latest_year": 2024, "distinct_dim_combos": 6,
-    }
-    with patch(
-        "src.atlas_api.sources.fontem_stats.FontemStatsSource.get_dataset_detail",
-        return_value=detail,
-    ):
-        r = _client().get("/datasets/demo_r_pjangrp3")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["earliest_year"] == 2010
-    assert body["latest_year"] == 2024
-    assert body["distinct_dim_combos"] == 6
 
 
 # ── /series ──────────────────────────────────────────────────────────
@@ -219,35 +188,3 @@ def test_series_truncated_when_at_limit():
     ):
         r = _client().get("/series?dataset=x&nuts_level=2")
     assert r.json()["truncated"] is True
-
-
-# ── /snapshot ────────────────────────────────────────────────────────
-
-
-def test_snapshot_returns_cells_and_available_combos():
-    cells = [SnapshotCell(geo_code="DE21", value=100.0)]
-    available = [{"unit": "MIO_EUR"}]
-    with patch(
-        "src.atlas_api.sources.fontem_stats.FontemStatsSource.snapshot",
-        return_value=(cells, available),
-    ):
-        r = _client().get(
-            "/snapshot?dataset=nama_10r_2gdp&year=2023&nuts_level=2",
-        )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["count"] == 1
-    assert body["available_dim_combos"] == [{"unit": "MIO_EUR"}]
-    assert body["cells"][0]["geo_code"] == "DE21"
-
-
-def test_snapshot_validates_dimensions_json():
-    r = _client().get(
-        "/snapshot?dataset=x&year=2023&nuts_level=2&dimensions=not-json",
-    )
-    assert r.status_code == 400
-
-
-def test_snapshot_nuts_level_bounded():
-    r = _client().get("/snapshot?dataset=x&year=2023&nuts_level=4")
-    assert r.status_code == 422

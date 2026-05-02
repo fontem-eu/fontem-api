@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter, FastAPI
 
 from src.atlas_api import config as atlas_config
-from src.atlas_api.routers import datasets, health, series, snapshot
+from src.atlas_api.routers import datasets, health, series
 from src.atlas_api.sources.fontem_stats import FontemStatsSource
 
 
@@ -36,7 +36,6 @@ def build_router() -> APIRouter:
     parent.include_router(health.router)
     parent.include_router(datasets.router)
     parent.include_router(series.router)
-    parent.include_router(snapshot.router)
     return parent
 
 
@@ -59,9 +58,9 @@ def build_app() -> FastAPI:
     app = FastAPI(
         title="Fontem Atlas API",
         description=(
-            "Read surface for the Fontem Atlas frontend — datasets, "
-            "time-series, and choropleth snapshots over the curated "
-            "Eurostat catalog (and future overlay sources)."
+            "Read surface for the Fontem Atlas frontend — datasets and "
+            "time-series over the curated Eurostat catalog (and future "
+            "overlay sources)."
         ),
         version="0.1.0",
     )

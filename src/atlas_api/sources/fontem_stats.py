@@ -14,7 +14,7 @@ from typing import Any
 
 import psycopg
 
-from src.atlas_api.schemas import Observation, SnapshotCell, SourceHealth
+from src.atlas_api.schemas import Observation, SourceHealth
 
 
 class FontemStatsSource:
@@ -116,49 +116,6 @@ class FontemStatsSource:
             cols = [c.name for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
-    def get_dataset_detail(self, code: str) -> dict[str, Any] | None:
-        """Catalog row for one dataset + its observed time range."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT d.code, d.label, d.theme, d.nuts_levels, d.time_unit,
-                       d.update_freq::text AS update_freq, d.enabled, d.notes,
-                       r.started_at         AS last_sync_started_at,
-                       r.upstream_modified  AS last_upstream_modified,
-                       r.rows_total         AS last_sync_rows
-                FROM fontem_stats.dataset d
-                LEFT JOIN LATERAL (
-                    SELECT started_at, upstream_modified, rows_total
-                    FROM fontem_stats.sync_run
-                    WHERE dataset_code = d.code AND status = 'success'
-                    ORDER BY started_at DESC LIMIT 1
-                ) r ON true
-                WHERE d.code = %s
-                """,
-                (code,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            cols = [c.name for c in cur.description]
-            data = dict(zip(cols, row))
-
-            cur.execute(
-                """
-                SELECT
-                    COUNT(*)::bigint                              AS observation_count,
-                    EXTRACT(YEAR FROM MIN(time))::int             AS earliest_year,
-                    EXTRACT(YEAR FROM MAX(time))::int             AS latest_year,
-                    COUNT(DISTINCT dimensions)::bigint            AS distinct_dim_combos
-                FROM fontem_stats.observation
-                WHERE dataset_code = %s
-                """,
-                (code,),
-            )
-            extra = dict(zip([c.name for c in cur.description], cur.fetchone()))
-            data.update(extra)
-            return data
-
     # ── Series ───────────────────────────────────────────────────────
 
     def fetch_series(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -212,72 +169,3 @@ class FontemStatsSource:
                 )
                 for r in cur.fetchall()
             ]
-
-    # ── Snapshot (single year × NUTS level) ──────────────────────────
-
-    def snapshot(
-        self,
-        *,
-        dataset: str,
-        year: int,
-        nuts_level: int,
-        dim_filter: dict[str, Any] | None,
-    ) -> tuple[list[SnapshotCell], list[dict[str, Any]]]:
-        """One value per geo for (dataset, year, nuts_level).
-
-        Returns (cells, available_dim_combos). The dim_filter pins which
-        combination is returned in cells; available_dim_combos lists
-        every other combination present so the UI can offer a slice
-        picker without another round-trip.
-
-        If no dim_filter is supplied and multiple combinations exist,
-        cells is empty and the caller is expected to read
-        available_dim_combos and pick one.
-        """
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT dimensions
-                FROM fontem_stats.observation
-                WHERE dataset_code = %s
-                  AND EXTRACT(YEAR FROM time)::int = %s
-                  AND char_length(geo_code) = %s
-                ORDER BY dimensions
-                """,
-                (dataset, year, nuts_level + 2),
-            )
-            available = [r[0] for r in cur.fetchall()]
-
-            cells: list[SnapshotCell] = []
-            if dim_filter is not None:
-                cur.execute(
-                    """
-                    SELECT geo_code, value
-                    FROM fontem_stats.observation
-                    WHERE dataset_code = %s
-                      AND EXTRACT(YEAR FROM time)::int = %s
-                      AND char_length(geo_code) = %s
-                      AND dimensions @> %s::jsonb
-                    ORDER BY geo_code
-                    """,
-                    (
-                        dataset, year, nuts_level + 2,
-                        json.dumps(dim_filter),
-                    ),
-                )
-                cells = [SnapshotCell(geo_code=r[0], value=r[1]) for r in cur.fetchall()]
-            elif len(available) == 1:
-                # Unambiguous: return the only slice that exists.
-                cur.execute(
-                    """
-                    SELECT geo_code, value
-                    FROM fontem_stats.observation
-                    WHERE dataset_code = %s
-                      AND EXTRACT(YEAR FROM time)::int = %s
-                      AND char_length(geo_code) = %s
-                    ORDER BY geo_code
-                    """,
-                    (dataset, year, nuts_level + 2),
-                )
-                cells = [SnapshotCell(geo_code=r[0], value=r[1]) for r in cur.fetchall()]
-            return cells, available

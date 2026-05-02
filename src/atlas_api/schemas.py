@@ -47,18 +47,6 @@ class DatasetSummary(BaseModel):
     last_sync_rows: int | None = None
 
 
-class DatasetDetail(DatasetSummary):
-    """Catalog row with its observed time range and dim-combo count.
-
-    Costs one extra aggregate query per dataset; we surface this only
-    on the single-dataset endpoint to keep the catalog list cheap.
-    """
-    observation_count: int | None = None
-    earliest_year: int | None = None
-    latest_year: int | None = None
-    distinct_dim_combos: int | None = None
-
-
 # ── Observations ────────────────────────────────────────────────────
 
 
@@ -90,27 +78,3 @@ class SeriesResponse(BaseModel):
         description="True if `count` hit the configured row limit.",
     )
     data: list[Observation]
-
-
-# ── Snapshot (choropleth-shaped) ────────────────────────────────────
-
-
-class SnapshotCell(BaseModel):
-    geo_code: str
-    value: float | None
-
-
-class SnapshotResponse(BaseModel):
-    dataset: str
-    year: int
-    nuts_level: int
-    dimensions_filter: dict[str, Any] | None
-    available_dim_combos: list[dict[str, Any]] = Field(
-        description=(
-            "Other dimension combinations present in the data for the "
-            "same (dataset, year, nuts_level). Lets the UI offer a "
-            "slice picker without a second round-trip."
-        ),
-    )
-    count: int
-    cells: list[SnapshotCell]
