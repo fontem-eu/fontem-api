@@ -19,7 +19,7 @@ import gzip
 import io
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import httpx
@@ -43,6 +43,11 @@ class DatasetMetadata:
     upstream_modified: datetime
     dim_ids: list[str]
     dim_sizes: list[int]
+    # Per-dimension {code → human label} maps. Only carries the dims that
+    # have meaningful labels — `freq` and `time` are skipped because they
+    # don't appear in observation rows or aren't worth labelling. Defaults
+    # to empty so older test fixtures and callers don't break.
+    dim_labels: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -66,7 +71,15 @@ class EurostatSource:
         )
 
     def fetch_metadata(self, code: str) -> DatasetMetadata:
-        """Cheap: fetch one cell and read the metadata sidecar."""
+        """Cheap: fetch one cell and read the metadata sidecar.
+
+        Eurostat ships category labels in the sidecar under
+        ``dimension.{name}.category.label``. We collect them so the UI
+        and downstream consumers can render ``ICCS0101`` as ``Intentional
+        homicide`` instead of as an opaque code. ``freq`` and ``time``
+        are skipped: ``freq`` is a constant noise dimension and ``time``
+        labels are handled by the period parser.
+        """
         url = f"{API_BASE}/{code.upper()}"
         params = {"lang": "EN", "lastTimePeriod": "1", "format": "JSON"}
         resp = self._http.get(url, params=params)
@@ -77,12 +90,22 @@ class EurostatSource:
             upstream_modified = datetime.fromisoformat(updated_raw)
         except ValueError:
             upstream_modified = datetime.now(timezone.utc)
+        dim_ids = list(data.get("id", []))
+        dim_labels: dict[str, dict[str, str]] = {}
+        for dim in dim_ids:
+            if dim in ("freq", "time"):
+                continue
+            cat = data.get("dimension", {}).get(dim, {}).get("category", {})
+            labels = cat.get("label") or {}
+            if labels:
+                dim_labels[dim] = {str(k): str(v) for k, v in labels.items()}
         return DatasetMetadata(
             code=code,
             label=data.get("label", ""),
             upstream_modified=upstream_modified,
-            dim_ids=list(data.get("id", [])),
+            dim_ids=dim_ids,
             dim_sizes=list(data.get("size", [])),
+            dim_labels=dim_labels,
         )
 
     def iter_observations(

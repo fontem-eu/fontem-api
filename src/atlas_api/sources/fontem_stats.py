@@ -99,7 +99,7 @@ class FontemStatsSource:
                 """
                 SELECT d.code, d.label, d.theme, d.nuts_levels, d.time_unit,
                        d.update_freq::text AS update_freq, d.enabled,
-                       d.notes,
+                       d.notes, d.dim_ids, d.dim_labels,
                        r.started_at         AS last_sync_started_at,
                        r.upstream_modified  AS last_upstream_modified,
                        r.rows_total         AS last_sync_rows

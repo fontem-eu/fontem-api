@@ -26,6 +26,7 @@ data:
         nuts_levels       smallint[]   NOT NULL,
         dim_ids           text[]       NOT NULL,
         dim_sizes         int[]        NOT NULL,
+        dim_labels        jsonb        NOT NULL DEFAULT '{}'::jsonb,
         time_unit         text         NOT NULL DEFAULT 'year',
         update_freq       interval     NOT NULL,
         enabled           boolean      NOT NULL DEFAULT true,
@@ -33,6 +34,9 @@ data:
         created_at        timestamptz  NOT NULL DEFAULT now(),
         updated_at        timestamptz  NOT NULL DEFAULT now()
     );
+    -- Idempotent migration for clusters created before dim_labels existed.
+    ALTER TABLE fontem_stats.dataset
+        ADD COLUMN IF NOT EXISTS dim_labels jsonb NOT NULL DEFAULT '{}'::jsonb;
 
     -- ── Sync history: one row per loader invocation ─────────────
     CREATE TABLE IF NOT EXISTS fontem_stats.sync_run (

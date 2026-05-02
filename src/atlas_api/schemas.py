@@ -45,6 +45,13 @@ class DatasetSummary(BaseModel):
     last_sync_started_at: datetime | None = None
     last_upstream_modified: datetime | None = None
     last_sync_rows: int | None = None
+    # Dimension axes (e.g. ["freq","iccs","unit","geo","time"]) and the
+    # human labels for the codes that appear in those axes. The UI uses
+    # these to render slice pickers. Empty until the first sync writes
+    # them. `freq` and `time` are excluded from labels (period parser
+    # handles time; freq is constant).
+    dim_ids: list[str] = Field(default_factory=list)
+    dim_labels: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 # ── Observations ────────────────────────────────────────────────────

@@ -170,3 +170,73 @@ def test_iter_observations_batches_correctly():
 
     batches = list(source.iter_observations("X", batch_size=10))
     assert [len(b) for b in batches] == [10, 10, 5]
+
+
+# ── fetch_metadata + dim_labels ──────────────────────────────────
+
+
+def _fake_meta_response(body: dict) -> MagicMock:
+    """Build a fake httpx GET response delivering a JSON payload."""
+    resp = MagicMock()
+    resp.json.return_value = body
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+def test_fetch_metadata_extracts_dim_labels():
+    """SDMX-JSON ships dim labels under dimension.{name}.category.label —
+    fetch_metadata should harvest those for non-time, non-freq dims."""
+    body = {
+        "label": "Recorded offences",
+        "updated": "2026-04-29T09:00:00+0000",
+        "id": ["freq", "iccs", "unit", "geo", "time"],
+        "size": [1, 25, 2, 41, 17],
+        "dimension": {
+            "freq": {"category": {"label": {"A": "Annual"}}},
+            "iccs": {"category": {"label": {
+                "ICCS0101": "Intentional homicide",
+                "ICCS0102": "Attempted intentional homicide",
+            }}},
+            "unit": {"category": {"label": {
+                "NR": "Number",
+                "P_HTHAB": "Per hundred thousand inhabitants",
+            }}},
+            "geo": {"category": {"label": {
+                "BE": "Belgium",
+                "DE": "Germany",
+            }}},
+            "time": {"category": {"label": {"2024": "2024"}}},
+        },
+    }
+    http = MagicMock()
+    http.get.return_value = _fake_meta_response(body)
+    source = EurostatSource(http=http)
+    meta = source.fetch_metadata("crim_off_cat")
+
+    assert meta.dim_ids == ["freq", "iccs", "unit", "geo", "time"]
+    # Only labelled dims are kept; freq + time are skipped.
+    assert set(meta.dim_labels.keys()) == {"iccs", "unit", "geo"}
+    assert meta.dim_labels["iccs"]["ICCS0101"] == "Intentional homicide"
+    assert meta.dim_labels["unit"]["P_HTHAB"] == "Per hundred thousand inhabitants"
+
+
+def test_fetch_metadata_handles_missing_labels():
+    """When the catalog row has no labels (sparse upstream), dim_labels
+    is just an empty dict — not a crash."""
+    body = {
+        "label": "Sparse",
+        "updated": "2026-04-29T09:00:00+0000",
+        "id": ["freq", "geo", "time"],
+        "size": [1, 0, 0],
+        "dimension": {
+            "freq": {"category": {"label": {"A": "Annual"}}},
+            # geo block missing entirely
+            "time": {"category": {"label": {"2024": "2024"}}},
+        },
+    }
+    http = MagicMock()
+    http.get.return_value = _fake_meta_response(body)
+    source = EurostatSource(http=http)
+    meta = source.fetch_metadata("sparse_test")
+
+    assert meta.dim_labels == {}

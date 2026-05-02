@@ -45,6 +45,15 @@ class EurostatLoader:
         run_id = self._db.start_run(code)
         try:
             meta = self._source.fetch_metadata(code)
+            # Refresh dim_ids/sizes/labels on every metadata fetch (cheap)
+            # so the catalog stays current even when the data load itself
+            # gets skipped because upstream hasn't changed.
+            self._db.update_dataset_metadata(
+                code,
+                dim_ids=meta.dim_ids,
+                dim_sizes=meta.dim_sizes,
+                dim_labels=meta.dim_labels,
+            )
             _, last_upstream = self._db.last_successful_run(code)
             if (not force and last_upstream is not None
                     and meta.upstream_modified <= last_upstream):

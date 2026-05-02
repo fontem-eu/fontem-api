@@ -28,6 +28,32 @@ def _normalize_url(url: str) -> str:
     return url.replace("postgresql+asyncpg://", "postgresql://")
 
 
+def _row_to_dataset(r: dict) -> "Dataset":
+    """Build a Dataset from a fetched catalog row.
+
+    Tolerant of older catalogs without the `dim_labels` column so a
+    pod from a newer image can still read a row that hasn't been
+    re-upserted since the migration.
+    """
+    raw_labels = r.get("dim_labels")
+    if isinstance(raw_labels, str):
+        try:
+            raw_labels = json.loads(raw_labels)
+        except json.JSONDecodeError:
+            raw_labels = None
+    return Dataset(
+        code=r["code"], label=r["label"], theme=r["theme"],
+        source=r["source"], source_url=r["source_url"],
+        nuts_levels=list(r["nuts_levels"]),
+        dim_ids=list(r["dim_ids"]),
+        dim_sizes=list(r["dim_sizes"]),
+        time_unit=r["time_unit"],
+        update_freq=str(r["update_freq"]),
+        enabled=r["enabled"], notes=r.get("notes"),
+        dim_labels=raw_labels or None,
+    )
+
+
 @dataclass
 class Dataset:
     code: str
@@ -42,6 +68,10 @@ class Dataset:
     update_freq: str
     enabled: bool
     notes: str | None = None
+    # Per-dim {code → human label} map written at sync time. Empty until
+    # the first successful sync for the dataset. Surfaced by the Atlas
+    # API so the UI can render labels instead of opaque codes.
+    dim_labels: dict[str, dict[str, str]] | None = None
 
 
 @dataclass
@@ -99,8 +129,12 @@ class StatsDatabase:
                     theme = EXCLUDED.theme,
                     source_url = EXCLUDED.source_url,
                     nuts_levels = EXCLUDED.nuts_levels,
-                    dim_ids = EXCLUDED.dim_ids,
-                    dim_sizes = EXCLUDED.dim_sizes,
+                    -- Don't clobber dim_ids/dim_sizes if the seed has empty
+                    -- placeholders (the loader fills them at sync time).
+                    dim_ids = COALESCE(NULLIF(EXCLUDED.dim_ids, '{}'),
+                                       fontem_stats.dataset.dim_ids),
+                    dim_sizes = COALESCE(NULLIF(EXCLUDED.dim_sizes, '{}'),
+                                         fontem_stats.dataset.dim_sizes),
                     time_unit = EXCLUDED.time_unit,
                     update_freq = EXCLUDED.update_freq,
                     enabled = EXCLUDED.enabled,
@@ -131,19 +165,7 @@ class StatsDatabase:
         with self.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query)
             rows = cur.fetchall()
-        return [
-            Dataset(
-                code=r["code"], label=r["label"], theme=r["theme"],
-                source=r["source"], source_url=r["source_url"],
-                nuts_levels=list(r["nuts_levels"]),
-                dim_ids=list(r["dim_ids"]),
-                dim_sizes=list(r["dim_sizes"]),
-                time_unit=r["time_unit"],
-                update_freq=str(r["update_freq"]),
-                enabled=r["enabled"], notes=r.get("notes"),
-            )
-            for r in rows
-        ]
+        return [_row_to_dataset(r) for r in rows]
 
     def get_dataset(self, code: str) -> Dataset | None:
         with self.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -154,16 +176,42 @@ class StatsDatabase:
             row = cur.fetchone()
         if not row:
             return None
-        return Dataset(
-            code=row["code"], label=row["label"], theme=row["theme"],
-            source=row["source"], source_url=row["source_url"],
-            nuts_levels=list(row["nuts_levels"]),
-            dim_ids=list(row["dim_ids"]),
-            dim_sizes=list(row["dim_sizes"]),
-            time_unit=row["time_unit"],
-            update_freq=str(row["update_freq"]),
-            enabled=row["enabled"], notes=row.get("notes"),
-        )
+        return _row_to_dataset(row)
+
+    def update_dataset_metadata(
+        self,
+        code: str,
+        *,
+        dim_ids: list[str] | None = None,
+        dim_sizes: list[int] | None = None,
+        dim_labels: dict[str, dict[str, str]] | None = None,
+    ) -> None:
+        """Patch the catalog row with metadata from a fresh upstream fetch.
+
+        Called by the loader after `fetch_metadata` so the row reflects
+        the latest dim universe + human labels. Only updates fields that
+        are passed in.
+        """
+        sets: list[str] = []
+        params: list[object] = []
+        if dim_ids is not None:
+            sets.append("dim_ids = %s")
+            params.append(dim_ids)
+        if dim_sizes is not None:
+            sets.append("dim_sizes = %s")
+            params.append(dim_sizes)
+        if dim_labels is not None:
+            sets.append("dim_labels = %s::jsonb")
+            params.append(json.dumps(dim_labels))
+        if not sets:
+            return
+        sets.append("updated_at = now()")
+        params.append(code)
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE fontem_stats.dataset SET {', '.join(sets)} WHERE code = %s",
+                params,
+            )
 
     # ── Sync runs ───────────────────────────────────────────────
 
