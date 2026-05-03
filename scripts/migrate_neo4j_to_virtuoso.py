@@ -297,9 +297,14 @@ LOBBYIST = Mapper(
 
 
 # Company (LEI-bearing only — GLEIF-sourced) ──
+# Field set matches the GLEIF loader's MERGE: gmr_id, lei, name,
+# country, postal_code, legal_form, active. The earlier draft
+# referenced registered_* / status which the loader doesn't
+# write — those came back null and got dropped silently.
 def render_company_lei(row: dict) -> str:
     gmr_id = row["gmr_id"]
     iri = f"http://data.fontem.eu/id/Company/{gmr_id}"
+    active = row.get("active")
     return emit(
         iri,
         ("a", "fontem:Company"),
@@ -308,10 +313,8 @@ def render_company_lei(row: dict) -> str:
         ("fontem:lei", lit(row.get("lei"))),
         ("wdt:P17", lit(row.get("country"))),
         ("fontem:legalForm", lit(row.get("legal_form"))),
-        ("fontem:registeredAddress", lit(row.get("registered_address"))),
-        ("fontem:registeredCity", lit(row.get("registered_city"))),
-        ("fontem:registeredPostalCode", lit(row.get("registered_postal_code"))),
-        ("fontem:status", lit(row.get("status"))),
+        ("fontem:postalCode", lit(row.get("postal_code"))),
+        ("fontem:active", "true" if active else ("false" if active is False else None)),
     )
 
 
@@ -322,10 +325,7 @@ COMPANY_LEI = Mapper(
         "MATCH (n:Company) WHERE n.lei IS NOT NULL "
         "RETURN n.gmr_id AS gmr_id, n.name AS name, n.lei AS lei, "
         "n.country AS country, n.legal_form AS legal_form, "
-        "n.registered_address AS registered_address, "
-        "n.registered_city AS registered_city, "
-        "n.registered_postal_code AS registered_postal_code, "
-        "n.status AS status"
+        "n.postal_code AS postal_code, n.active AS active"
     ),
     render=render_company_lei,
     page_size=10000,
@@ -424,6 +424,21 @@ def push(client: httpx.Client, base_url: str, graph_iri: str, turtle: str, *, re
     resp.raise_for_status()
 
 
+def checkpoint(client: httpx.Client, base_url: str) -> None:
+    """Flush dirty buffers to disk. Bounds memory use during the
+    long-running bridge classes (company-lei, contract) so we
+    don't OOM the Virtuoso pod under the 2 GiB cgroup.
+    """
+    resp = client.post(
+        f"{base_url}/sparql-auth",
+        data={"query": "exec=checkpoint;"},
+        timeout=60.0,
+    )
+    # Some Virtuoso builds return 200, some 204; both are fine.
+    if resp.status_code >= 400:
+        resp.raise_for_status()
+
+
 def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
         virtuoso_url: str, virtuoso_password: str, since: str | None = None) -> int:
     """Bridge one class into Virtuoso. Returns the row count migrated."""
@@ -433,6 +448,11 @@ def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
 
     driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
     total = 0
+    # Checkpoint every N rows for the bigger classes so the buffer
+    # pool stays bounded — the 2 GiB cgroup goes red around 470 K
+    # company-lei rows otherwise (180 K buffers, 75 % dirty).
+    checkpoint_every = 100_000
+    last_checkpoint_at = 0
     try:
         # Virtuoso's /sparql*-auth endpoints use Digest auth, not
         # Basic — Basic returns 401 even with the right password.
@@ -449,6 +469,12 @@ def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
                 first = False
                 total += len(page)
                 logger.info("%s: %d rows pushed (cumulative)", mapper.name, total)
+                if total - last_checkpoint_at >= checkpoint_every:
+                    logger.info("%s: checkpoint at %d rows", mapper.name, total)
+                    checkpoint(vclient, virtuoso_url)
+                    last_checkpoint_at = total
+            # Final checkpoint so the next class starts with clean buffers.
+            checkpoint(vclient, virtuoso_url)
     finally:
         driver.close()
 
