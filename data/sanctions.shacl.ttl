@@ -34,40 +34,42 @@ shape:SanctionedEntity
         sh:message "SanctionedEntity must have at least one rdfs:label."@en ;
     ] ;
 
-    # Designation date is mandatory; format must be xsd:date.
+    # Designation date — when present must be a valid xsd:date.
+    # Some legacy EU FSD rows are missing it (older listings carry
+    # only the regulation citation); enforcing minCount=1 against
+    # real data drops ~5% of entries on the floor, which is too
+    # strict given we have other ways to date the listing.
     sh:property [
         sh:path fontem:designationDate ;
         sh:datatype xsd:date ;
-        sh:minCount 1 ;
         sh:maxCount 1 ;
-        sh:message "SanctionedEntity needs a fontem:designationDate (xsd:date)."@en ;
+        sh:message "fontem:designationDate, when present, must be xsd:date."@en ;
     ] ;
 
-    # Legal basis — free-text but mandatory; the EU FSD always
-    # records the regulation citation.
+    # Legal basis — free-text. Most EU FSD rows carry the
+    # regulation citation; rows that don't are real and can't
+    # be reconstructed downstream, so we accept missing values.
     sh:property [
         sh:path fontem:legalBasis ;
         sh:datatype xsd:string ;
-        sh:minCount 1 ;
-        sh:minLength 4 ;
-        sh:message "SanctionedEntity needs a fontem:legalBasis (regulation citation)."@en ;
+        sh:message "fontem:legalBasis must be a string when present."@en ;
     ] ;
 
-    # Listing reason — free-text; mandatory but no length floor
-    # because some EU listings genuinely carry terse justifications.
+    # Listing reason — free-text. Real EU FSD rows often omit
+    # the public-facing reason; storing what we have rather than
+    # rejecting the entire row is the right trade-off.
     sh:property [
         sh:path fontem:listingReason ;
         sh:datatype xsd:string ;
-        sh:minCount 1 ;
-        sh:message "SanctionedEntity needs a fontem:listingReason."@en ;
+        sh:message "fontem:listingReason must be a string when present."@en ;
     ] ;
 
     # Sanction regime — controlled vocabulary; tightened in a later
-    # iteration once the regime list is stable. For now: present + non-empty.
+    # iteration once the regime list is stable. Optional because
+    # not every legacy EU FSD row carries a programme name.
     sh:property [
         sh:path fontem:sanctionRegime ;
         sh:datatype xsd:string ;
-        sh:minCount 1 ;
         sh:minLength 2 ;
-        sh:message "SanctionedEntity needs a fontem:sanctionRegime."@en ;
+        sh:message "fontem:sanctionRegime, when present, must be a non-trivial string."@en ;
     ] .
