@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from ...analysis.data_quality_source import DataQualitySource
+from ..sparql.virtuoso_client import VirtuosoClient
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -13,42 +14,73 @@ logger = logging.getLogger(__name__)
 # Labels the connectedness dashboard reports on. Curated rather than
 # `MATCH (n)` so each per-label query uses the label-scan index and
 # the result ordering is deterministic.
+#
+# `SanctionedEntity` was removed during the Phase 2 cutover —
+# sanctions data lives in Virtuoso now. Connectedness for sanctions
+# is reported separately (entities count from Virtuoso, matched-
+# company count from Neo4j) in the sanctions panel.
 _CONNECTEDNESS_LABELS = (
     "Company", "Listing", "FinancialYear",
     "Contract", "Authority", "CPV",
     "Lobbyist", "LobbyInterest",
-    "SanctionedEntity", "NUTSRegion",
+    "NUTSRegion",
     "CohesionProject", "Person",
 )
+
+# Sanctions live in this named graph in Virtuoso. The DQ dashboard
+# queries this graph for entity totals + regime breakdown; the
+# matched-companies count still comes from Neo4j (the SANCTIONED
+# edge stayed Neo4j-side because it's a Company-relationship and
+# Companies haven't migrated yet).
+SANCTIONS_GRAPH_IRI = "http://data.fontem.eu/graph/sanctions"
 
 _CONNECTEDNESS_TTL_SECONDS = 3600
 
 
 class GraphDataQualitySource(DataQualitySource):
-    """Production data quality source backed by Neo4j."""
+    """Production data quality source backed by Neo4j (and, for
+    the sanctions panel, by Virtuoso since the Phase 2 cutover).
 
-    def __init__(self, neo4j_client: Neo4jClient) -> None:
+    Pass an optional ``virtuoso_client`` to enable the
+    Virtuoso-backed sanctions reads. When None, sanctions stats
+    return zero — the API still boots, but the dashboard panel
+    shows an empty state. This is the staging fallback for envs
+    that haven't enabled Virtuoso yet.
+    """
+
+    def __init__(
+        self,
+        neo4j_client: Neo4jClient,
+        virtuoso_client: VirtuosoClient | None = None,
+    ) -> None:
         self._neo4j = neo4j_client
+        self._virtuoso = virtuoso_client
         # Connectedness is a full graph scan across every label we
         # care about; cache hot for an hour so the dashboard feels
         # instant while staying fresh enough during active ETL work.
         self._connectedness_cache: tuple[float, dict] | None = None
 
     def get_graph_stats(self) -> dict:
-        """Return node/relationship counts by label."""
+        """Return node/relationship counts by label.
+
+        SanctionedEntity used to live in Neo4j. After the Phase 2
+        cutover it lives in Virtuoso; we still report a count
+        under the SanctionedEntity key so the UI doesn't lose the
+        row, but it's sourced from a SPARQL query.
+        """
         with self._neo4j.session() as session:
             labels = {}
             for label in [
                 "Company", "Listing", "FinancialYear",
                 "Contract", "Authority", "CPV",
                 "Lobbyist", "LobbyInterest",
-                "SanctionedEntity",
                 "NUTSRegion", "CohesionProject",
             ]:
                 n = session.run(
                     f"MATCH (n:{label}) RETURN count(n) AS n"
                 ).single()["n"]
                 labels[label] = n
+            labels["SanctionedEntity"] = self._sanctions_count_from_virtuoso()
 
             rels = session.run(
                 "MATCH ()-[r]->() RETURN count(r) AS n"
@@ -385,29 +417,99 @@ class GraphDataQualitySource(DataQualitySource):
             ).single()["n"]
             return {"pending": pending, "reviewed": reviewed, "total": pending + reviewed}
 
+    def _sanctions_count_from_virtuoso(
+        self, *, extra_clause: str = ""
+    ) -> int:
+        """Count fontem:SanctionedEntity instances in the sanctions
+        graph, optionally narrowed by an extra clause.
+
+        Used by graph_stats, field_completeness, coverage, and
+        sanctions_stats — the same query shape with different
+        guards. ``extra_clause`` is interpolated raw into the
+        WHERE block; only the DataQuality module composes it
+        (no user input ever reaches this).
+        """
+        if self._virtuoso is None:
+            return 0
+        graph = SANCTIONS_GRAPH_IRI
+        rows = self._virtuoso.query(
+            f"""
+            PREFIX fontem: <http://data.fontem.eu/ontology#>
+            SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{
+                GRAPH <{graph}> {{
+                    ?s a fontem:SanctionedEntity .
+                    {extra_clause}
+                }}
+            }}
+            """
+        )
+        return int(rows[0]["n"]) if rows else 0
+
     def get_sanctions_stats(self) -> dict:
-        """Sanctions list stats."""
+        """Sanctions list stats — Virtuoso for the entity body,
+        Neo4j for the matched-companies count.
+
+        After the Phase 2 cutover the Neo4j SanctionedEntity nodes
+        are gone; the only thing left in Neo4j is the SANCTIONED
+        edge from Company. The edge endpoint changed from
+        ``:SanctionedEntity`` (full body) to a stub ``:SanctionRef``
+        (IRI only); the matched-count query is rewritten to that
+        new shape.
+        """
+        if self._virtuoso is None:
+            # Boot-time fallback — no Virtuoso configured. Empty
+            # sanctions panel rather than a 500 on the dashboard.
+            return {
+                "total": 0, "persons": 0, "entities": 0,
+                "matched_to_companies": 0, "top_regimes": [],
+            }
+
+        graph = SANCTIONS_GRAPH_IRI
+        rows = self._virtuoso.query(
+            f"""
+            PREFIX fontem: <http://data.fontem.eu/ontology#>
+            SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{
+                GRAPH <{graph}> {{ ?s a fontem:SanctionedEntity }}
+            }}
+            """
+        )
+        entities = int(rows[0]["n"]) if rows else 0
+
+        regime_rows = self._virtuoso.query(
+            f"""
+            PREFIX fontem: <http://data.fontem.eu/ontology#>
+            SELECT ?regime (COUNT(DISTINCT ?s) AS ?n) WHERE {{
+                GRAPH <{graph}> {{
+                    ?s a fontem:SanctionedEntity ;
+                       fontem:sanctionRegime ?regime .
+                }}
+            }}
+            GROUP BY ?regime
+            ORDER BY DESC(?n) LIMIT 10
+            """
+        )
+        regimes = [{"regime": r["regime"], "n": r["n"]} for r in regime_rows]
+
+        # Persons are no longer stored anywhere — the GDPR posture
+        # filters them out at the loader. Reporting 0 keeps the
+        # dashboard column wired without resurrecting deleted data.
+        persons = 0
+
+        # Matched-companies still lives in Neo4j on the SANCTIONED
+        # edge. After cutover the edge points at a :SanctionRef
+        # stub; the count is the same shape either way.
         with self._neo4j.session() as session:
-            total = session.run(
-                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
-            ).single()["n"]
-            persons = session.run(
-                "MATCH (s:SanctionedEntity {entity_type: 'person'}) "
-                "RETURN count(s) AS n"
-            ).single()["n"]
-            entities = total - persons
             matched = session.run(
-                "MATCH (s:SanctionedEntity)-[:SANCTIONED]->(:Company) "
+                "MATCH (:Company)-[:SANCTIONED]->(s) "
                 "RETURN count(DISTINCT s) AS n"
             ).single()["n"]
-            regimes = session.run(
-                "MATCH (s:SanctionedEntity) "
-                "RETURN s.sanction_regime AS regime, count(s) AS n "
-                "ORDER BY n DESC LIMIT 10"
-            ).data()
+
         return {
-            "total": total, "persons": persons, "entities": entities,
-            "matched_to_companies": matched, "top_regimes": regimes,
+            "total": entities + persons,
+            "persons": persons,
+            "entities": entities,
+            "matched_to_companies": matched,
+            "top_regimes": regimes,
         }
 
     def get_firds_stats(self) -> dict:
@@ -582,9 +684,14 @@ class GraphDataQualitySource(DataQualitySource):
                 "RETURN count(DISTINCT c) AS n"
             ).single()["n"]
 
+            # SANCTIONED edges still live in Neo4j; the target
+            # changed from :SanctionedEntity (full body) to a
+            # :SanctionRef stub holding only the Virtuoso IRI.
+            # Count the distinct stubs that are bound to a
+            # Company — same metric as before, new shape.
             sanctions_matched = session.run(
-                "MATCH (se:SanctionedEntity)-[:SANCTIONED]->(:Company) "
-                "RETURN count(DISTINCT se) AS n"
+                "MATCH (:Company)-[:SANCTIONED]->(s) "
+                "RETURN count(DISTINCT s) AS n"
             ).single()["n"]
 
         return {
@@ -630,23 +737,24 @@ class GraphDataQualitySource(DataQualitySource):
         }
 
     def get_field_completeness(self) -> dict:
-        """Per-source field completeness percentages."""
+        """Per-source field completeness percentages.
+
+        Sanctions completeness is sourced from Virtuoso post-
+        cutover. Every entity is required by the SHACL shape to
+        carry rdfs:label and fontem:sanctionRegime, so the
+        coverage is always 100% — but we emit the metric anyway
+        because the dashboard panel expects it, and dropping it
+        to zero would look like a regression.
+        """
+        se_total = self._sanctions_count_from_virtuoso()
+        se_name = self._sanctions_count_from_virtuoso(
+            extra_clause="?s <http://www.w3.org/2000/01/rdf-schema#label> ?label"
+        )
+        se_regime = self._sanctions_count_from_virtuoso(
+            extra_clause="?s <http://data.fontem.eu/ontology#sanctionRegime> ?regime"
+        )
+
         with self._neo4j.session() as session:
-            # Sanctions completeness
-            se_total = session.run(
-                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
-            ).single()["n"]
-            se_name = session.run(
-                "MATCH (s:SanctionedEntity) "
-                "WHERE s.name IS NOT NULL AND s.name <> '' "
-                "RETURN count(s) AS n"
-            ).single()["n"]
-            se_regime = session.run(
-                "MATCH (s:SanctionedEntity) "
-                "WHERE s.sanction_regime IS NOT NULL "
-                "AND s.sanction_regime <> '' "
-                "RETURN count(s) AS n"
-            ).single()["n"]
 
             # Cohesion completeness
             cp_total = session.run(
@@ -767,16 +875,16 @@ class GraphDataQualitySource(DataQualitySource):
                 "ORDER BY lobbyists DESC LIMIT 10"
             ).data()
 
-            # New data sources
-            sanctioned = session.run(
-                "MATCH (s:SanctionedEntity) RETURN count(s) AS n"
-            ).single()["n"]
+            # SanctionedEntity moved to Virtuoso during Phase 2;
+            # the count comes from the SPARQL helper below. The
+            # remaining counts stay in Neo4j inside this session.
             nuts_count = session.run(
                 "MATCH (n:NUTSRegion) RETURN count(n) AS n"
             ).single()["n"]
             cohesion_count = session.run(
                 "MATCH (p:CohesionProject) RETURN count(p) AS n"
             ).single()["n"]
+        sanctioned = self._sanctions_count_from_virtuoso()
 
         return {
             "companies_with_contracts": companies_with_contracts,

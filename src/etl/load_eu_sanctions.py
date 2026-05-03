@@ -1,15 +1,26 @@
 """
-EU Consolidated Financial Sanctions List → Neo4j
-=================================================
+EU Consolidated Financial Sanctions List → Neo4j + Virtuoso
+============================================================
 Downloads (or reads a local copy of) the EU consolidated sanctions XML
-and MERGEs SanctionedEntity nodes into Neo4j.  Attempts to match
-sanctioned entities against existing Company nodes by name, creating
-SANCTIONED relationships for confirmed matches and SAME_AS edges for
-fuzzy matches.
+and writes it to two stores during the Phase 2 dual-write window:
+
+  * Virtuoso (authoritative going forward) — entities pushed via
+    SHACL-validated Turtle into the
+    ``http://data.fontem.eu/graph/sanctions`` named graph.
+  * Neo4j (legacy, removed by the Phase 2 cutover) — SanctionedEntity
+    nodes + SANCTIONED edges from /resolve hits, kept until all read
+    paths have moved off Neo4j.
+
+When ``VIRTUOSO_SPARQL_ENDPOINT`` is set the Virtuoso write happens
+first and aborts the run on validation failure; the Neo4j step only
+runs if Virtuoso wrote successfully (or if Virtuoso isn't configured,
+which is the staging fallback). Match resolution continues to write
+SANCTIONED edges in Neo4j until the cutover step retires that table.
 
 Usage:
     python -m src.etl.load_eu_sanctions --neo4j-uri bolt://localhost:7687
-    python -m src.etl.load_eu_sanctions --file /tmp/sanctions.xml
+    python -m src.etl.load_eu_sanctions --file /tmp/sanctions.xml \\
+        --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
 """
 from __future__ import annotations
 
@@ -25,6 +36,7 @@ from neo4j import GraphDatabase
 
 from . import gmr_id
 from ._hooks import resolve_entity
+from .rdf_sanctions_writer import RdfSanctionsWriter
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +370,22 @@ def main(argv=None):
         "--neo4j-password",
         default=os.environ.get("NEO4J_PASSWORD", ""),
     )
+    # Virtuoso side of the dual-write. If unset, the loader skips
+    # the RDF push and only writes Neo4j (legacy behaviour). CI
+    # passes the in-cluster sparql endpoint so Phase 2 dev/staging/
+    # prod runs all dual-write.
+    parser.add_argument(
+        "--virtuoso-sparql-endpoint",
+        default=os.environ.get("VIRTUOSO_SPARQL_ENDPOINT", ""),
+    )
+    parser.add_argument(
+        "--virtuoso-dba-user",
+        default=os.environ.get("VIRTUOSO_DBA_USER", "dba"),
+    )
+    parser.add_argument(
+        "--virtuoso-dba-password",
+        default=os.environ.get("VIRTUOSO_DBA_PASSWORD", ""),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -395,6 +423,33 @@ def main(argv=None):
         "Filtered to %d non-person entities (skipped %d persons)",
         len(entities), skipped,
     )
+
+    # Virtuoso write goes first — SHACL validation is a hard gate.
+    # If validation fails we abort before touching Neo4j; that
+    # prevents a half-loaded state where the legacy nodes carry
+    # data that the authoritative store rejected.
+    rdf_summary = None
+    if args.virtuoso_sparql_endpoint:
+        logger.info(
+            "Writing %d entities to Virtuoso at %s",
+            len(entities), args.virtuoso_sparql_endpoint,
+        )
+        writer = RdfSanctionsWriter(
+            sparql_endpoint=args.virtuoso_sparql_endpoint,
+            dba_user=args.virtuoso_dba_user,
+            dba_password=args.virtuoso_dba_password,
+        )
+        rdf_summary = writer.write(entities)
+        logger.info(
+            "Virtuoso: wrote %d entities (%d triples), skipped %d persons",
+            rdf_summary.written, rdf_summary.triples_pushed,
+            rdf_summary.skipped_persons,
+        )
+    else:
+        logger.warning(
+            "VIRTUOSO_SPARQL_ENDPOINT is unset — skipping Virtuoso write "
+            "(legacy Neo4j-only mode)."
+        )
 
     driver = GraphDatabase.driver(
         args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password)
