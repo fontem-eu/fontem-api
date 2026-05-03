@@ -9,4 +9,4 @@
 # the European Commission's public sanctions feed URL includes a
 # stable "token=..." query parameter that's the same for every
 # consumer. Keep in ignore as a documented false positive.
-src/etl/load_eu_sanctions.py:generic-api-key:33
+src/etl/load_eu_sanctions.py:generic-api-key:45
