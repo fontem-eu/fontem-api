@@ -32,6 +32,7 @@ RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
 
 # --- Application source -------------------------------------------------------
 COPY src/ ./src/
+COPY data/ ./data/
 COPY main.py .
 
 # Switch to non-root

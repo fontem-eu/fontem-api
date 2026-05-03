@@ -1,0 +1,73 @@
+# SHACL shapes — sanctions pilot.
+#
+# Validates SanctionedEntity write-time. Every loader run pipes its
+# output Turtle through pyshacl with this shape file before the
+# triples land in Virtuoso; failures abort the load and keep the
+# graph clean.
+
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix shape:     <http://data.fontem.eu/shape/> .
+@prefix sh:        <http://www.w3.org/ns/shacl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+
+shape:SanctionedEntity
+    a sh:NodeShape ;
+    sh:targetClass fontem:SanctionedEntity ;
+    rdfs:label "SanctionedEntity shape"@en ;
+
+    # Identity — every entity has exactly one EU FSD reference, no
+    # collisions allowed.
+    sh:property [
+        sh:path fontem:euReference ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:minLength 1 ;
+        sh:message "SanctionedEntity must carry exactly one fontem:euReference."@en ;
+    ] ;
+
+    # Display label — at least one rdfs:label, in any language.
+    sh:property [
+        sh:path rdfs:label ;
+        sh:minCount 1 ;
+        sh:message "SanctionedEntity must have at least one rdfs:label."@en ;
+    ] ;
+
+    # Designation date is mandatory; format must be xsd:date.
+    sh:property [
+        sh:path fontem:designationDate ;
+        sh:datatype xsd:date ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "SanctionedEntity needs a fontem:designationDate (xsd:date)."@en ;
+    ] ;
+
+    # Legal basis — free-text but mandatory; the EU FSD always
+    # records the regulation citation.
+    sh:property [
+        sh:path fontem:legalBasis ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:minLength 4 ;
+        sh:message "SanctionedEntity needs a fontem:legalBasis (regulation citation)."@en ;
+    ] ;
+
+    # Listing reason — free-text; mandatory but no length floor
+    # because some EU listings genuinely carry terse justifications.
+    sh:property [
+        sh:path fontem:listingReason ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "SanctionedEntity needs a fontem:listingReason."@en ;
+    ] ;
+
+    # Sanction regime — controlled vocabulary; tightened in a later
+    # iteration once the regime list is stable. For now: present + non-empty.
+    sh:property [
+        sh:path fontem:sanctionRegime ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:minLength 2 ;
+        sh:message "SanctionedEntity needs a fontem:sanctionRegime."@en ;
+    ] .
