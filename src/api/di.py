@@ -17,6 +17,7 @@ from src.analysis.geo_source import GeoSource
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.person_data_source import PersonDataSource
 from src.data.graph.neo4j_client import Neo4jClient
+from src.data.sparql.virtuoso_client import VirtuosoClient
 
 
 _UUID_RE = re.compile(
@@ -37,6 +38,19 @@ class Neo4jProvider(Provider):
         )
 
 
+class VirtuosoProvider(Provider):
+    """Optional read-only SPARQL client for Virtuoso. Returns
+    None when VIRTUOSO_SPARQL_URL is unset — callers (data-
+    quality source today, future cross-store joins) handle the
+    missing-client case as ‘feature unavailable’ rather than a
+    boot-time failure.
+    """
+
+    @provide(scope=Scope.APP)
+    def virtuoso_client(self) -> VirtuosoClient | None:
+        return VirtuosoClient.from_env()
+
+
 class DataSourceProvider(Provider):
     """All data source singletons, sharing the single Neo4jClient."""
 
@@ -55,9 +69,15 @@ class DataSourceProvider(Provider):
         return GraphContractSource(neo4j_client=neo4j)
 
     @provide(scope=Scope.APP)
-    def data_quality_source(self, neo4j: Neo4jClient) -> DataQualitySource:
+    def data_quality_source(
+        self,
+        neo4j: Neo4jClient,
+        virtuoso: VirtuosoClient | None,
+    ) -> DataQualitySource:
         from src.data.graph.graph_data_quality import GraphDataQualitySource
-        return GraphDataQualitySource(neo4j_client=neo4j)
+        return GraphDataQualitySource(
+            neo4j_client=neo4j, virtuoso_client=virtuoso,
+        )
 
     @provide(scope=Scope.APP)
     def person_data_source(self, neo4j: Neo4jClient) -> PersonDataSource:
@@ -106,4 +126,6 @@ def resolve_company_id(identifier: str, neo4j: Neo4jClient) -> dict:
 
 def make_container() -> AsyncContainer:
     """Build the full DI container for the GMR ETL API."""
-    return make_async_container(Neo4jProvider(), DataSourceProvider())
+    return make_async_container(
+        Neo4jProvider(), VirtuosoProvider(), DataSourceProvider(),
+    )

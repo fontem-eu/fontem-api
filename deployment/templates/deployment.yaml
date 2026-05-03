@@ -111,6 +111,12 @@ spec:
             - name: STATS_DATABASE_URL
               value: "postgresql://{{ .Values.fontemStats.user }}:$(STATS_POSTGRES_PASSWORD)@{{ .Values.fontemStats.host }}:5432/{{ .Values.fontemStats.database }}"
             {{- end }}
+            {{- if .Values.virtuoso.enabled }}
+            # Read-only SPARQL endpoint used by the data-quality
+            # source for sanctions panels (post Phase 2 cutover).
+            - name: VIRTUOSO_SPARQL_URL
+              value: {{ .Values.virtuoso.sparqlEndpoint | quote }}
+            {{- end }}
 
           volumeMounts:
             - name: edgar-data
