@@ -424,35 +424,25 @@ def push(client: httpx.Client, base_url: str, graph_iri: str, turtle: str, *, re
     resp.raise_for_status()
 
 
-def checkpoint(client: httpx.Client, base_url: str) -> None:
-    """Flush dirty buffers to disk. Bounds memory use during the
-    long-running bridge classes (company-lei, contract) so we
-    don't OOM the Virtuoso pod under the 2 GiB cgroup.
-    """
-    resp = client.post(
-        f"{base_url}/sparql-auth",
-        data={"query": "exec=checkpoint;"},
-        timeout=60.0,
-    )
-    # Some Virtuoso builds return 200, some 204; both are fine.
-    if resp.status_code >= 400:
-        resp.raise_for_status()
-
-
 def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
         virtuoso_url: str, virtuoso_password: str, since: str | None = None) -> int:
-    """Bridge one class into Virtuoso. Returns the row count migrated."""
+    """Bridge one class into Virtuoso. Returns the row count migrated.
+
+    Memory pressure on the bigger classes (company-lei, contract) is
+    handled by Virtuoso's automatic checkpoint cadence rather than
+    explicit calls — we don't have a clean SPARQL-over-HTTP path to
+    issue a SQL `checkpoint` command, and the 2 GiB cgroup that
+    triggered the original OOM has been raised to 6 GiB. If the
+    bridge ever has to run under tight memory again, route the
+    checkpoint via `kubectl exec virtuoso-0 -- isql ... exec="checkpoint;"`
+    from a sidecar.
+    """
     params: dict = {}
     if since:
         params["since"] = since
 
     driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
     total = 0
-    # Checkpoint every N rows for the bigger classes so the buffer
-    # pool stays bounded — the 2 GiB cgroup goes red around 470 K
-    # company-lei rows otherwise (180 K buffers, 75 % dirty).
-    checkpoint_every = 100_000
-    last_checkpoint_at = 0
     try:
         # Virtuoso's /sparql*-auth endpoints use Digest auth, not
         # Basic — Basic returns 401 even with the right password.
@@ -469,12 +459,6 @@ def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
                 first = False
                 total += len(page)
                 logger.info("%s: %d rows pushed (cumulative)", mapper.name, total)
-                if total - last_checkpoint_at >= checkpoint_every:
-                    logger.info("%s: checkpoint at %d rows", mapper.name, total)
-                    checkpoint(vclient, virtuoso_url)
-                    last_checkpoint_at = total
-            # Final checkpoint so the next class starts with clean buffers.
-            checkpoint(vclient, virtuoso_url)
     finally:
         driver.close()
 
