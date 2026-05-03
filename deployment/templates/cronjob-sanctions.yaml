@@ -1,3 +1,8 @@
+{{- $extra := list }}
+{{- if .Values.virtuoso.enabled }}
+{{- $extra = append $extra (dict "name" "VIRTUOSO_SPARQL_ENDPOINT" "value" .Values.virtuoso.sparqlEndpoint) }}
+{{- $extra = append $extra (dict "name" "VIRTUOSO_DBA_PASSWORD" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.virtuoso.dbaPasswordSecret "key" .Values.virtuoso.dbaPasswordKey))) }}
+{{- end }}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-eu-sanctions"
       "schedule"        "0 7 * * *"
@@ -8,6 +13,6 @@
       "cpuLimit"        "1"
       "memRequest"      "512Mi"
       "memLimit"        "2Gi"
-      "extraEnv"        (list)
+      "extraEnv"        $extra
       "Values"          .Values
       "Release"         .Release) -}}
