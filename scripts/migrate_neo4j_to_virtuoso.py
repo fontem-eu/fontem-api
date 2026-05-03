@@ -434,7 +434,10 @@ def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
     driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
     total = 0
     try:
-        with httpx.Client(auth=("dba", virtuoso_password)) as vclient:
+        # Virtuoso's /sparql*-auth endpoints use Digest auth, not
+        # Basic — Basic returns 401 even with the right password.
+        auth = httpx.DigestAuth("dba", virtuoso_password)
+        with httpx.Client(auth=auth) as vclient:
             first = True
             for page_n, page in enumerate(fetch_pages(driver, mapper, params)):
                 bodies = [mapper.render(r) for r in page]
