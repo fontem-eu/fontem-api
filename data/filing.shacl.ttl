@@ -1,0 +1,83 @@
+# SHACL shapes — financial filings (EDGAR + ESEF).
+#
+# Validates fontem:Filing nodes write-time. Both load_us_financials
+# (EDGAR companyfacts.json) and load_eu_listings (ESEF summaries)
+# pipe their batch through pyshacl with this shape file before
+# pushing to Virtuoso.
+#
+# Posture: only the three identifying fields are mandatory
+# (filedBy, fiscalYear, filingSource). Numeric properties are
+# optional — XBRL filings are notoriously sparse, and rejecting
+# rows with missing line items would drop ~30% of real data.
+# What we DO enforce is that any property present is correctly
+# typed.
+
+@prefix fontem:    <http://data.fontem.eu/ontology#> .
+@prefix shape:     <http://data.fontem.eu/shape/> .
+@prefix sh:        <http://www.w3.org/ns/shacl#> .
+@prefix xsd:       <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs:      <http://www.w3.org/2000/01/rdf-schema#> .
+
+shape:Filing
+    a sh:NodeShape ;
+    sh:targetClass fontem:Filing ;
+    rdfs:label "Filing shape"@en ;
+
+    # Identifying triples — every Filing must carry exactly one
+    # filedBy, one fiscalYear, one filingSource. These are the
+    # primary key in RDF terms (the IRI is derived from them).
+    sh:property [
+        sh:path fontem:filedBy ;
+        sh:nodeKind sh:IRI ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "Filing must reference exactly one Company via fontem:filedBy."@en ;
+    ] ;
+    sh:property [
+        sh:path fontem:fiscalYear ;
+        sh:datatype xsd:gYear ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "Filing must carry exactly one fontem:fiscalYear (xsd:gYear)."@en ;
+    ] ;
+    sh:property [
+        sh:path fontem:filingSource ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:in ( "edgar" "esef" "gleif" ) ;
+        sh:message "Filing fontem:filingSource must be one of: edgar, esef, gleif."@en ;
+    ] ;
+
+    # Optional, but xsd:date when present.
+    sh:property [
+        sh:path fontem:filingDate ;
+        sh:datatype xsd:date ;
+        sh:maxCount 1 ;
+        sh:message "Filing fontem:filingDate, when present, must be xsd:date."@en ;
+    ] ;
+
+    # Numeric financial properties — every one is optional, but
+    # if present must be a decimal. The set is duplicated across
+    # both source loaders, so the shape is the contract that pins
+    # the type for both.
+    sh:property [ sh:path fontem:revenue              ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:netIncome            ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:totalAssets          ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:totalLiabilities     ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:equity               ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:cash                 ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:currentAssets        ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:currentLiabilities   ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:operatingIncome      ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:operatingCashflow    ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:capex                ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:eps                  ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:sharesOutstanding    ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:longTermDebt         ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:inventory            ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:grossProfit          ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:incomeTaxExpense     ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:interestExpense      ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:freeCashflow         ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] ;
+    sh:property [ sh:path fontem:depreciationAmortization ; sh:datatype xsd:decimal ; sh:maxCount 1 ; ] .
