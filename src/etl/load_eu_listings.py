@@ -1,12 +1,22 @@
 """
-EU Listings & Financials → Neo4j
-=================================
-Reads eu_entities.json and summaries/*.json from the ESEF data directory,
-creates Listing and FinancialYear nodes, and wires LISTED_AS / REPORTED
-relationships to existing Company nodes.
+EU Listings → Neo4j   |   ESEF Financials → Virtuoso
+======================================================
+Reads eu_entities.json and summaries/*.json from the ESEF data
+directory.
+
+  * Listings still live in Neo4j (Companies + Listings haven't
+    migrated yet — that's Phase 4 work). load_listings creates
+    the Listing nodes and LISTED_AS edges as before.
+
+  * Financial filings move to Virtuoso. load_financials resolves
+    each summary's LEI → gmr_id against Neo4j Company nodes,
+    then emits fontem:Filing triples via RdfFilingsWriter into
+    the ``http://data.fontem.eu/graph/financials/esef`` named
+    graph.
 
 Usage:
-    python -m src.etl.load_eu_listings --esef-dir /esef-data/esef
+    python -m src.etl.load_eu_listings --esef-dir /esef-data/esef \\
+        --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
 """
 from __future__ import annotations
 
@@ -14,12 +24,14 @@ import argparse
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 
 from neo4j import GraphDatabase
 
 from . import gmr_id
+from .rdf_filings_writer import RdfFilingsWriter
 
 logger = logging.getLogger(__name__)
 
@@ -113,109 +125,111 @@ def load_listings(driver, entities: dict):
     return total_companies
 
 
-def load_financials(driver, summaries_dir: Path):
-    """Read summary JSON files and create FinancialYear nodes.
+_FILING_FIELDS = (
+    "filing_date", "revenue", "gross_profit",
+    "operating_income", "net_income", "eps",
+    "total_assets", "equity", "cash_and_equivalents",
+    "capex", "operating_cashflow", "free_cashflow",
+    "total_liabilities", "current_assets",
+    "current_liabilities", "inventory",
+    "shares_outstanding", "long_term_debt",
+    "interest_expense", "income_tax_expense",
+    "depreciation_amortization",
+)
 
-    Matches companies by LEI (not by Listing ticker) so financial data
-    is preserved even for entities without a resolved ticker.
-    """
-    query = """
-    UNWIND $batch AS row
-    MATCH (c:Company {lei: row.lei})
-    MERGE (f:FinancialYear {gmr_id: c.gmr_id, year: row.year})
-    SET f.source             = 'ESEF',
-        f.revenue            = row.revenue,
-        f.gross_profit       = row.gross_profit,
-        f.operating_income   = row.operating_income,
-        f.net_income         = row.net_income,
-        f.eps                = row.eps,
-        f.total_assets       = row.total_assets,
-        f.equity             = row.equity,
-        f.cash               = row.cash_and_equivalents,
-        f.capex              = row.capex,
-        f.filing_date        = row.filing_date,
-        f.operating_cashflow = row.operating_cashflow,
-        f.free_cashflow      = row.free_cashflow,
-        f.total_liabilities  = row.total_liabilities,
-        f.current_assets     = row.current_assets,
-        f.current_liabilities = row.current_liabilities,
-        f.inventory          = row.inventory,
-        f.shares_outstanding = row.shares_outstanding,
-        f.long_term_debt     = row.long_term_debt,
-        f.interest_expense   = row.interest_expense,
-        f.income_tax_expense = row.income_tax_expense,
-        f.depreciation_amortization = row.depreciation_amortization
-    MERGE (c)-[:REPORTED {year: row.year}]->(f)
-    """
 
+def _build_lei_to_gmr_index(driver) -> dict[str, str]:
+    """One Cypher pass to resolve LEI → gmr_id for every
+    Company carrying an LEI. Cached locally for the duration
+    of the loader run.
+    """
+    out: dict[str, str] = {}
+    with driver.session() as session:
+        for row in session.run(
+            "MATCH (c:Company) "
+            "WHERE c.lei IS NOT NULL "
+            "RETURN c.lei AS lei, c.gmr_id AS gmr_id"
+        ):
+            out[row["lei"]] = row["gmr_id"]
+    return out
+
+
+def load_financials(driver, summaries_dir: Path, writer: RdfFilingsWriter):
+    """Read summary JSON files, resolve LEI→gmr_id from Neo4j,
+    and PUT a fontem:Filing batch to the ESEF named graph.
+
+    Matches Companies by LEI (the same key the Neo4j-era loader
+    used) so financial data is preserved for entities without a
+    resolved Listing ticker.
+    """
     if not summaries_dir.exists():
         logger.warning("Summaries dir not found: %s", summaries_dir)
         return 0
 
-    batch = []
-    total_filings = 0
+    lei_to_gmr = _build_lei_to_gmr_index(driver)
+    logger.info("Built LEI→gmr_id index (%d entries)", len(lei_to_gmr))
+
+    all_records: list[dict] = []
     files_processed = 0
     skipped_no_lei = 0
+    skipped_no_company = 0
 
-    with driver.session() as session:
-        for path in sorted(summaries_dir.glob("*.json")):
-            try:
-                doc = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as exc:
-                logger.warning("Skipping %s: %s", path.name, exc)
+    for path in sorted(summaries_dir.glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Skipping %s: %s", path.name, exc)
+            continue
+
+        lei = doc.get("lei")
+        if not lei or len(lei) != 20:
+            skipped_no_lei += 1
+            continue
+
+        company_gmr = lei_to_gmr.get(lei)
+        if not company_gmr:
+            skipped_no_company += 1
+            continue
+
+        for filing in doc.get("filings", []):
+            year = filing.get("year")
+            if year is None:
                 continue
+            rec = {"gmr_id": company_gmr, "year": int(year)}
+            for key in _FILING_FIELDS:
+                if (val := filing.get(key)) is not None:
+                    rec[key] = val
+            all_records.append(rec)
 
-            lei = doc.get("lei")
-            if not lei or len(lei) != 20:
-                skipped_no_lei += 1
-                continue
+        files_processed += 1
+        if files_processed % 1000 == 0:
+            logger.info(
+                "  %d files, %d filings",
+                files_processed, len(all_records),
+            )
 
-            for filing in doc.get("filings", []):
-                year = filing.get("year")
-                if year is None:
-                    continue
-                row = {"lei": lei, "year": int(year)}
-                for key in (
-                    "filing_date", "revenue", "gross_profit",
-                    "operating_income", "net_income", "eps",
-                    "total_assets", "equity", "cash_and_equivalents",
-                    "capex", "operating_cashflow", "free_cashflow",
-                    "total_liabilities", "current_assets",
-                    "current_liabilities", "inventory",
-                    "shares_outstanding", "long_term_debt",
-                    "interest_expense", "income_tax_expense",
-                    "depreciation_amortization",
-                ):
-                    row[key] = filing.get(key)
-                batch.append(row)
+    if not all_records:
+        logger.warning("no ESEF records found; skipping write")
+        return 0
 
-                if len(batch) >= BATCH_SIZE:
-                    session.run(query, batch=batch)
-                    total_filings += len(batch)
-                    batch = []
-
-            files_processed += 1
-            if files_processed % 1000 == 0:
-                logger.info(
-                    "  %d files, %d filings",
-                    files_processed, total_filings,
-                )
-
-        if batch:
-            session.run(query, batch=batch)
-            total_filings += len(batch)
-
+    res = writer.write(all_records)
     logger.info(
-        "Financials: %d filings from %d files (skipped %d without LEI)",
-        total_filings, files_processed, skipped_no_lei,
+        "ESEF: wrote %d filings (%d triples) from %d files "
+        "(skipped %d without LEI, %d without resolvable Company)",
+        res.written, res.triples_pushed, files_processed,
+        skipped_no_lei, skipped_no_company,
     )
-    return total_filings
+    return res.written
 
 
 def main(argv=None):
-    """CLI entry point."""
+    """CLI entry point.
+
+    Listings continue to land in Neo4j; financials land in
+    Virtuoso. Both stores have to be reachable for a full run.
+    """
     parser = argparse.ArgumentParser(
-        description="Load EU listings and financials into Neo4j",
+        description="Load EU listings (Neo4j) + ESEF financials (Virtuoso)",
     )
     parser.add_argument(
         "--esef-dir",
@@ -224,12 +238,31 @@ def main(argv=None):
     parser.add_argument("--neo4j-uri", default="bolt://neo4j:7687")
     parser.add_argument("--neo4j-user", default="neo4j")
     parser.add_argument("--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""))
+    parser.add_argument(
+        "--virtuoso-sparql-endpoint",
+        default=os.environ.get("VIRTUOSO_SPARQL_ENDPOINT", ""),
+    )
+    parser.add_argument(
+        "--virtuoso-dba-user",
+        default=os.environ.get("VIRTUOSO_DBA_USER", "dba"),
+    )
+    parser.add_argument(
+        "--virtuoso-dba-password",
+        default=os.environ.get("VIRTUOSO_DBA_PASSWORD", ""),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if not args.virtuoso_sparql_endpoint:
+        logger.error(
+            "VIRTUOSO_SPARQL_ENDPOINT must be set; ESEF financials "
+            "now write to Virtuoso (FinancialYear cutover)."
+        )
+        sys.exit(2)
 
     esef_dir = Path(args.esef_dir)
     entities_path = esef_dir / "eu_entities.json"
@@ -240,6 +273,12 @@ def main(argv=None):
     entities = json.loads(entities_path.read_text(encoding="utf-8"))
     logger.info("Loaded %d EU entities from %s", len(entities), entities_path)
 
+    writer = RdfFilingsWriter(
+        source="esef",
+        sparql_endpoint=args.virtuoso_sparql_endpoint,
+        dba_user=args.virtuoso_dba_user,
+        dba_password=args.virtuoso_dba_password,
+    )
     driver = GraphDatabase.driver(
         args.neo4j_uri,
         auth=(args.neo4j_user, args.neo4j_password),
@@ -247,7 +286,7 @@ def main(argv=None):
     t0 = time.time()
     try:
         load_listings(driver, entities)
-        load_financials(driver, esef_dir / "summaries")
+        load_financials(driver, esef_dir / "summaries", writer)
     finally:
         driver.close()
 

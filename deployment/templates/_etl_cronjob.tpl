@@ -81,6 +81,19 @@ spec:
                 {{- range .extraEnv }}
                 - {{ toYaml . | nindent 18 | trim }}
                 {{- end }}
+              {{- if or .needsEdgarData .needsEsefData }}
+              volumeMounts:
+                {{- if .needsEdgarData }}
+                - name: edgar-data
+                  mountPath: /edgar-data
+                  readOnly: true
+                {{- end }}
+                {{- if .needsEsefData }}
+                - name: esef-data
+                  mountPath: /esef-data
+                  readOnly: true
+                {{- end }}
+              {{- end }}
               resources:
                 requests:
                   cpu: {{ .cpuRequest | default "250m" }}
@@ -131,4 +144,17 @@ spec:
                   [ "$rc" -eq 0 ] && KUMA_STATUS=up
                   export KUMA_STATUS KUMA_SUMMARY
                   exit $rc
+          {{- if or .needsEdgarData .needsEsefData }}
+          volumes:
+            {{- if .needsEdgarData }}
+            - name: edgar-data
+              persistentVolumeClaim:
+                claimName: edgar-data
+            {{- end }}
+            {{- if .needsEsefData }}
+            - name: esef-data
+              persistentVolumeClaim:
+                claimName: esef-data
+            {{- end }}
+          {{- end }}
 {{- end -}}
