@@ -629,17 +629,23 @@ def push(client: httpx.Client, base_url: str, graph_iri: str, turtle: str, *, re
 
 
 def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
-        virtuoso_url: str, virtuoso_password: str, since: str | None = None) -> int:
+        virtuoso_url: str, virtuoso_password: str, since: str | None = None,
+        replace: bool = True) -> int:
     """Bridge one class into Virtuoso. Returns the row count migrated.
 
-    Memory pressure on the bigger classes (company-lei, contract) is
-    handled by Virtuoso's automatic checkpoint cadence rather than
-    explicit calls — we don't have a clean SPARQL-over-HTTP path to
-    issue a SQL `checkpoint` command, and the 2 GiB cgroup that
-    triggered the original OOM has been raised to 6 GiB. If the
-    bridge ever has to run under tight memory again, route the
-    checkpoint via `kubectl exec virtuoso-0 -- isql ... exec="checkpoint;"`
-    from a sidecar.
+    `replace=True` (default) issues a PUT on the first page so the
+    target graph is wiped of prior contents. Use `replace=False`
+    when several mappers feed the same graph (the relationship
+    mappers do — three of them all write to contract-edges); a
+    PUT on the second mapper would clobber the first one's data.
+    Caller is responsible for clearing the graph beforehand if
+    needed.
+
+    Memory pressure on the big classes (company-lei, contract)
+    is handled by Virtuoso's automatic checkpoint cadence; the 2
+    GiB cgroup that triggered the first OOM has been raised to 4
+    GiB. Under tighter memory, route checkpoints via `kubectl
+    exec virtuoso-0 -- isql ... exec="checkpoint;"` from a sidecar.
     """
     params: dict = {}
     if since:
@@ -659,7 +665,10 @@ def run(mapper: Mapper, *, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
                 if not bodies:
                     continue
                 turtle = PREAMBLE + "\n" + "\n\n".join(bodies) + "\n"
-                push(vclient, virtuoso_url, mapper.target_graph, turtle, replace=first)
+                push(
+                    vclient, virtuoso_url, mapper.target_graph, turtle,
+                    replace=(first and replace),
+                )
                 first = False
                 total += len(page)
                 logger.info("%s: %d rows pushed (cumulative)", mapper.name, total)
@@ -681,6 +690,11 @@ def main(argv: list[str] | None = None) -> None:
         default=os.environ.get("VIRTUOSO_BASE_URL", "http://virtuoso.gmr.svc.cluster.local:8890"),
     )
     parser.add_argument("--virtuoso-password", default=os.environ.get("VIRTUOSO_DBA_PASSWORD", ""))
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="POST every page (no initial PUT/replace). Use this when several mappers feed the same target graph; the caller is responsible for clearing the graph first.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -700,6 +714,7 @@ def main(argv: list[str] | None = None) -> None:
         virtuoso_url=args.virtuoso_url,
         virtuoso_password=args.virtuoso_password,
         since=args.since,
+        replace=not args.append,
     )
     logger.info("Bridge complete: %s -> %s (%d rows)", mapper.name, mapper.target_graph, n)
 
