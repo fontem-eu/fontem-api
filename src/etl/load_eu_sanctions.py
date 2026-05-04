@@ -1,24 +1,18 @@
 """
-EU Consolidated Financial Sanctions List → Neo4j + Virtuoso
-============================================================
+EU Consolidated Financial Sanctions List → Virtuoso
+=====================================================
 Downloads (or reads a local copy of) the EU consolidated sanctions XML
-and writes it to two stores during the Phase 2 dual-write window:
+and writes it to Virtuoso (authoritative store) as SHACL-validated
+Turtle, into the ``http://data.fontem.eu/graph/sanctions`` named
+graph.
 
-  * Virtuoso (authoritative going forward) — entities pushed via
-    SHACL-validated Turtle into the
-    ``http://data.fontem.eu/graph/sanctions`` named graph.
-  * Neo4j (legacy, removed by the Phase 2 cutover) — SanctionedEntity
-    nodes + SANCTIONED edges from /resolve hits, kept until all read
-    paths have moved off Neo4j.
-
-When ``VIRTUOSO_SPARQL_ENDPOINT`` is set the Virtuoso write happens
-first and aborts the run on validation failure; the Neo4j step only
-runs if Virtuoso wrote successfully (or if Virtuoso isn't configured,
-which is the staging fallback). Match resolution continues to write
-SANCTIONED edges in Neo4j until the cutover step retires that table.
+Phase 2 cutover is closed: Neo4j SanctionedEntity nodes + SANCTIONED
+edges no longer exist, and the loader no longer writes them. The
+sanction → company resolver call still runs (the ETL is a candidate
+emitter for review queues) but its output is logged-only until the
+review-queue refactor that targets Virtuoso lands.
 
 Usage:
-    python -m src.etl.load_eu_sanctions --neo4j-uri bolt://localhost:7687
     python -m src.etl.load_eu_sanctions --file /tmp/sanctions.xml \\
         --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
 """
@@ -32,7 +26,6 @@ import time
 import xml.etree.ElementTree as ET
 
 import httpx
-from neo4j import GraphDatabase
 
 from . import gmr_id
 from ._hooks import resolve_entity
@@ -47,25 +40,6 @@ SANCTIONS_URL = (
 
 BATCH_SIZE = 500
 
-CONSTRAINT_CYPHER = """
-CREATE CONSTRAINT sanctioned_entity_id IF NOT EXISTS
-FOR (s:SanctionedEntity) REQUIRE s.entity_id IS UNIQUE
-"""
-
-MERGE_ENTITY = """
-UNWIND $batch AS row
-MERGE (s:SanctionedEntity {entity_id: row.entity_id})
-SET s.name             = row.name,
-    s.entity_type      = row.entity_type,
-    s.aliases          = row.aliases,
-    s.nationality      = row.nationality,
-    s.designation_date = row.designation_date,
-    s.sanction_regime  = row.sanction_regime,
-    s.legal_basis      = row.legal_basis,
-    s.listing_reason   = row.listing_reason,
-    s.eu_reference     = row.eu_reference
-"""
-
 # Sanction → Company linking is delegated to gmr-consolidator's
 # /resolve endpoint. Each SanctionedEntity record carries a primary
 # `name` (often a short acronym) and a list of `aliases` (the actual
@@ -73,30 +47,11 @@ SET s.name             = row.name,
 # name, then fall back to each alias if no confident match. All
 # guards (MIN_NAME_LEN=6, country agreement, score floor) live in
 # the resolver — a single source of truth for matching.
-
-# The MIN_NAME_LEN constant is kept local for backward-compatible
-# imports in test_load_eu_sanctions.py; the resolver enforces the
-# same value internally.
+#
+# MIN_NAME_LEN is kept here as a documented invariant (≥6) — it's
+# the cap that prevented the historical short-acronym false
+# positives. Tests assert it.
 MIN_NAME_LEN = 6
-
-# Cypher to write SANCTIONED edges from resolver results. Sanctions
-# matches always start as `reviewed=false` regardless of tier, because
-# the consequence of a wrong attribution is severe (defamation risk)
-# and the upstream data is too sparse to lean on hard IDs alone (the
-# EU sanctions list carries no LEIs).
-MERGE_SANCTIONED = """
-UNWIND $rows AS row
-MATCH (s:SanctionedEntity {entity_id: row.entity_id})
-MATCH (c:Company {gmr_id: row.gmr_id})
-MERGE (c)-[r:SANCTIONED {source: 'eu_consolidated'}]->(s)
-ON CREATE SET r.since = row.designation_date,
-              r.tier = row.tier,
-              r.confidence = row.confidence,
-              r.matched_via_alias = row.matched_via_alias,
-              r.method = 'resolver',
-              r.detected_at = datetime(),
-              r.reviewed = false
-"""
 
 NS = "http://eu.europa.ec/fpi/fsd/export"
 
@@ -287,64 +242,32 @@ def _resolve_sanction_to_company(entity: dict) -> dict | None:
     return None
 
 
-def load_into_neo4j(driver, entities):
-    """MERGE SanctionedEntity nodes; resolve each via /resolve and write
-    a SANCTIONED edge for confident matches only.
+def resolve_company_links(entities):
+    """Run each non-person entity through /resolve and return summary.
 
-    The previous in-cypher MATCH_COMPANY_EXACT / _FUZZY paths produced
-    8 false positives in production (defamation risk). The /resolve
-    service is now the single guard implementation; this loader only
-    persists what the resolver confidently identifies.
+    The resolver-driven sanction→company linkage was historically
+    written as Neo4j SANCTIONED edges. Phase 2 retired that table;
+    the linkage will land in Virtuoso once the review-queue path
+    moves across. Until then this loop just exercises the resolver
+    so we keep observability on its hit rate (logged + returned to
+    the CLI) and so any future regression there shows up in the
+    daily ETL run.
     """
-    total = 0
     matched = 0
     matched_via_alias = 0
     no_match = 0
-    batch = []
     t0 = time.time()
-
-    with driver.session() as session:
-        session.run(CONSTRAINT_CYPHER)
-        logger.info("Constraints ensured")
-
-        all_entities: list[dict] = []
-        for entity in entities:
-            batch.append(entity)
-            all_entities.append(entity)
-            if len(batch) >= BATCH_SIZE:
-                session.run(MERGE_ENTITY, batch=batch)
-                total += len(batch)
-                batch = []
-                if total % 2000 < BATCH_SIZE:
-                    logger.info("  %d entities loaded", total)
-
-        if batch:
-            session.run(MERGE_ENTITY, batch=batch)
-            total += len(batch)
-
-        # Resolve sanctions → companies via /resolve. One HTTP call per
-        # alias-attempt; most sanctions have no Company match at all so
-        # this fans out fast. EU sanctions list is small (~3k entries).
-        logger.info("Resolving sanction → company links via /resolve ...")
-        rows: list[dict] = []
-        for entity in all_entities:
-            row = _resolve_sanction_to_company(entity)
-            if row is None:
-                no_match += 1
-                continue
-            rows.append(row)
-            matched += 1
-            if row["matched_via_alias"]:
-                matched_via_alias += 1
-
-        if rows:
-            for i in range(0, len(rows), BATCH_SIZE):
-                chunk = rows[i : i + BATCH_SIZE]
-                session.run(MERGE_SANCTIONED, rows=chunk)
-
+    for entity in entities:
+        row = _resolve_sanction_to_company(entity)
+        if row is None:
+            no_match += 1
+            continue
+        matched += 1
+        if row["matched_via_alias"]:
+            matched_via_alias += 1
     elapsed = time.time() - t0
     return {
-        "total": total,
+        "total": len(entities),
         "matched": matched,
         "matched_via_alias": matched_via_alias,
         "no_match": no_match,
@@ -355,25 +278,11 @@ def load_into_neo4j(driver, entities):
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load EU Consolidated Sanctions List into Neo4j"
+        description="Load EU Consolidated Sanctions List into Virtuoso"
     )
     parser.add_argument("--file", help="Path to local sanctions XML file")
-    parser.add_argument(
-        "--neo4j-uri",
-        default=os.environ.get("NEO4J_URI", "bolt://neo4j:7687"),
-    )
-    parser.add_argument(
-        "--neo4j-user",
-        default=os.environ.get("NEO4J_USER", "neo4j"),
-    )
-    parser.add_argument(
-        "--neo4j-password",
-        default=os.environ.get("NEO4J_PASSWORD", ""),
-    )
-    # Virtuoso side of the dual-write. If unset, the loader skips
-    # the RDF push and only writes Neo4j (legacy behaviour). CI
-    # passes the in-cluster sparql endpoint so Phase 2 dev/staging/
-    # prod runs all dual-write.
+    # Virtuoso is now the only target. Required at run time — the
+    # loader exits if it isn't set.
     parser.add_argument(
         "--virtuoso-sparql-endpoint",
         default=os.environ.get("VIRTUOSO_SPARQL_ENDPOINT", ""),
@@ -424,40 +333,33 @@ def main(argv=None):
         len(entities), skipped,
     )
 
-    # Virtuoso write goes first — SHACL validation is a hard gate.
-    # If validation fails we abort before touching Neo4j; that
-    # prevents a half-loaded state where the legacy nodes carry
-    # data that the authoritative store rejected.
-    rdf_summary = None
-    if args.virtuoso_sparql_endpoint:
-        logger.info(
-            "Writing %d entities to Virtuoso at %s",
-            len(entities), args.virtuoso_sparql_endpoint,
+    if not args.virtuoso_sparql_endpoint:
+        logger.error(
+            "VIRTUOSO_SPARQL_ENDPOINT must be set; Phase 2 retired "
+            "the Neo4j-only mode."
         )
-        writer = RdfSanctionsWriter(
-            sparql_endpoint=args.virtuoso_sparql_endpoint,
-            dba_user=args.virtuoso_dba_user,
-            dba_password=args.virtuoso_dba_password,
-        )
-        rdf_summary = writer.write(entities)
-        logger.info(
-            "Virtuoso: wrote %d entities (%d triples), skipped %d persons",
-            rdf_summary.written, rdf_summary.triples_pushed,
-            rdf_summary.skipped_persons,
-        )
-    else:
-        logger.warning(
-            "VIRTUOSO_SPARQL_ENDPOINT is unset — skipping Virtuoso write "
-            "(legacy Neo4j-only mode)."
-        )
+        sys.exit(2)
 
-    driver = GraphDatabase.driver(
-        args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password)
+    logger.info(
+        "Writing %d entities to Virtuoso at %s",
+        len(entities), args.virtuoso_sparql_endpoint,
     )
-    try:
-        summary = load_into_neo4j(driver, entities)
-    finally:
-        driver.close()
+    writer = RdfSanctionsWriter(
+        sparql_endpoint=args.virtuoso_sparql_endpoint,
+        dba_user=args.virtuoso_dba_user,
+        dba_password=args.virtuoso_dba_password,
+    )
+    rdf_summary = writer.write(entities)
+    logger.info(
+        "Virtuoso: wrote %d entities (%d triples), skipped %d persons",
+        rdf_summary.written, rdf_summary.triples_pushed,
+        rdf_summary.skipped_persons,
+    )
+
+    # Resolver hit-rate logging only — the SANCTIONED edge to
+    # Neo4j was retired in the Phase 2 cutover, and the
+    # Virtuoso-side review-queue path lands separately.
+    summary = resolve_company_links(entities)
 
     logger.info(
         "Done: %d entities, %d resolver matches (%d via alias), "
