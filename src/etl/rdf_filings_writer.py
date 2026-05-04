@@ -144,7 +144,7 @@ class RdfFilingsWriter:
         sparql_endpoint: str,
         dba_user: str = "dba",
         dba_password: str = "",
-        timeout: float = 60.0,
+        timeout: float = 1800.0,  # 30m — EDGAR full-snapshot PUT is large.
         shapes_path: Path | None = None,
     ) -> None:
         if source not in GRAPH_FOR_SOURCE:

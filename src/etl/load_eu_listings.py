@@ -138,17 +138,23 @@ _FILING_FIELDS = (
 )
 
 
-def _build_lei_to_gmr_index(driver) -> dict[str, str]:
-    """One Cypher pass to resolve LEI → gmr_id for every
-    Company carrying an LEI. Cached locally for the duration
-    of the loader run.
+def _build_lei_to_gmr_index(driver, leis: list[str]) -> dict[str, str]:
+    """Resolve LEI → gmr_id for the LEIs we actually care about.
+
+    The previous "full Company scan" form blew the server-side
+    transaction timeout against a 3.5M-row Company table. Pass
+    in just the LEIs that have summaries on disk and the
+    `c.lei IN $leis` predicate uses the existing
+    company_lei index for an indexed lookup.
     """
+    if not leis:
+        return {}
     out: dict[str, str] = {}
     with driver.session() as session:
         for row in session.run(
-            "MATCH (c:Company) "
-            "WHERE c.lei IS NOT NULL "
-            "RETURN c.lei AS lei, c.gmr_id AS gmr_id"
+            "MATCH (c:Company) WHERE c.lei IN $leis "
+            "RETURN c.lei AS lei, c.gmr_id AS gmr_id",
+            leis=leis,
         ):
             out[row["lei"]] = row["gmr_id"]
     return out
@@ -166,26 +172,36 @@ def load_financials(driver, summaries_dir: Path, writer: RdfFilingsWriter):
         logger.warning("Summaries dir not found: %s", summaries_dir)
         return 0
 
-    lei_to_gmr = _build_lei_to_gmr_index(driver)
-    logger.info("Built LEI→gmr_id index (%d entries)", len(lei_to_gmr))
-
-    all_records: list[dict] = []
-    files_processed = 0
-    skipped_no_lei = 0
-    skipped_no_company = 0
-
-    for path in sorted(summaries_dir.glob("*.json")):
+    # Prefetch the LEI list from disk so the Neo4j lookup is
+    # bounded — full Company scans timed out in prod.
+    summaries = sorted(summaries_dir.glob("*.json"))
+    needed_leis: list[str] = []
+    docs: list[tuple[Path, dict]] = []
+    for path in summaries:
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Skipping %s: %s", path.name, exc)
             continue
-
         lei = doc.get("lei")
         if not lei or len(lei) != 20:
-            skipped_no_lei += 1
             continue
+        needed_leis.append(lei)
+        docs.append((path, doc))
 
+    lei_to_gmr = _build_lei_to_gmr_index(driver, list(set(needed_leis)))
+    logger.info(
+        "Built LEI→gmr_id index for %d distinct LEIs (resolved %d)",
+        len(set(needed_leis)), len(lei_to_gmr),
+    )
+
+    all_records: list[dict] = []
+    files_processed = 0
+    skipped_no_lei = len(summaries) - len(docs)
+    skipped_no_company = 0
+
+    for path, doc in docs:
+        lei = doc["lei"]
         company_gmr = lei_to_gmr.get(lei)
         if not company_gmr:
             skipped_no_company += 1
