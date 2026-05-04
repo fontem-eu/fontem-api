@@ -6,28 +6,28 @@ positives, where 3-4 letter Company names ("AMD", "TSA", "CRL",
 the same short code (the actual entity name lived in `aliases`).
 All 8 companies were unrelated EU entities — defamation risk.
 
-The fix migrated this loader to gmr-consolidator's /resolve service.
-This file pins:
+Phase 2 retired the Neo4j-side store entirely; SanctionedEntity
+nodes and SANCTIONED edges no longer exist. The resolver call
+still runs (the loader logs match hit-rate), but the Cypher
+guards that used to live here (MERGE_ENTITY, MERGE_SANCTIONED,
+the in-cypher matchers) are gone too. This file pins:
 
-  - the in-cypher matchers (MATCH_COMPANY_EXACT / _FUZZY) must NOT
-    come back; bringing them back means bypassing the resolver's
-    central guards (MIN_NAME_LEN, country normalisation, score floor)
-  - SANCTIONED edges only get written for confident /resolve hits,
-    and even then with reviewed=false (defamation-class consequences
-    require human sign-off)
-  - the loader retries each alias (the real entity name lives there,
-    not in the primary `name` field which is often an acronym)
+  - the historical short-acronym false positives still resolve to
+    no-match (the resolver guards stand on their own)
+  - the resolver retries each alias when the primary fails
+  - the in-cypher matchers (MATCH_COMPANY_EXACT/_FUZZY) and the
+    Neo4j MERGE templates do NOT come back — the loader is
+    Virtuoso-only now
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 import src.etl.load_eu_sanctions as load_sanctions
 from src.etl._hooks import ResolveMatch, ResolveResult
 from src.etl.load_eu_sanctions import (
-    MERGE_SANCTIONED,
     MIN_NAME_LEN,
     _resolve_sanction_to_company,
     parse_sanctions_xml,
@@ -49,42 +49,26 @@ def _wrap(entities_xml: str) -> bytes:
 
 
 def test_in_cypher_matchers_removed():
-    assert not hasattr(load_sanctions, "MATCH_COMPANY_EXACT"), (
-        "MATCH_COMPANY_EXACT belongs to the past — sanction → company "
-        "linkage now goes through gmr-consolidator's /resolve endpoint."
+    """The legacy in-cypher matchers (and the broader Cypher write
+    surface) must NOT come back. Phase 2 retired the Neo4j-side
+    store; reintroducing any of these means we re-introduced a
+    parallel write path that drifts from Virtuoso."""
+    forbidden = (
+        "MATCH_COMPANY_EXACT", "MATCH_COMPANY_FUZZY", "CREATE_FT_INDEX",
+        "MERGE_ENTITY", "MERGE_SANCTIONED", "CONSTRAINT_CYPHER",
+        "load_into_neo4j",
     )
-    assert not hasattr(load_sanctions, "MATCH_COMPANY_FUZZY")
-    assert not hasattr(load_sanctions, "CREATE_FT_INDEX")
+    for name in forbidden:
+        assert not hasattr(load_sanctions, name), (
+            f"{name} belongs to the past — sanctions live in Virtuoso "
+            "now and the loader must not write Neo4j."
+        )
 
 
 def test_min_name_len_unchanged():
     """The resolver enforces this internally too. Local constant kept
     for backward-compatible imports in the test suite."""
     assert MIN_NAME_LEN >= 6
-
-
-# ─────────────────────────────────────────────────────────────────────
-# MERGE_SANCTIONED cypher invariants
-# ─────────────────────────────────────────────────────────────────────
-
-
-def test_merge_sanctioned_uses_resolver_gmr_id():
-    """Edges are now written from a gmr_id supplied by the resolver,
-    NOT by name matching here."""
-    assert "MATCH (c:Company {gmr_id: row.gmr_id})" in MERGE_SANCTIONED
-    assert "fulltext" not in MERGE_SANCTIONED.lower()
-
-
-def test_merge_sanctioned_always_unreviewed():
-    """Sanctions matches always start as reviewed=false regardless of
-    resolver tier — defamation consequences are too severe to lean on
-    automated tiers alone."""
-    assert "r.reviewed = false" in MERGE_SANCTIONED
-
-
-def test_merge_sanctioned_records_tier_and_alias_metadata():
-    assert "r.tier = row.tier" in MERGE_SANCTIONED
-    assert "r.matched_via_alias = row.matched_via_alias" in MERGE_SANCTIONED
 
 
 # ─────────────────────────────────────────────────────────────────────
