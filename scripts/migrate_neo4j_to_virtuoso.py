@@ -373,9 +373,213 @@ CONTRACT = Mapper(
 )
 
 
+# ── Relationship mappers ──────────────────────────────────────────
+#
+# Each rel mapper renders rows of `(subject_iri, object_iri)` plus
+# (optional) edge properties into Turtle. Subject and object IRIs
+# are built from the mapper's iri_template; the predicate is fixed
+# per mapper.
+
+# Authority -AWARDED-> Contract  (post-cutoff only)
+def render_rel_authority_awarded(row: dict) -> str:
+    a = row.get("authority_id"); c = row.get("ted_notice_id")
+    if not a or not c:
+        return ""
+    return f'<http://data.fontem.eu/id/Authority/{a}> fontem:awarded <http://data.fontem.eu/id/Contract/{c}> .'
+
+
+REL_AUTHORITY_AWARDED = Mapper(
+    name="rel-authority-awarded",
+    target_graph="http://data.fontem.eu/graph/contract-edges",
+    cypher=(
+        "MATCH (a:Authority)-[:AWARDED]->(c:Contract) "
+        "WHERE c.publication_date >= $since "
+        "RETURN a.authority_id AS authority_id, c.ted_notice_id AS ted_notice_id"
+    ),
+    render=render_rel_authority_awarded,
+    page_size=10000,
+)
+
+
+# Contract -AWARDED_TO-> Company  (post-cutoff only)
+def render_rel_contract_awarded_to(row: dict) -> str:
+    c = row.get("ted_notice_id"); co = row.get("gmr_id")
+    if not c or not co:
+        return ""
+    return f'<http://data.fontem.eu/id/Contract/{c}> fontem:awardedTo <http://data.fontem.eu/id/Company/{co}> .'
+
+
+REL_CONTRACT_AWARDED_TO = Mapper(
+    name="rel-contract-awarded-to",
+    target_graph="http://data.fontem.eu/graph/contract-edges",
+    cypher=(
+        "MATCH (c:Contract)-[:AWARDED_TO]->(co:Company) "
+        "WHERE c.publication_date >= $since "
+        "RETURN c.ted_notice_id AS ted_notice_id, co.gmr_id AS gmr_id"
+    ),
+    render=render_rel_contract_awarded_to,
+    page_size=10000,
+)
+
+
+# Contract -CATEGORIZED_AS-> CPV  (post-cutoff only)
+def render_rel_contract_cpv(row: dict) -> str:
+    c = row.get("ted_notice_id"); code = row.get("code")
+    if not c or not code:
+        return ""
+    return f'<http://data.fontem.eu/id/Contract/{c}> fontem:cpv <http://data.fontem.eu/id/CPV/{code}> .'
+
+
+REL_CONTRACT_CPV = Mapper(
+    name="rel-contract-cpv",
+    target_graph="http://data.fontem.eu/graph/contract-edges",
+    cypher=(
+        "MATCH (c:Contract)-[:CATEGORIZED_AS]->(cpv:CPV) "
+        "WHERE c.publication_date >= $since "
+        "RETURN c.ted_notice_id AS ted_notice_id, cpv.code AS code"
+    ),
+    render=render_rel_contract_cpv,
+    page_size=10000,
+)
+
+
+# Company-LEI -LOCATED_IN-> NUTSRegion  (~1.88M rows)
+def render_rel_company_located(row: dict) -> str:
+    co = row.get("gmr_id"); n = row.get("code")
+    if not co or not n:
+        return ""
+    return f'<http://data.fontem.eu/id/Company/{co}> fontem:locatedIn <http://data.fontem.eu/id/NUTSRegion/{n}> .'
+
+
+REL_COMPANY_LOCATED = Mapper(
+    name="rel-company-located",
+    target_graph="http://data.fontem.eu/graph/company-edges",
+    cypher=(
+        "MATCH (co:Company)-[:LOCATED_IN]->(n:NUTSRegion) "
+        "WHERE co.lei IS NOT NULL "
+        "RETURN co.gmr_id AS gmr_id, n.code AS code"
+    ),
+    render=render_rel_company_located,
+    page_size=20000,
+)
+
+
+# NUTSRegion -PART_OF-> NUTSRegion  (hierarchy)
+def render_rel_nuts_partof(row: dict) -> str:
+    child = row.get("child"); parent = row.get("parent")
+    if not child or not parent:
+        return ""
+    return (
+        f'<http://data.fontem.eu/id/NUTSRegion/{child}> '
+        f'fontem:partOf <http://data.fontem.eu/id/NUTSRegion/{parent}> .'
+    )
+
+
+REL_NUTS_PARTOF = Mapper(
+    name="rel-nuts-partof",
+    target_graph="http://data.fontem.eu/graph/nuts",
+    cypher="MATCH (c:NUTSRegion)-[:PART_OF]->(p:NUTSRegion) RETURN c.code AS child, p.code AS parent",
+    render=render_rel_nuts_partof,
+    page_size=10000,
+)
+
+
+# Company-LEI -LISTED_AS-> Listing
+def render_rel_company_listing(row: dict) -> str:
+    co = row.get("gmr_id"); ex = row.get("exchange") or "UNKNOWN"; tk = row.get("ticker")
+    if not co or not tk:
+        return ""
+    return (
+        f'<http://data.fontem.eu/id/Company/{co}> '
+        f'fontem:listedAs <http://data.fontem.eu/id/Listing/{ex}-{tk}> .'
+    )
+
+
+REL_COMPANY_LISTING = Mapper(
+    name="rel-company-listing",
+    target_graph="http://data.fontem.eu/graph/company-edges",
+    cypher=(
+        "MATCH (co:Company)-[:LISTED_AS]->(l:Listing) "
+        "WHERE co.lei IS NOT NULL "
+        "RETURN co.gmr_id AS gmr_id, l.exchange AS exchange, l.ticker AS ticker"
+    ),
+    render=render_rel_company_listing,
+    page_size=10000,
+)
+
+
+# Company -BENEFICIARY_OF-> CohesionProject (small)
+def render_rel_cohesion_beneficiary(row: dict) -> str:
+    co = row.get("gmr_id"); pid = row.get("project_id")
+    if not co or not pid:
+        return ""
+    return (
+        f'<http://data.fontem.eu/id/Company/{co}> '
+        f'fontem:beneficiaryOf <http://data.fontem.eu/id/CohesionProject/{pid}> .'
+    )
+
+
+REL_COHESION_BENEFICIARY = Mapper(
+    name="rel-cohesion-beneficiary",
+    target_graph="http://data.fontem.eu/graph/cohesion",
+    cypher=(
+        "MATCH (co:Company)-[:BENEFICIARY_OF]->(p:CohesionProject) "
+        "RETURN co.gmr_id AS gmr_id, p.project_id AS project_id"
+    ),
+    render=render_rel_cohesion_beneficiary,
+    page_size=10000,
+)
+
+
+# Lobbyist -INTERESTED_IN-> LobbyInterest (single shared interest stub
+# nodes — rendering both the interest body + the edge in one pass)
+def render_rel_lobbyist_interest(row: dict) -> str:
+    tr_id = row.get("tr_id"); interest = row.get("topic") or row.get("name")
+    if not tr_id or not interest:
+        return ""
+    # LobbyInterest IRI built from the topic name (stable hash). The
+    # Neo4j data has at most ~40 distinct interests so collisions
+    # are not a worry.
+    import re
+    slug = re.sub(r'\W+', '-', interest.strip().lower()).strip('-')[:64] or "unknown"
+    interest_iri = f"http://data.fontem.eu/id/LobbyInterest/{slug}"
+    return (
+        f'<{interest_iri}> a fontem:LobbyInterest ;\n'
+        f'    rdfs:label {_quoted_inline(interest)}@en .\n'
+        f'<http://data.fontem.eu/id/Lobbyist/{tr_id}> '
+        f'fontem:interestedIn <{interest_iri}> .'
+    )
+
+
+def _quoted_inline(s: str) -> str:
+    return '"' + esc(s) + '"'
+
+
+REL_LOBBYIST_INTEREST = Mapper(
+    name="rel-lobbyist-interest",
+    target_graph="http://data.fontem.eu/graph/lobbyist",
+    cypher=(
+        "MATCH (l:Lobbyist)-[:INTERESTED_IN]->(li:LobbyInterest) "
+        "RETURN l.tr_id AS tr_id, coalesce(li.name, li.topic) AS topic"
+    ),
+    render=render_rel_lobbyist_interest,
+    page_size=10000,
+)
+
+
 REGISTRY: dict[str, Mapper] = {
-    m.name: m for m in [CPV, NUTS, LISTING, COHESION, AUTHORITY, LOBBYIST, COMPANY_LEI, CONTRACT]
+    m.name: m for m in [
+        CPV, NUTS, LISTING, COHESION, AUTHORITY, LOBBYIST, COMPANY_LEI, CONTRACT,
+        REL_AUTHORITY_AWARDED, REL_CONTRACT_AWARDED_TO, REL_CONTRACT_CPV,
+        REL_COMPANY_LOCATED, REL_NUTS_PARTOF, REL_COMPANY_LISTING,
+        REL_COHESION_BENEFICIARY, REL_LOBBYIST_INTEREST,
+    ]
 }
+
+
+# Mappers that need the --since cutoff to be passed.
+NEEDS_SINCE = {CONTRACT.name, REL_AUTHORITY_AWARDED.name,
+               REL_CONTRACT_AWARDED_TO.name, REL_CONTRACT_CPV.name}
 
 
 # ── Driver ────────────────────────────────────────────────────────
@@ -485,8 +689,8 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     mapper = REGISTRY[args.class_name]
-    if mapper is CONTRACT and not args.since:
-        sys.exit("--since YYYY-MM-DD is required when migrating contracts (staging compactness).")
+    if mapper.name in NEEDS_SINCE and not args.since:
+        sys.exit(f"--since YYYY-MM-DD is required for {mapper.name} (staging compactness).")
 
     n = run(
         mapper,
