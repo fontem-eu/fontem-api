@@ -13,9 +13,22 @@ jobs:
         env:
           PIP_INDEX_URL: https://nexus.void42.internal/repository/pypi-proxy/simple/
           PIP_TRUSTED_HOST: nexus.void42.internal
+          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
         run: |
           pip install --no-cache-dir vendor/*.whl
           pip install --no-cache-dir -r requirements.txt pytest pylint tzdata
+          # Internal-only deps: gmr-event-schemas + gmr-events live
+          # in golden/* on Gitea. pip's isolated-build env can't
+          # reach the registry from a plain git+http URL, so we
+          # clone and install explicitly with the read token.
+          tmpdir=$(mktemp -d)
+          git clone --depth 1 \
+              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/golden/gmr-event-schemas.git" \
+              "$tmpdir/gmr-event-schemas"
+          git clone --depth 1 \
+              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/golden/gmr-events.git" \
+              "$tmpdir/gmr-events"
+          pip install --no-cache-dir "$tmpdir/gmr-event-schemas" "$tmpdir/gmr-events"
       - name: Test
         run: python3 -m pytest tests/ -q
       - name: Lint

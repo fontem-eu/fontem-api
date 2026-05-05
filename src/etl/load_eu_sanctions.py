@@ -25,11 +25,14 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
+import uuid
+
 import httpx
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 from . import gmr_id
 from ._hooks import resolve_entity
-from .rdf_sanctions_writer import RdfSanctionsWriter
 
 logger = logging.getLogger(__name__)
 
@@ -276,25 +279,16 @@ def resolve_company_links(entities):
 
 
 def main(argv=None):
-    """CLI entry point."""
+    """CLI entry point.
+
+    The loader emits events into events.entity_events; the
+    Virtuoso and Neo4j sinks project them. We no longer write
+    either store directly. EVENTS_DATABASE_URL is required.
+    """
     parser = argparse.ArgumentParser(
-        description="Load EU Consolidated Sanctions List into Virtuoso"
+        description="Load EU Consolidated Sanctions List into the event log"
     )
     parser.add_argument("--file", help="Path to local sanctions XML file")
-    # Virtuoso is now the only target. Required at run time — the
-    # loader exits if it isn't set.
-    parser.add_argument(
-        "--virtuoso-sparql-endpoint",
-        default=os.environ.get("VIRTUOSO_SPARQL_ENDPOINT", ""),
-    )
-    parser.add_argument(
-        "--virtuoso-dba-user",
-        default=os.environ.get("VIRTUOSO_DBA_USER", "dba"),
-    )
-    parser.add_argument(
-        "--virtuoso-dba-password",
-        default=os.environ.get("VIRTUOSO_DBA_PASSWORD", ""),
-    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -333,27 +327,54 @@ def main(argv=None):
         len(entities), skipped,
     )
 
-    if not args.virtuoso_sparql_endpoint:
-        logger.error(
-            "VIRTUOSO_SPARQL_ENDPOINT must be set; Phase 2 retired "
-            "the Neo4j-only mode."
+    log = EventLog.from_env()
+    batch_id = uuid.uuid4()
+    graph_iri = "http://data.fontem.eu/graph/sanctions"
+    written = 0
+
+    with log.batch(batch_id, producer="load_eu_sanctions") as emit:
+        emit.control(
+            "BeginGraphReplace",
+            builders.begin_graph_replace(
+                graph_iri=graph_iri,
+                label="SanctionedEntity",
+                domain="sanctions",
+            ),
         )
-        sys.exit(2)
+        for ent in entities:
+            iri = (
+                "http://data.fontem.eu/id/Sanction/"
+                f"{ent['entity_id']}"
+            )
+            emit.upsert(
+                "UpsertSanctionedEntity",
+                iri=iri,
+                domain="sanctions",
+                payload=builders.upsert_sanctioned_entity(
+                    entity_id=ent["entity_id"],
+                    eu_reference=ent["eu_reference"],
+                    name=ent.get("name") or None,
+                    aliases=ent.get("aliases") or [],
+                    nationality=ent.get("nationality") or None,
+                    designation_date=(
+                        ent.get("designation_date") or None
+                    ),
+                    sanction_regime=ent.get("sanction_regime") or None,
+                    legal_basis=ent.get("legal_basis") or None,
+                    listing_reason=ent.get("listing_reason") or None,
+                ),
+            )
+            written += 1
+        emit.control(
+            "EndGraphReplace",
+            builders.end_graph_replace(
+                graph_iri=graph_iri, domain="sanctions",
+            ),
+        )
 
     logger.info(
-        "Writing %d entities to Virtuoso at %s",
-        len(entities), args.virtuoso_sparql_endpoint,
-    )
-    writer = RdfSanctionsWriter(
-        sparql_endpoint=args.virtuoso_sparql_endpoint,
-        dba_user=args.virtuoso_dba_user,
-        dba_password=args.virtuoso_dba_password,
-    )
-    rdf_summary = writer.write(entities)
-    logger.info(
-        "Virtuoso: wrote %d entities (%d triples), skipped %d persons",
-        rdf_summary.written, rdf_summary.triples_pushed,
-        rdf_summary.skipped_persons,
+        "Emitted %d UpsertSanctionedEntity events (batch_id=%s)",
+        written, batch_id,
     )
 
     # Resolver hit-rate logging only — the SANCTIONED edge to

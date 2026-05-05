@@ -21,11 +21,18 @@ dishka>=1.3
 # Graph database
 neo4j
 
-# RDF — sanctions ETL writes Turtle to Virtuoso. pyshacl
-# validates each batch against shapes/sanctions.shacl.ttl
-# before pushing.
+# RDF — used by the legacy direct-write path (load_us_financials,
+# load_eu_listings.load_financials). These keep RdfFilingsWriter
+# until they're migrated to event emission too. Sanctions ETL has
+# moved off these.
 rdflib>=7.0
 pyshacl>=0.27
+
+# Event-log architecture: producers emit into events.entity_events
+# instead of writing stores directly. See fontem-ontology/MIGRATION.md.
+# Installed in CI via a separate step (using GMR_CI_READ_TOKEN).
+# See .gitea/workflows/ci.yml. NOT listed here because pip's
+# isolated-build environment doesn't have gitea creds.
 
 # Relational + spatial (fontem_stats / Eurostat layer)
 psycopg[binary]>=3.1
