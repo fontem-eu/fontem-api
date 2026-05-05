@@ -30,10 +30,9 @@ pyshacl>=0.27
 
 # Event-log architecture: producers emit into events.entity_events
 # instead of writing stores directly. See fontem-ontology/MIGRATION.md.
-# Pulled from the internal Gitea via git+http; CI build resolves at
-# install time.
-gmr-event-schemas @ git+http://contribute.void42.internal/golden/gmr-event-schemas.git@main
-gmr-events        @ git+http://contribute.void42.internal/golden/gmr-events.git@main
+# Installed in CI via a separate step (using GMR_CI_READ_TOKEN).
+# See .gitea/workflows/ci.yml. NOT listed here because pip's
+# isolated-build environment doesn't have gitea creds.
 
 # Relational + spatial (fontem_stats / Eurostat layer)
 psycopg[binary]>=3.1
