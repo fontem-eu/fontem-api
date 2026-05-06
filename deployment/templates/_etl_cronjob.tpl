@@ -78,6 +78,15 @@ spec:
                       name: etl-kuma-push-urls
                       key: {{ .name }}
                       optional: true
+                # Event log target (Phase B onward — see
+                # fontem-ontology/MIGRATION.md). Producers emit
+                # into events.entity_events instead of writing
+                # downstream stores directly.
+                - name: EVENTS_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: gmr-postgres-credentials
+                      key: EVENTS_DATABASE_URL
                 {{- range .extraEnv }}
                 - {{ toYaml . | nindent 18 | trim }}
                 {{- end }}
