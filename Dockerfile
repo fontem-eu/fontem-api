@@ -30,6 +30,16 @@ RUN pip install --no-cache-dir -r requirements.txt && rm requirements.txt
 COPY vendor/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
 
+# --- Event log libs (vendored at build time from internal Gitea) -------------
+# pip's isolated-build environment can't reach the internal Gitea, so
+# requirements.txt deliberately omits these. CI clones them into
+# vendor/ before docker build (see .gitea/workflows/ci.yml). For local
+# builds, run `make vendor-events` before `docker build`.
+COPY vendor/gmr-event-schemas/ /tmp/gmr-event-schemas/
+COPY vendor/gmr-events/        /tmp/gmr-events/
+RUN pip install --no-cache-dir /tmp/gmr-event-schemas /tmp/gmr-events \
+ && rm -rf /tmp/gmr-event-schemas /tmp/gmr-events
+
 # --- Application source -------------------------------------------------------
 COPY src/ ./src/
 COPY data/ ./data/

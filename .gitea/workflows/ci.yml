@@ -283,6 +283,23 @@ jobs:
           project-version: ${{ github.sha }}
           dtrack-key: ${{ secrets.DTRACK_API_KEY }}
 
+      - name: Vendor internal Python deps for docker build
+        # The Dockerfile pip-installs from vendor/gmr-event-schemas
+        # and vendor/gmr-events. pip's isolated-build env can't
+        # reach the internal Gitea, so we clone here at CI time
+        # using GMR_CI_READ_TOKEN, then docker build copies them in.
+        env:
+          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+        run: |
+          mkdir -p vendor
+          for repo in gmr-event-schemas gmr-events; do
+              rm -rf "vendor/$repo"
+              git clone --depth 1 \
+                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/golden/${repo}.git" \
+                  "vendor/$repo"
+              rm -rf "vendor/$repo/.git"
+          done
+
       - id: image
         name: Build, push, sign, attest
         uses: ./.gmr-ci/actions/docker-build-sign
