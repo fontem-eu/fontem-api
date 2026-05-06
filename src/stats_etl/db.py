@@ -88,6 +88,29 @@ class SyncRun:
     error_message: str | None
 
 
+@dataclass
+class SliceStats:
+    """Per-(dataset, dimension-slice) value statistics.
+
+    Powers the Atlas legend + the stable cross-year colour scale —
+    the frontend reads `value_p02` / `value_p98` (robust to outliers)
+    to decide colour bin breakpoints, and `value_kind` to switch
+    between sequential (viridis) and diverging (PuOr) palettes.
+    """
+    dataset_code: str
+    slice_key: str
+    dimensions: dict[str, object]
+    value_min: float | None
+    value_max: float | None
+    value_p02: float | None
+    value_p50: float | None
+    value_p98: float | None
+    observation_count: int
+    value_kind: str          # 'sequential' | 'diverging'
+    skew_ratio: float | None
+    computed_at: datetime | None
+
+
 class StatsDatabase:
     """Connection + repository surface for fontem_stats schema."""
 
@@ -339,3 +362,164 @@ class StatsDatabase:
             # update for executemany — close enough; we report total.
             total = cur.rowcount or len(rows)
         return total, 0
+
+    # ── Slice stats ─────────────────────────────────────────────
+    #
+    # Per-(dataset_code, dimension_slice) value distribution stats.
+    # Recomputed at the tail of every successful sync so the Atlas
+    # legend + colour scale stay current. Robust percentiles
+    # (p02/p98) are the workhorse — they ignore one or two outlier
+    # regions that would otherwise compress the entire ramp into the
+    # bottom 5%.
+
+    def migrate_slice_stats(self) -> None:
+        """Idempotent CREATE TABLE for the slice-stats sidecar.
+
+        The init SQL declares this too, but the init scripts only
+        run on a fresh data directory. Calling this from the loader
+        + the API at startup brings already-deployed clusters
+        forward without an out-of-band manual ALTER.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fontem_stats.dataset_slice_stats (
+                    dataset_code      text     NOT NULL
+                        REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+                    slice_key         text     NOT NULL,
+                    dimensions        jsonb    NOT NULL DEFAULT '{}'::jsonb,
+                    value_min         double precision,
+                    value_max         double precision,
+                    value_p02         double precision,
+                    value_p50         double precision,
+                    value_p98         double precision,
+                    observation_count bigint   NOT NULL DEFAULT 0,
+                    value_kind        text     NOT NULL DEFAULT 'sequential'
+                                       CHECK (value_kind IN ('sequential','diverging')),
+                    skew_ratio        double precision,
+                    computed_at       timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY (dataset_code, slice_key)
+                )
+                """,
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS dataset_slice_stats_dataset_idx
+                    ON fontem_stats.dataset_slice_stats (dataset_code)
+                """,
+            )
+
+    def recompute_slice_stats(self, dataset_code: str) -> int:
+        """Recompute slice stats for a single dataset.
+
+        Aggregates `fontem_stats.observation` grouped by `dimensions`
+        and upserts into `dataset_slice_stats`. Returns the number of
+        slice rows written.
+
+        `slice_key` is `md5(dimensions::text)` — Postgres' jsonb ::text
+        cast is canonical-ordered, so the same slice produces the same
+        hash regardless of how the loader wrote the keys.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fontem_stats.dataset_slice_stats (
+                    dataset_code, slice_key, dimensions,
+                    value_min, value_max, value_p02, value_p50, value_p98,
+                    observation_count, value_kind, skew_ratio, computed_at
+                )
+                SELECT
+                    o.dataset_code,
+                    md5(o.dimensions::text) AS slice_key,
+                    o.dimensions,
+                    min(o.value),
+                    max(o.value),
+                    percentile_cont(0.02) WITHIN GROUP (ORDER BY o.value) AS p02,
+                    percentile_cont(0.50) WITHIN GROUP (ORDER BY o.value) AS p50,
+                    percentile_cont(0.98) WITHIN GROUP (ORDER BY o.value) AS p98,
+                    count(*),
+                    CASE
+                        WHEN min(o.value) < 0 AND max(o.value) > 0 THEN 'diverging'
+                        ELSE 'sequential'
+                    END AS value_kind,
+                    -- (p98-p50) / (p50-p02) — > 1 means right-skewed; > 5
+                    -- is "consider log scale" territory. NULL when the
+                    -- divisor is zero (pathological flat distribution).
+                    CASE
+                        WHEN percentile_cont(0.50) WITHIN GROUP (ORDER BY o.value)
+                           - percentile_cont(0.02) WITHIN GROUP (ORDER BY o.value) <= 0
+                        THEN NULL
+                        ELSE
+                            (percentile_cont(0.98) WITHIN GROUP (ORDER BY o.value)
+                             - percentile_cont(0.50) WITHIN GROUP (ORDER BY o.value))
+                          / NULLIF(
+                                percentile_cont(0.50) WITHIN GROUP (ORDER BY o.value)
+                              - percentile_cont(0.02) WITHIN GROUP (ORDER BY o.value),
+                                0)
+                    END AS skew_ratio,
+                    now()
+                FROM fontem_stats.observation o
+                WHERE o.dataset_code = %s AND o.value IS NOT NULL
+                GROUP BY o.dataset_code, o.dimensions
+                ON CONFLICT (dataset_code, slice_key) DO UPDATE SET
+                    dimensions        = EXCLUDED.dimensions,
+                    value_min         = EXCLUDED.value_min,
+                    value_max         = EXCLUDED.value_max,
+                    value_p02         = EXCLUDED.value_p02,
+                    value_p50         = EXCLUDED.value_p50,
+                    value_p98         = EXCLUDED.value_p98,
+                    observation_count = EXCLUDED.observation_count,
+                    value_kind        = EXCLUDED.value_kind,
+                    skew_ratio        = EXCLUDED.skew_ratio,
+                    computed_at       = now()
+                """,
+                (dataset_code,),
+            )
+            return cur.rowcount or 0
+
+    def list_slice_stats(self, dataset_code: str) -> list[SliceStats]:
+        """Return every (dimensions slice → stats) row for a dataset.
+
+        The Atlas API embeds these into `/datasets` so the frontend
+        can pick the right slice's bounds before rendering the
+        choropleth — no extra round-trip per render.
+        """
+        with self.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT dataset_code, slice_key, dimensions,
+                       value_min, value_max,
+                       value_p02, value_p50, value_p98,
+                       observation_count, value_kind, skew_ratio, computed_at
+                FROM fontem_stats.dataset_slice_stats
+                WHERE dataset_code = %s
+                ORDER BY slice_key
+                """,
+                (dataset_code,),
+            )
+            rows = cur.fetchall()
+        out: list[SliceStats] = []
+        for r in rows:
+            dims = r["dimensions"]
+            if isinstance(dims, str):
+                try:
+                    dims = json.loads(dims)
+                except json.JSONDecodeError:
+                    dims = {}
+            out.append(
+                SliceStats(
+                    dataset_code=r["dataset_code"],
+                    slice_key=r["slice_key"],
+                    dimensions=dims or {},
+                    value_min=r["value_min"],
+                    value_max=r["value_max"],
+                    value_p02=r["value_p02"],
+                    value_p50=r["value_p50"],
+                    value_p98=r["value_p98"],
+                    observation_count=r["observation_count"],
+                    value_kind=r["value_kind"],
+                    skew_ratio=r["skew_ratio"],
+                    computed_at=r["computed_at"],
+                )
+            )
+        return out

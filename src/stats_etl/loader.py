@@ -81,6 +81,26 @@ class EurostatLoader:
             )
             logger.info("%s: synced %d rows (upstream=%s)",
                         code, total, meta.upstream_modified)
+
+            # Recompute slice stats so the Atlas legend + colour
+            # scale stay in sync with the new observations. Cheap
+            # enough to do on every successful sync (one aggregation
+            # query per slice). Failures here don't unwind the sync —
+            # the observations are already committed; stats can be
+            # refilled out-of-band via `stats-etl recompute-stats`.
+            try:
+                self._db.migrate_slice_stats()
+                slice_rows = self._db.recompute_slice_stats(code)
+                logger.info("%s: recomputed stats for %d slice(s)",
+                            code, slice_rows)
+            except Exception as stats_exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "%s: slice-stats recompute failed (%s); "
+                    "sync itself succeeded — recompute via "
+                    "`stats-etl recompute-stats %s`",
+                    code, stats_exc, code,
+                )
+
             return SyncResult(
                 code=code, status="success", rows_total=total,
             )

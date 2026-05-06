@@ -45,6 +45,54 @@ class FontemStatsSource:
         """True when the DSN is set and free of unsubstituted `$(VAR)`s."""
         return self._dsn is not None
 
+    def migrate(self) -> None:
+        """Idempotent forward-migrations the API depends on.
+
+        Today: just `dataset_slice_stats`. The init SQL declares it
+        too, but only fresh DB volumes run init scripts — calling
+        this from `_attach_state` brings already-deployed clusters
+        forward without an out-of-band manual ALTER.
+
+        Best-effort: if the user lacks CREATE on the schema (e.g.
+        a read-only role), log and skip — the dataset query
+        gracefully falls back to no slice_stats.
+        """
+        if not self.configured:
+            return
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fontem_stats.dataset_slice_stats (
+                        dataset_code      text     NOT NULL REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+                        slice_key         text     NOT NULL,
+                        dimensions        jsonb    NOT NULL DEFAULT '{}'::jsonb,
+                        value_min         double precision,
+                        value_max         double precision,
+                        value_p02         double precision,
+                        value_p50         double precision,
+                        value_p98         double precision,
+                        observation_count bigint   NOT NULL DEFAULT 0,
+                        value_kind        text     NOT NULL DEFAULT 'sequential'
+                                           CHECK (value_kind IN ('sequential','diverging')),
+                        skew_ratio        double precision,
+                        computed_at       timestamptz NOT NULL DEFAULT now(),
+                        PRIMARY KEY (dataset_code, slice_key)
+                    )
+                    """,
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS dataset_slice_stats_dataset_idx
+                        ON fontem_stats.dataset_slice_stats (dataset_code)
+                    """,
+                )
+                conn.commit()
+        except psycopg.Error:
+            # Don't unwind app boot. The list_datasets query handles
+            # a missing table with an empty slice_stats array.
+            pass
+
     @contextmanager
     def _connect(self):
         """Yield a psycopg connection with a 5s connect timeout."""
@@ -93,26 +141,67 @@ class FontemStatsSource:
 
     # ── Catalog ──────────────────────────────────────────────────────
 
+    _DATASETS_CORE_SQL = """
+        SELECT d.code, d.label, d.theme, d.nuts_levels, d.time_unit,
+               d.update_freq::text AS update_freq, d.enabled,
+               d.notes, d.dim_ids, d.dim_labels,
+               r.started_at         AS last_sync_started_at,
+               r.upstream_modified  AS last_upstream_modified,
+               r.rows_total         AS last_sync_rows
+               {extra_cols}
+        FROM fontem_stats.dataset d
+        LEFT JOIN LATERAL (
+            SELECT started_at, upstream_modified, rows_total
+            FROM fontem_stats.sync_run
+            WHERE dataset_code = d.code AND status = 'success'
+            ORDER BY started_at DESC LIMIT 1
+        ) r ON true
+        {extra_join}
+        ORDER BY d.theme, d.code
+    """
+
+    _SLICE_EXTRA_COLS = ", COALESCE(s.slices, '[]'::jsonb) AS slice_stats"
+    _SLICE_EXTRA_JOIN = """
+        LEFT JOIN LATERAL (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'dimensions',        ds.dimensions,
+                    'value_min',         ds.value_min,
+                    'value_max',         ds.value_max,
+                    'value_p02',         ds.value_p02,
+                    'value_p50',         ds.value_p50,
+                    'value_p98',         ds.value_p98,
+                    'observation_count', ds.observation_count,
+                    'value_kind',        ds.value_kind,
+                    'skew_ratio',        ds.skew_ratio
+                )
+                ORDER BY ds.slice_key
+            ) AS slices
+            FROM fontem_stats.dataset_slice_stats ds
+            WHERE ds.dataset_code = d.code
+        ) s ON true
+    """
+
     def list_datasets(self) -> list[dict[str, Any]]:
+        # Embed slice stats in the same query so the frontend gets
+        # legend bounds without a second round-trip. If the
+        # `dataset_slice_stats` table is missing (clusters that
+        # haven't migrated and where the API user can't CREATE),
+        # fall back to the legacy shape with `slice_stats = []`.
+        sql_with_stats = self._DATASETS_CORE_SQL.format(
+            extra_cols=self._SLICE_EXTRA_COLS,
+            extra_join=self._SLICE_EXTRA_JOIN,
+        )
+        sql_legacy = self._DATASETS_CORE_SQL.format(
+            extra_cols=", '[]'::jsonb AS slice_stats",
+            extra_join="",
+        )
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT d.code, d.label, d.theme, d.nuts_levels, d.time_unit,
-                       d.update_freq::text AS update_freq, d.enabled,
-                       d.notes, d.dim_ids, d.dim_labels,
-                       r.started_at         AS last_sync_started_at,
-                       r.upstream_modified  AS last_upstream_modified,
-                       r.rows_total         AS last_sync_rows
-                FROM fontem_stats.dataset d
-                LEFT JOIN LATERAL (
-                    SELECT started_at, upstream_modified, rows_total
-                    FROM fontem_stats.sync_run
-                    WHERE dataset_code = d.code AND status = 'success'
-                    ORDER BY started_at DESC LIMIT 1
-                ) r ON true
-                ORDER BY d.theme, d.code
-                """,
-            )
+            try:
+                cur.execute(sql_with_stats)
+            except psycopg.errors.UndefinedTable:
+                conn.rollback()
+                cur.execute(sql_legacy)
             cols = [c.name for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 

@@ -98,6 +98,33 @@ data:
     EXCEPTION WHEN duplicate_object THEN NULL;
                  WHEN others THEN NULL; END $$;
 
+    -- ── Per-(dataset, slice) value statistics ──────────────────
+    -- Powers the Atlas legend + stable cross-year colour scale. One
+    -- row per (dataset_code, dimension slice) — e.g. crim_off_cat
+    -- has one row for {iccs:ICCS0101, unit:NR} and another for
+    -- {iccs:ICCS0101, unit:P_HTHAB} because the value range is wildly
+    -- different. `slice_key` is md5(canonical-jsonb-text) — jsonb's
+    -- ::text cast is stable-ordered, so the hash is reproducible from
+    -- either Python or SQL.
+    CREATE TABLE IF NOT EXISTS fontem_stats.dataset_slice_stats (
+        dataset_code      text     NOT NULL REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+        slice_key         text     NOT NULL,
+        dimensions        jsonb    NOT NULL DEFAULT '{}'::jsonb,
+        value_min         double precision,
+        value_max         double precision,
+        value_p02         double precision,
+        value_p50         double precision,
+        value_p98         double precision,
+        observation_count bigint   NOT NULL DEFAULT 0,
+        value_kind        text     NOT NULL DEFAULT 'sequential'
+                                   CHECK (value_kind IN ('sequential','diverging')),
+        skew_ratio        double precision,
+        computed_at       timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (dataset_code, slice_key)
+    );
+    CREATE INDEX IF NOT EXISTS dataset_slice_stats_dataset_idx
+        ON fontem_stats.dataset_slice_stats (dataset_code);
+
     -- ── NUTS regions with PostGIS geometry ──────────────────────
     CREATE TABLE IF NOT EXISTS fontem_stats.nuts_region (
         code         text                          PRIMARY KEY,

@@ -129,3 +129,44 @@ def test_sync_failure_path_logs_error_and_records_failed_run():
     db.finish_run.assert_called_once()
     assert db.finish_run.call_args.kwargs["status"] == "failed"
     assert "API blew up" in db.finish_run.call_args.kwargs["error_message"]
+
+
+def test_sync_recomputes_slice_stats_after_success():
+    """After a successful sync the loader must trigger
+    `recompute_slice_stats`, which is what keeps the Atlas legend
+    + colour scale in sync with the freshly-loaded data.
+    """
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(3)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (3, 0)
+    db.recompute_slice_stats.return_value = 4
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    db.migrate_slice_stats.assert_called_once()
+    db.recompute_slice_stats.assert_called_once_with("demo_test")
+
+
+def test_sync_success_survives_slice_stats_recompute_failure():
+    """Recompute is best-effort: if the SQL raises, the sync result
+    must still report success because the observations themselves
+    are committed. The user can re-run via `recompute-stats`.
+    """
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(2)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (2, 0)
+    db.recompute_slice_stats.side_effect = RuntimeError("perm denied")
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    assert result.rows_total == 2

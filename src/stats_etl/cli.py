@@ -104,6 +104,32 @@ def cmd_nuts_polygons(args: argparse.Namespace) -> int:
     return nuts_loader.run(version=args.version)
 
 
+def cmd_recompute_stats(args: argparse.Namespace) -> int:
+    """One-shot backfill of `dataset_slice_stats` from `observation`.
+
+    Useful for clusters that existed before slice-stats were a
+    thing — running `sync` will compute them automatically going
+    forward, but won't re-run for datasets where upstream is
+    unchanged. This command bypasses the upstream check.
+    """
+    db = StatsDatabase()
+    db.migrate_slice_stats()
+    if args.codes:
+        codes = list(args.codes)
+    else:
+        codes = [d.code for d in db.list_datasets(only_enabled=False)]
+    if not codes:
+        print("error: no datasets registered", file=sys.stderr)
+        return 1
+    total = 0
+    for code in codes:
+        n = db.recompute_slice_stats(code)
+        total += n
+        print(f"  {code:24} {n:5} slice(s)")
+    print(f"summary: {len(codes)} dataset(s), {total} slice row(s) written")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="src.stats_etl")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -135,6 +161,16 @@ def main(argv: list[str] | None = None) -> int:
     p_nuts.add_argument("--version", default="2024",
                         help="NUTS revision (default 2024)")
     p_nuts.set_defaults(func=cmd_nuts_polygons)
+
+    p_stats = sub.add_parser(
+        "recompute-stats",
+        help="recompute dataset_slice_stats from observations (backfill)",
+    )
+    p_stats.add_argument(
+        "codes", nargs="*",
+        help="dataset codes (default: every registered dataset)",
+    )
+    p_stats.set_defaults(func=cmd_recompute_stats)
 
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)

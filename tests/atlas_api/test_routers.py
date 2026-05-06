@@ -81,6 +81,56 @@ def test_datasets_returns_summary():
     body = r.json()
     assert len(body) == 1
     assert body[0]["code"] == "nama_10r_2gdp"
+    # No slice stats yet → response must still validate, not 500.
+    assert body[0]["slice_stats"] == []
+
+
+def test_datasets_surfaces_slice_stats():
+    """Slice stats are the bedrock of the stable cross-year colour
+    scale + legend. Pin the response shape so a future tweak to the
+    SQL-to-JSON mapping doesn't drop them silently.
+    """
+    rows = [
+        {
+            "code": "crim_off_cat", "label": "Crime", "theme": "social",
+            "nuts_levels": [0, 2], "time_unit": "year", "update_freq": "1 year",
+            "enabled": True, "notes": None,
+            "last_sync_started_at": None, "last_upstream_modified": None,
+            "last_sync_rows": None,
+            "slice_stats": [
+                {
+                    "dimensions": {"iccs": "ICCS0101", "unit": "NR"},
+                    "value_min": 0.0, "value_max": 12_345.0,
+                    "value_p02": 1.0, "value_p50": 80.0, "value_p98": 9_500.0,
+                    "observation_count": 1024,
+                    "value_kind": "sequential",
+                    "skew_ratio": 4.7,
+                },
+                {
+                    "dimensions": {"iccs": "ICCS0101", "unit": "P_HTHAB"},
+                    "value_min": 0.0, "value_max": 18.5,
+                    "value_p02": 0.1, "value_p50": 1.4, "value_p98": 12.3,
+                    "observation_count": 1024,
+                    "value_kind": "sequential",
+                    "skew_ratio": 2.1,
+                },
+            ],
+        },
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.list_datasets",
+        return_value=rows,
+    ):
+        r = _client().get("/datasets")
+    assert r.status_code == 200
+    body = r.json()
+    slices = body[0]["slice_stats"]
+    assert len(slices) == 2
+    nr = next(s for s in slices if s["dimensions"]["unit"] == "NR")
+    assert nr["value_p98"] == 9_500.0
+    assert nr["value_kind"] == "sequential"
+    pht = next(s for s in slices if s["dimensions"]["unit"] == "P_HTHAB")
+    assert pht["value_p98"] == 12.3
 
 
 # ── /series ──────────────────────────────────────────────────────────

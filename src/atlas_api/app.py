@@ -21,6 +21,10 @@ from src.atlas_api.sources.fontem_stats import FontemStatsSource
 def _attach_state(app: FastAPI) -> None:
     settings = atlas_config.load()
     fontem = FontemStatsSource(settings.stats_database_url)
+    # Idempotent forward-migrations (slice-stats table on already-
+    # deployed clusters). Best-effort: list_datasets falls back to
+    # an empty slice_stats array if this no-ops on a read-only role.
+    fontem.migrate()
     app.state.atlas_settings = settings
     app.state.fontem_stats_source = fontem
     app.state.atlas_sources = [fontem]

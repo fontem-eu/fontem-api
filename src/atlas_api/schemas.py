@@ -33,6 +33,32 @@ class AtlasHealth(BaseModel):
 # ── Datasets ────────────────────────────────────────────────────────
 
 
+class SliceStats(BaseModel):
+    """Per-(dataset, dimension-slice) value distribution.
+
+    The frontend reads this to draw a stable colour scale across
+    years (and a legend). `dimensions` is the slice key as a regular
+    JSON object — the same shape as `Observation.dimensions` — so
+    the frontend can match it to the active picker selection.
+
+    `value_kind` decides palette family:
+      - 'sequential' → viridis-style ramp anchored at p02..p98
+      - 'diverging'  → PuOr-style ramp anchored around 0
+
+    `skew_ratio` = (p98-p50) / (p50-p02). > ~5 hints "use log scale";
+    NULL for pathological flat distributions where (p50-p02) == 0.
+    """
+    dimensions: dict[str, Any] = Field(default_factory=dict)
+    value_min: float | None = None
+    value_max: float | None = None
+    value_p02: float | None = None
+    value_p50: float | None = None
+    value_p98: float | None = None
+    observation_count: int = 0
+    value_kind: str = "sequential"
+    skew_ratio: float | None = None
+
+
 class DatasetSummary(BaseModel):
     code: str
     label: str
@@ -52,6 +78,9 @@ class DatasetSummary(BaseModel):
     # handles time; freq is constant).
     dim_ids: list[str] = Field(default_factory=list)
     dim_labels: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # Per-slice value-distribution stats. Empty until a sync (or
+    # `stats-etl recompute-stats`) has run against this dataset.
+    slice_stats: list[SliceStats] = Field(default_factory=list)
 
 
 # ── Observations ────────────────────────────────────────────────────
