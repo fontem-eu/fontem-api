@@ -1,22 +1,28 @@
-"""Load CPV (Common Procurement Vocabulary) reference taxonomy into Neo4j.
+"""Load CPV (Common Procurement Vocabulary) reference taxonomy
+into the event log as ``UpsertTaxonomyCode`` events.
 
 The CPV codelist is published by the EU as part of the eForms SDK.
 We embed the top-level divisions (~45 codes) directly and load
-detailed codes from TED data as we encounter them.
+detailed codes from TED data as we encounter them. Each code emits
+one event keyed by (system='cpv', code=<8-digit>); sinks materialise
+:CPV nodes and skos:broader / CHILD_OF edges from parent_code.
 
 Usage:
-    python -m src.etl.load_cpv --neo4j-uri bolt://localhost:7687
+    python -m src.etl.load_cpv
 """
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 import time
+import uuid
 
-from neo4j import GraphDatabase
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 logger = logging.getLogger(__name__)
+
+SYSTEM = "cpv"
 
 # Top-level CPV divisions (2-digit codes)
 CPV_DIVISIONS = {
@@ -138,50 +144,68 @@ CPV_DETAILED = {
 }
 
 
-def load_cpv_divisions(driver):
-    """Load CPV divisions and detailed codes into Neo4j."""
-    query = """
-    UNWIND $batch AS row
-    MERGE (cpv:CPV {code: row.code})
-    SET cpv.description = coalesce(cpv.description, row.description),
-        cpv.division    = row.division
+def load_cpv_divisions(log: EventLog) -> int:
+    """Emit UpsertTaxonomyCode events for the embedded CPV catalogue.
+
+    Returns the number of codes emitted (~100). Idempotent — re-running
+    re-emits the same (system, code) keys; sinks MERGE.
     """
-    batch = [
-        {"code": code + "000000", "description": desc, "division": code}
-        for code, desc in CPV_DIVISIONS.items()
-    ]
-    # Add detailed codes (division derived from first 2 digits)
-    for code, desc in CPV_DETAILED.items():
-        batch.append({
-            "code": code,
-            "description": desc,
-            "division": code[:2],
-        })
-    with driver.session() as session:
-        session.run(
-            "CREATE CONSTRAINT cpv_code IF NOT EXISTS "
-            "FOR (cpv:CPV) REQUIRE cpv.code IS UNIQUE"
-        )
-        session.run(query, batch=batch)
-    logger.info("Loaded %d CPV codes (%d divisions + %d detailed)",
-                len(batch), len(CPV_DIVISIONS), len(CPV_DETAILED))
-    return len(batch)
+    batch_id = uuid.uuid4()
+    total = 0
+    t0 = time.time()
+    with log.batch(batch_id, producer="load_cpv") as emit:
+        # Top-level divisions: emit as 8-digit codes (eg "45000000") so
+        # they share the same key namespace as detailed codes.
+        for code, desc in CPV_DIVISIONS.items():
+            full = code + "000000"
+            emit.upsert(
+                "UpsertTaxonomyCode",
+                iri=f"http://data.fontem.eu/id/Cpv/{full}",
+                domain="cpv",
+                payload=builders.upsert_taxonomy_code(
+                    system=SYSTEM, code=full,
+                    label=desc, label_lang="en",
+                    level=0,
+                ),
+            )
+            total += 1
+        # Detailed codes: parent_code = first 2 digits + "000000".
+        for code, desc in CPV_DETAILED.items():
+            emit.upsert(
+                "UpsertTaxonomyCode",
+                iri=f"http://data.fontem.eu/id/Cpv/{code}",
+                domain="cpv",
+                payload=builders.upsert_taxonomy_code(
+                    system=SYSTEM, code=code,
+                    label=desc, label_lang="en",
+                    parent_code=code[:2] + "000000",
+                    level=1,
+                ),
+            )
+            total += 1
+    elapsed = time.time() - t0
+    logger.info(
+        "Done: %d CPV codes (%d divisions + %d detailed) in %.1fs",
+        total, len(CPV_DIVISIONS), len(CPV_DETAILED), elapsed,
+    )
+    return total
 
 
 def main(argv=None):
     """CLI entry point."""
-    parser = argparse.ArgumentParser(description="Load CPV codes into Neo4j")
-    parser.add_argument("--neo4j-uri", default=os.environ.get("NEO4J_URI", "bolt://neo4j:7687"))
-    parser.add_argument("--neo4j-user", default=os.environ.get("NEO4J_USER", "neo4j"))
-    parser.add_argument("--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""))
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    driver = GraphDatabase.driver(args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password))
+    parser = argparse.ArgumentParser(
+        description="Emit UpsertTaxonomyCode events for the CPV catalogue",
+    )
+    parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    log = EventLog.from_env()
     try:
-        load_cpv_divisions(driver)
+        load_cpv_divisions(log)
     finally:
-        driver.close()
+        log.close()
 
 
 if __name__ == "__main__":

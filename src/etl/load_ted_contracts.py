@@ -325,10 +325,10 @@ def main(argv=None):
             parser.error("Provide --file or --year + --month")
             return
 
-        # CPV bootstrap still happens via load_cpv (Neo4j-only for
-        # now; UpsertTaxonomyCode is a follow-up schema).
+        # CPV bootstrap: emits UpsertTaxonomyCode events. Idempotent;
+        # re-runs are MERGE on (system='cpv', code) at the sink.
         from .load_cpv import load_cpv_divisions  # pylint: disable=import-outside-toplevel
-        load_cpv_divisions(driver)
+        load_cpv_divisions(log)
 
         load_contracts(
             driver, log, archive, currency_svc=currency_svc,
