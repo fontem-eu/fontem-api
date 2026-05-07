@@ -48,14 +48,17 @@ class FontemStatsSource:
     def migrate(self) -> None:
         """Idempotent forward-migrations the API depends on.
 
-        Today: just `dataset_slice_stats`. The init SQL declares it
-        too, but only fresh DB volumes run init scripts — calling
+        Today: `dataset_slice_stats` (per-dimension-slice value
+        distribution) + `dataset_year_availability` (per-(level,
+        slice, year) coverage). The init SQL declares both, but
+        init scripts only run on fresh data directories — calling
         this from `_attach_state` brings already-deployed clusters
         forward without an out-of-band manual ALTER.
 
         Best-effort: if the user lacks CREATE on the schema (e.g.
         a read-only role), log and skip — the dataset query
-        gracefully falls back to no slice_stats.
+        falls back gracefully (max_availability_pct = NULL,
+        slice_stats = []).
         """
         if not self.configured:
             return
@@ -87,10 +90,34 @@ class FontemStatsSource:
                         ON fontem_stats.dataset_slice_stats (dataset_code)
                     """,
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fontem_stats.dataset_year_availability (
+                        dataset_code        text     NOT NULL
+                            REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+                        nuts_level          smallint NOT NULL,
+                        slice_key           text     NOT NULL,
+                        dimensions          jsonb    NOT NULL DEFAULT '{}'::jsonb,
+                        year                smallint NOT NULL,
+                        regions_with_value  int      NOT NULL DEFAULT 0,
+                        regions_total       int,
+                        availability_pct    double precision,
+                        computed_at         timestamptz NOT NULL DEFAULT now(),
+                        PRIMARY KEY (dataset_code, nuts_level, slice_key, year)
+                    )
+                    """,
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS dataset_year_availability_dataset_idx
+                        ON fontem_stats.dataset_year_availability (dataset_code)
+                    """,
+                )
                 conn.commit()
         except psycopg.Error:
-            # Don't unwind app boot. The list_datasets query handles
-            # a missing table with an empty slice_stats array.
+            # Don't unwind app boot. list_datasets handles missing
+            # tables: slice_stats defaults to [], max_availability_pct
+            # to NULL when the join target doesn't exist.
             pass
 
     @contextmanager
@@ -148,7 +175,14 @@ class FontemStatsSource:
                r.started_at         AS last_sync_started_at,
                r.upstream_modified  AS last_upstream_modified,
                r.rows_total         AS last_sync_rows,
-               '[]'::jsonb          AS slice_stats
+               '[]'::jsonb          AS slice_stats,
+               -- The max year-coverage for this dataset across every
+               -- (level, slice, year) — feeds the Atlas "hide
+               -- low-coverage datasets" toggle. NULL when no
+               -- availability rows have been computed yet (pre-
+               -- backfill cluster); the frontend treats NULL as
+               -- "show everything" so the toggle no-ops gracefully.
+               a.max_availability_pct
         FROM fontem_stats.dataset d
         LEFT JOIN LATERAL (
             SELECT started_at, upstream_modified, rows_total
@@ -156,6 +190,11 @@ class FontemStatsSource:
             WHERE dataset_code = d.code AND status = 'success'
             ORDER BY started_at DESC LIMIT 1
         ) r ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(availability_pct) AS max_availability_pct
+            FROM fontem_stats.dataset_year_availability
+            WHERE dataset_code = d.code
+        ) a ON true
         ORDER BY d.theme, d.code
     """
 
@@ -165,6 +204,9 @@ class FontemStatsSource:
         # migr_imm1ctz alone, 230k+ across the catalog). Embedding
         # would push /datasets to 57MB. Frontend fetches per-dataset
         # via fetch_slice_stats() once a dataset is selected.
+        # `max_availability_pct` IS embedded — it's a single float per
+        # row, cheap to compute, and feeds the dataset-picker filter
+        # which has to apply before any dataset is selected.
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(self._DATASETS_CORE_SQL)
             cols = [c.name for c in cur.description]

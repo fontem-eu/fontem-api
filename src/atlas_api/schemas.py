@@ -101,6 +101,11 @@ class DatasetSummary(BaseModel):
     # Per-slice value-distribution stats. Empty until a sync (or
     # `stats-etl recompute-stats`) has run against this dataset.
     slice_stats: list[SliceStats] = Field(default_factory=list)
+    # Best (level, slice, year) coverage as a fraction (0..1) of the
+    # NUTS-level universe. Drives the Atlas "hide low-coverage
+    # datasets" toggle. None on pre-backfill clusters or read-only
+    # roles where the availability table couldn't be filled.
+    max_availability_pct: float | None = None
 
 
 # ── Observations ────────────────────────────────────────────────────

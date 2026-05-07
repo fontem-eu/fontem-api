@@ -70,6 +70,7 @@ def test_datasets_returns_summary():
             "enabled": True, "notes": None,
             "last_sync_started_at": None, "last_upstream_modified": None,
             "last_sync_rows": None,
+            "max_availability_pct": 0.93,
         },
     ]
     with patch(
@@ -83,6 +84,32 @@ def test_datasets_returns_summary():
     assert body[0]["code"] == "nama_10r_2gdp"
     # No slice stats yet → response must still validate, not 500.
     assert body[0]["slice_stats"] == []
+    # Availability summary is surfaced so the picker can hide
+    # low-coverage datasets without a per-row round-trip.
+    assert body[0]["max_availability_pct"] == 0.93
+
+
+def test_datasets_returns_summary_when_availability_missing():
+    """`max_availability_pct=None` is the pre-backfill state — the
+    dataset picker must still render and the toggle simply no-ops.
+    """
+    rows = [
+        {
+            "code": "demo_legacy", "label": "Legacy", "theme": "economy",
+            "nuts_levels": [2], "time_unit": "year", "update_freq": "1 year",
+            "enabled": True, "notes": None,
+            "last_sync_started_at": None, "last_upstream_modified": None,
+            "last_sync_rows": None,
+            "max_availability_pct": None,
+        },
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.list_datasets",
+        return_value=rows,
+    ):
+        r = _client().get("/datasets")
+    assert r.status_code == 200
+    assert r.json()[0]["max_availability_pct"] is None
 
 
 def test_slice_stats_endpoint_returns_per_dataset_distribution():
