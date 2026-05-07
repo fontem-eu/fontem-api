@@ -1,11 +1,13 @@
 """
-US Companies & Listings → Neo4j
-================================
-Reads company_tickers.json from the EDGAR data directory and creates
-Company + Listing nodes with LISTED_AS relationships.
+US Companies & Listings → events.entity_events
+==============================================
+Reads company_tickers.json from the EDGAR data directory and emits
+``UpsertCompany`` + ``UpsertListing`` events for each (company, ticker)
+pair. The Virtuoso + Neo4j sinks pick the events up and project them
+into their stores.
 
-Financials are NOT bulk-loaded here; the GraphDataSource delegates
-EDGAR financials to LocalEdgarFetcher at query time.
+Listings stay first-class — downstream price/financial fetchers join
+through the Listing node, not through a property fan-out on Company.
 
 Usage:
     python -m src.etl.load_us_companies --edgar-dir /edgar-data/full
@@ -17,9 +19,11 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 
-from neo4j import GraphDatabase
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 from . import gmr_id
 
@@ -28,62 +32,64 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 2000
 
 
-def load_us_companies(driver, tickers_data: dict):
-    """Create Company + Listing nodes for each EDGAR ticker."""
-    query = """
-    UNWIND $batch AS row
-    MERGE (c:Company {gmr_id: row.gmr_id})
-    SET c.cik     = row.cik,
-        c.name    = row.name,
-        c.country = 'US',
-        c.active  = true
-    MERGE (l:Listing {ticker: row.ticker})
-    SET l.exchange = 'US',
-        l.currency = 'USD',
-        l.active   = true
-    MERGE (c)-[:LISTED_AS]->(l)
-    """
+def load_us_companies(log: EventLog, tickers_data: dict) -> int:
+    """Emit UpsertCompany + UpsertListing events for each EDGAR ticker.
 
-    batch = []
+    Returns the number of (company, listing) pairs emitted.
+    """
+    batch_id = uuid.uuid4()
     total = 0
     t0 = time.time()
 
-    with driver.session() as session:
-        session.run(
-            "CREATE INDEX company_cik IF NOT EXISTS "
-            "FOR (c:Company) ON (c.cik)"
-        )
+    with log.batch(batch_id, producer="load_us_companies") as emit:
         for _idx, info in tickers_data.items():
             ticker = info.get("ticker", "")
             cik_raw = info.get("cik_str", "")
             if not ticker or not cik_raw:
                 continue
             cik = str(cik_raw).zfill(10)
-            batch.append({
-                "gmr_id": gmr_id.from_cik(cik),
-                "cik": cik,
-                "name": info.get("title", "").strip(),
-                "ticker": ticker.upper(),
-            })
-            if len(batch) >= BATCH_SIZE:
-                session.run(query, batch=batch)
-                total += len(batch)
-                batch = []
-                if total % 5000 < BATCH_SIZE:
-                    logger.info("  %d companies loaded", total)
-        if batch:
-            session.run(query, batch=batch)
-            total += len(batch)
+            company_gmr_id = gmr_id.from_cik(cik)
+            ticker_upper = ticker.upper()
+            name = info.get("title", "").strip() or None
+
+            company_iri = f"http://data.fontem.eu/id/Company/{company_gmr_id}"
+            emit.upsert(
+                "UpsertCompany",
+                iri=company_iri, domain="company",
+                payload=builders.upsert_company(
+                    gmr_id=company_gmr_id,
+                    name=name,
+                    country="US",
+                    cik=cik,
+                    active=True,
+                ),
+            )
+
+            listing_iri = f"http://data.fontem.eu/id/Listing/{ticker_upper}"
+            emit.upsert(
+                "UpsertListing",
+                iri=listing_iri, domain="listing",
+                payload=builders.upsert_listing(
+                    ticker=ticker_upper,
+                    company_gmr_id=company_gmr_id,
+                    exchange="US",
+                    currency="USD",
+                    active=True,
+                ),
+            )
+            total += 1
+            if total % 5000 == 0:
+                logger.info("  %d (company, listing) pairs emitted", total)
 
     elapsed = time.time() - t0
-    logger.info("US companies: %d loaded in %.1fs", total, elapsed)
+    logger.info("US companies: %d pairs emitted in %.1fs", total, elapsed)
     return total
 
 
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load US companies and listings into Neo4j",
+        description="Emit UpsertCompany + UpsertListing events for US tickers",
     )
     parser.add_argument(
         "--edgar-dir",
@@ -91,9 +97,6 @@ def main(argv=None):
             "GMR_EDGAR_LOCAL_DATA_DIR", "/edgar-data/full"
         ),
     )
-    parser.add_argument("--neo4j-uri", default="bolt://neo4j:7687")
-    parser.add_argument("--neo4j-user", default="neo4j")
-    parser.add_argument("--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""))
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -113,14 +116,11 @@ def main(argv=None):
     data = json.loads(tickers_path.read_text(encoding="utf-8"))
     logger.info("Loaded %d US tickers from %s", len(data), tickers_path)
 
-    driver = GraphDatabase.driver(
-        args.neo4j_uri,
-        auth=(args.neo4j_user, args.neo4j_password),
-    )
+    log = EventLog.from_env()
     try:
-        load_us_companies(driver, data)
+        load_us_companies(log, data)
     finally:
-        driver.close()
+        log.close()
 
 
 if __name__ == "__main__":
