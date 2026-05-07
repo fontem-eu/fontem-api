@@ -1,8 +1,7 @@
-{{- $extra := list }}
-{{- if .Values.virtuoso.enabled }}
-{{- $extra = append $extra (dict "name" "VIRTUOSO_SPARQL_ENDPOINT" "value" .Values.virtuoso.sparqlEndpoint) }}
-{{- $extra = append $extra (dict "name" "VIRTUOSO_DBA_PASSWORD" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.virtuoso.dbaPasswordSecret "key" .Values.virtuoso.dbaPasswordKey))) }}
-{{- end }}
+{{- /*
+US EDGAR financials → events.entity_events. Loader no longer
+talks to Virtuoso directly — sinks own that projection.
+*/ -}}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-us-financials"
       "schedule"        "0 5 * * 0"
@@ -13,7 +12,7 @@
       "cpuLimit"        "1"
       "memRequest"      "1Gi"
       "memLimit"        "3Gi"
-      "extraEnv"        $extra
+      "extraEnv"        (list)
       "needsEdgarData"  true
       "Values"          .Values
       "Release"         .Release) -}}

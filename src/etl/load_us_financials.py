@@ -1,13 +1,23 @@
 """
-US EDGAR Financials → Virtuoso fontem:Filing
-==============================================
-Reads companyfacts/*.json directly (no edgartools dependency)
-and emits SHACL-validated fontem:Filing triples into the
-``http://data.fontem.eu/graph/financials/edgar`` named graph.
+US EDGAR Financials → events.entity_events
+==========================================
+Reads ``companyfacts/*.json`` and emits one ``UpsertFiling`` event
+per (company, year) into the event log, bracketed by
+``BeginGraphReplace`` / ``EndGraphReplace`` against the EDGAR
+financials graph (``http://data.fontem.eu/graph/financials/edgar``).
+The bracket gives the Virtuoso sink PUT-replace semantics — the
+graph is wiped and rebuilt to exactly the events between Begin
+and End — and lets the Neo4j sink DETACH-DELETE the FinancialYear
+label before MERGE-ing the new batch.
+
+Per-source graphs (vs a single ``…/graph/financials``) are
+deliberate: EDGAR and ESEF run on different schedules, so a shared
+graph PUT would have one source wipe the other. With separate
+graphs each source owns its side; data-quality SPARQL queries
+union them.
 
 Usage:
-    python -m src.etl.load_us_financials --edgar-dir /edgar-data/full \\
-        --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
+    python -m src.etl.load_us_financials --edgar-dir /edgar-data/full
 """
 from __future__ import annotations
 
@@ -15,15 +25,18 @@ import argparse
 import json
 import logging
 import os
-import sys
 import time
+import uuid
 from pathlib import Path
 
-from .rdf_filings_writer import RdfFilingsWriter
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 500
+GRAPH_IRI = "http://data.fontem.eu/graph/financials/edgar"
+SOURCE = "edgar"
+
 _ANNUAL_FORMS = {"10-K", "20-F", "40-F"}
 
 # XBRL concept priority lists (first match wins per year)
@@ -70,13 +83,12 @@ def _extract_annual(facts_json: dict) -> list[dict]:
     if not usgaap:
         return []
 
-    # For each concept, collect annual values keyed by fiscal year end
     raw: dict[str, dict[str, float]] = {}
     for field, concepts in _CONCEPT_MAP.items():
         merged: dict[str, float] = {}
         for concept in reversed(concepts):
             data = usgaap.get(concept, {})
-            for unit_key, entries in data.get("units", {}).items():
+            for _unit_key, entries in data.get("units", {}).items():
                 for e in entries:
                     if e.get("form") not in _ANNUAL_FORMS:
                         continue
@@ -93,20 +105,18 @@ def _extract_annual(facts_json: dict) -> list[dict]:
     if not raw:
         return []
 
-    # Collect all years
     all_years = set()
     for vals in raw.values():
         all_years.update(vals.keys())
 
-    # Build one record per year
     records = []
     for year_str in sorted(all_years, reverse=True)[:10]:
         rec = {"year": int(year_str)}
         has_data = False
         for field in _CONCEPT_MAP:
             val = raw.get(field, {}).get(year_str)
-            rec[field] = val
             if val is not None:
+                rec[field] = val
                 has_data = True
         if has_data:
             records.append(rec)
@@ -114,18 +124,12 @@ def _extract_annual(facts_json: dict) -> list[dict]:
 
 
 def load_us_financials(  # pylint: disable=too-many-locals
-    writer: RdfFilingsWriter, edgar_dir: Path,
-):
-    """Iterate companyfacts/*.json and PUT a fontem:Filing batch
-    per ``BATCH_SIZE`` companies into the EDGAR named graph.
+    log: EventLog, edgar_dir: Path,
+) -> dict:
+    """Iterate companyfacts/*.json and emit UpsertFiling events
+    bracketed by Begin/EndGraphReplace against the EDGAR graph.
 
-    The writer's PUT semantics replace the named graph; we
-    therefore accumulate the entire run into a single in-memory
-    batch and flush at the end. For the production EDGAR set
-    (~10k US-listed companies, ~10 years each → ~100k filings)
-    that's ~250 MiB of intermediate Turtle, which fits in the
-    cronjob's 2 GiB memory limit comfortably.
-    """
+    Returns ``{"total": <filings>, "companies": <distinct CIKs>}``."""
     facts_dir = edgar_dir / "companyfacts"
     tickers_path = edgar_dir / "reference" / "company_tickers.json"
 
@@ -140,93 +144,112 @@ def load_us_financials(  # pylint: disable=too-many-locals
             continue
         cik = str(cik_raw).zfill(10)
         cik_to_gmr[cik] = gmr_id.from_cik(cik)
-
     logger.info("Indexed %d CIK→gmr_id mappings", len(cik_to_gmr))
 
-    all_records: list[dict] = []
+    batch_id = uuid.uuid4()
     companies_loaded = 0
+    filings_emitted = 0
     t0 = time.time()
 
-    for filename in sorted(facts_dir.glob("CIK*.json")):
-        cik_str = filename.stem.replace("CIK", "").lstrip("0").zfill(10)
-        company_gmr = cik_to_gmr.get(cik_str)
-        if not company_gmr:
-            continue
-        try:
-            with open(filename, encoding="utf-8") as f:
-                facts = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
-        records = _extract_annual(facts)
-        if not records:
-            continue
-        for rec in records:
-            rec["gmr_id"] = company_gmr
-            all_records.append(rec)
-        companies_loaded += 1
-        if companies_loaded % 500 == 0:
-            elapsed = time.time() - t0
-            logger.info(
-                "  %d companies, %d fin. years (%.0f co/s)",
-                companies_loaded, len(all_records),
-                companies_loaded / elapsed if elapsed else 0,
-            )
+    with log.batch(batch_id, producer="load_us_financials") as emit:
+        emit.control(
+            "BeginGraphReplace",
+            builders.begin_graph_replace(
+                graph_iri=GRAPH_IRI,
+                label="FinancialYear",
+                domain="financials/edgar",
+            ),
+        )
 
-    if not all_records:
-        logger.warning("no EDGAR records found; skipping write")
-        return {"total": 0, "companies": 0}
+        for filename in sorted(facts_dir.glob("CIK*.json")):
+            cik_str = filename.stem.replace("CIK", "").lstrip("0").zfill(10)
+            company_gmr = cik_to_gmr.get(cik_str)
+            if not company_gmr:
+                continue
+            try:
+                with open(filename, encoding="utf-8") as f:
+                    facts = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            records = _extract_annual(facts)
+            if not records:
+                continue
+            for rec in records:
+                year = rec.pop("year")
+                emit.upsert(
+                    "UpsertFiling",
+                    iri=(
+                        f"http://data.fontem.eu/id/Filing/"
+                        f"{_filing_uuid(company_gmr, year, SOURCE)}"
+                    ),
+                    domain="financials/edgar",
+                    payload=builders.upsert_filing(
+                        gmr_id=company_gmr,
+                        year=year,
+                        source=SOURCE,
+                        **rec,
+                    ),
+                )
+                filings_emitted += 1
+            companies_loaded += 1
+            if companies_loaded % 500 == 0:
+                elapsed = time.time() - t0
+                logger.info(
+                    "  %d companies, %d filings (%.0f co/s)",
+                    companies_loaded, filings_emitted,
+                    companies_loaded / elapsed if elapsed else 0,
+                )
 
-    res = writer.write(all_records)
+        emit.control(
+            "EndGraphReplace",
+            builders.end_graph_replace(
+                graph_iri=GRAPH_IRI,
+                domain="financials/edgar",
+            ),
+        )
+
     elapsed = time.time() - t0
     logger.info(
-        "Done: %d filings (%d triples) for %d companies in %.1fs",
-        res.written, res.triples_pushed, companies_loaded, elapsed,
+        "Done: %d filings for %d companies in %.1fs",
+        filings_emitted, companies_loaded, elapsed,
     )
-    return {
-        "total": res.written, "companies": companies_loaded,
-        "triples": res.triples_pushed,
-    }
+    return {"total": filings_emitted, "companies": companies_loaded}
+
+
+def _filing_uuid(gmr_id: str, year: int, source: str) -> uuid.UUID:
+    """Deterministic Filing IRI key — matches the Virtuoso sink's
+    renderer (gmr-virtuoso-sink/triples.py:render_upsert_filing).
+    Re-runs on the same (gmr_id, year, source) land on the same
+    IRI so PUT-replace semantics overwrite cleanly."""
+    seed = f"filing:{gmr_id}:{year}:{source}"
+    return uuid.uuid5(
+        uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8"), seed,
+    )
 
 
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load US EDGAR financials into Virtuoso",
+        description="Emit UpsertFiling events for US EDGAR financials",
     )
     parser.add_argument(
         "--edgar-dir",
-        default=os.environ.get("GMR_EDGAR_LOCAL_DATA_DIR", "/edgar-data/full"),
-    )
-    parser.add_argument(
-        "--virtuoso-sparql-endpoint",
-        default=os.environ.get("VIRTUOSO_SPARQL_ENDPOINT", ""),
-    )
-    parser.add_argument(
-        "--virtuoso-dba-user",
-        default=os.environ.get("VIRTUOSO_DBA_USER", "dba"),
-    )
-    parser.add_argument(
-        "--virtuoso-dba-password",
-        default=os.environ.get("VIRTUOSO_DBA_PASSWORD", ""),
+        default=os.environ.get(
+            "GMR_EDGAR_LOCAL_DATA_DIR", "/edgar-data/full",
+        ),
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-
-    if not args.virtuoso_sparql_endpoint:
-        logger.error(
-            "VIRTUOSO_SPARQL_ENDPOINT must be set; the Neo4j path "
-            "was retired by the FinancialYear cutover."
-        )
-        sys.exit(2)
-
-    writer = RdfFilingsWriter(
-        source="edgar",
-        sparql_endpoint=args.virtuoso_sparql_endpoint,
-        dba_user=args.virtuoso_dba_user,
-        dba_password=args.virtuoso_dba_password,
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
     )
-    load_us_financials(writer, Path(args.edgar_dir))
+
+    log = EventLog.from_env()
+    try:
+        load_us_financials(log, Path(args.edgar_dir))
+    finally:
+        log.close()
 
 
 if __name__ == "__main__":
