@@ -1,0 +1,20 @@
+{{- /*
+US tickers + companies into the event log. Runs an hour before
+us-financials (Sunday 4am UTC) so the parent Companies + Listings
+exist when the financials sweep starts emitting Filings keyed by
+gmr_id.
+*/ -}}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "etl-us-companies"
+      "schedule"        "0 4 * * 0"
+      "module"          "src.etl.load_us_companies"
+      "args"            (list)
+      "deadlineSeconds" 1800
+      "cpuRequest"      "100m"
+      "cpuLimit"        "500m"
+      "memRequest"      "256Mi"
+      "memLimit"        "1Gi"
+      "extraEnv"        (list)
+      "needsEdgarData"  true
+      "Values"          .Values
+      "Release"         .Release) -}}
