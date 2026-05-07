@@ -1,69 +1,88 @@
-"""Tests for the US companies loader."""
+"""Tests for the US companies loader.
+
+Post-event-log: the loader emits UpsertCompany + UpsertListing events
+into the event log via gmr_events.EventLog. Sinks project them; the
+loader itself never touches Neo4j or Virtuoso directly.
+"""
 from unittest.mock import MagicMock
 
 from src.etl.load_us_companies import load_us_companies
 
 
-def _mock_driver():
-    """Create a mock Neo4j driver with a usable session context manager."""
-    driver = MagicMock()
-    session = MagicMock()
-    driver.session.return_value.__enter__ = MagicMock(return_value=session)
-    driver.session.return_value.__exit__ = MagicMock(return_value=False)
-    return driver, session
+def _mock_log():
+    """Create a mock EventLog that records every emit() call."""
+    log = MagicMock()
+    emit = MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    return log, emit
 
 
-def test_creates_index_and_merges():
-    """Loader creates a CIK index then MERGEs each company."""
-    driver, session = _mock_driver()
+def test_emits_company_and_listing_per_row():
+    log, emit = _mock_log()
     data = {
         "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
     }
-    total = load_us_companies(driver, data)
+    total = load_us_companies(log, data)
     assert total == 1
-    calls = session.run.call_args_list
-    assert "INDEX" in calls[0].args[0]
-    assert "MERGE" in calls[1].args[0]
+    # Two emits per row: UpsertCompany + UpsertListing.
+    assert emit.upsert.call_count == 2
+    types = [c.args[0] for c in emit.upsert.call_args_list]
+    assert types == ["UpsertCompany", "UpsertListing"]
 
 
-def test_batches_multiple_companies():
-    """Multiple companies are batched correctly."""
-    driver, session = _mock_driver()
+def test_company_payload_carries_cik_and_country():
+    log, emit = _mock_log()
     data = {
-        str(i): {"cik_str": i + 1, "ticker": f"T{i}", "title": f"Co {i}"}
-        for i in range(5)
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
     }
-    total = load_us_companies(driver, data)
-    assert total == 5
+    load_us_companies(log, data)
+    company_call = emit.upsert.call_args_list[0]
+    payload = company_call.kwargs["payload"]
+    assert payload["country"] == "US"
+    assert payload["cik"] == "0000320193"
+    assert payload["active"] is True
+
+
+def test_listing_payload_links_to_company():
+    log, emit = _mock_log()
+    data = {
+        "0": {"cik_str": 320193, "ticker": "aapl", "title": "Apple"},
+    }
+    load_us_companies(log, data)
+    company_payload = emit.upsert.call_args_list[0].kwargs["payload"]
+    listing_payload = emit.upsert.call_args_list[1].kwargs["payload"]
+    # Ticker uppercased; Listing carries Company's gmr_id.
+    assert listing_payload["ticker"] == "AAPL"
+    assert listing_payload["company_gmr_id"] == company_payload["gmr_id"]
+    assert listing_payload["exchange"] == "US"
+    assert listing_payload["currency"] == "USD"
 
 
 def test_skips_entries_without_ticker():
-    """Entries missing a ticker field are skipped."""
-    driver, session = _mock_driver()
-    data = {
-        "0": {"cik_str": 123, "title": "No Ticker Corp"},
-    }
-    total = load_us_companies(driver, data)
+    log, emit = _mock_log()
+    data = {"0": {"cik_str": 123, "title": "No Ticker Corp"}}
+    total = load_us_companies(log, data)
     assert total == 0
+    emit.upsert.assert_not_called()
 
 
-def test_zero_pads_cik():
-    """CIK is zero-padded to 10 digits in the batch."""
-    driver, session = _mock_driver()
+def test_skips_entries_without_cik():
+    log, emit = _mock_log()
+    data = {"0": {"ticker": "ZZZ", "title": "No CIK Co"}}
+    total = load_us_companies(log, data)
+    assert total == 0
+    emit.upsert.assert_not_called()
+
+
+def test_emits_within_single_batch_transaction():
+    """All upserts happen inside one log.batch() context — sinks see
+    them as a single transactional group, even though no Begin/End
+    bracket is used (this is incremental upsert, not bulk replace)."""
+    log, emit = _mock_log()
     data = {
-        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple"},
+        str(i): {"cik_str": i + 1, "ticker": f"T{i}", "title": f"Co {i}"}
+        for i in range(3)
     }
-    load_us_companies(driver, data)
-    batch = session.run.call_args_list[1].kwargs["batch"]
-    assert batch[0]["cik"] == "0000320193"
-
-
-def test_ticker_uppercased():
-    """Ticker is uppercased before loading."""
-    driver, session = _mock_driver()
-    data = {
-        "0": {"cik_str": 1, "ticker": "aapl", "title": "Apple"},
-    }
-    load_us_companies(driver, data)
-    batch = session.run.call_args_list[1].kwargs["batch"]
-    assert batch[0]["ticker"] == "AAPL"
+    load_us_companies(log, data)
+    assert log.batch.call_count == 1
