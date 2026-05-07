@@ -2,41 +2,27 @@
 Tests for ETL module constants — kills mutants on configuration values.
 
 These tests verify that critical constants (URLs, taxonomy codes)
-haven't been accidentally mutated. Per-loader batch sizes were
-removed when the loaders moved to the event log; the gmr-events
-EventLog handles transaction grouping internally.
+haven't been accidentally mutated. Per-loader batch sizes and
+direct-Cypher constants were removed when the loaders moved to
+the event log; the gmr-events EventLog handles transaction
+grouping internally and the sinks own the projection.
 """
 # pylint: disable=missing-function-docstring,missing-class-docstring
-from src.etl.load_eu_lobbying import (
-    BATCH_SIZE as LOBBY_BATCH, TR_XML_URL,
-    CONSTRAINT_CYPHER, MERGE_LOBBYIST, MERGE_REPRESENTS,
-)
+from src.etl.load_eu_lobbying import EMIT_CHUNK as LOBBY_CHUNK, TR_XML_URL
 from src.etl.load_cpv import CPV_DIVISIONS
 
 
 class TestLobbyingConstants:
-    def test_batch_size(self):
-        assert LOBBY_BATCH == 500
+    def test_emit_chunk_size(self):
+        # The trigger-side chunk size for per-batch event-log writes.
+        # 500 keeps each Postgres transaction bounded but lets one
+        # cron pass cover ~10k registrations in a small handful of
+        # batches.
+        assert LOBBY_CHUNK == 500
 
     def test_url_is_correct(self):
         assert "transparency-register.europa.eu" in TR_XML_URL
         assert TR_XML_URL.endswith("_en")
-
-    def test_constraint_cypher_creates_lobbyist_constraint(self):
-        assert "Lobbyist" in CONSTRAINT_CYPHER
-        assert "tr_id" in CONSTRAINT_CYPHER
-        assert "UNIQUE" in CONSTRAINT_CYPHER
-
-    def test_merge_lobbyist_uses_tr_id(self):
-        assert "tr_id" in MERGE_LOBBYIST
-        assert "MERGE" in MERGE_LOBBYIST
-
-    def test_merge_represents_uses_resolver_gmr_id(self):
-        # The old MATCH_COMPANY did fulltext name matching directly;
-        # it has been replaced by /resolve. Edges are now created from
-        # a gmr_id supplied by the resolver, NOT by name matching here.
-        assert "MERGE (l)-[r:REPRESENTS]->(c)" in MERGE_REPRESENTS
-        assert "row.gmr_id" in MERGE_REPRESENTS
 
 
 class TestCPVDivisions:
