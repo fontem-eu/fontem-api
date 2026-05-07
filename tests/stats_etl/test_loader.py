@@ -170,3 +170,43 @@ def test_sync_success_survives_slice_stats_recompute_failure():
     result = loader.sync("demo_test")
     assert result.status == "success"
     assert result.rows_total == 2
+
+
+def test_sync_recomputes_year_availability_after_success():
+    """The Atlas low-coverage filter depends on this sidecar staying
+    fresh, so the loader must trigger it on every successful sync.
+    """
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(3)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (3, 0)
+    db.recompute_year_availability.return_value = 7
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    db.migrate_year_availability.assert_called_once()
+    db.recompute_year_availability.assert_called_once_with("demo_test")
+
+
+def test_sync_success_survives_year_availability_recompute_failure():
+    """Same best-effort contract as slice-stats — a permission error
+    in the availability recompute must not unwind the committed
+    observations or downgrade the result to 'failed'.
+    """
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(2)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (2, 0)
+    db.recompute_year_availability.side_effect = RuntimeError("perm denied")
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    assert result.rows_total == 2

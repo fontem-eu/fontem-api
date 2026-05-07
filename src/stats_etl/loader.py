@@ -101,6 +101,25 @@ class EurostatLoader:
                     code, stats_exc, code,
                 )
 
+            # Recompute per-year availability so the Atlas frontend
+            # can hide low-coverage years (and low-coverage datasets)
+            # without the user having to discover them mid-explore.
+            # Same best-effort pattern as slice-stats — failure here
+            # doesn't unwind the sync, and `stats-etl
+            # recompute-availability` can patch up out-of-band.
+            try:
+                self._db.migrate_year_availability()
+                avail_rows = self._db.recompute_year_availability(code)
+                logger.info("%s: recomputed availability for %d (level,slice,year) row(s)",
+                            code, avail_rows)
+            except Exception as avail_exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "%s: year-availability recompute failed (%s); "
+                    "sync itself succeeded — recompute via "
+                    "`stats-etl recompute-availability %s`",
+                    code, avail_exc, code,
+                )
+
             return SyncResult(
                 code=code, status="success", rows_total=total,
             )

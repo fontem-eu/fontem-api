@@ -130,6 +130,32 @@ def cmd_recompute_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recompute_availability(args: argparse.Namespace) -> int:
+    """One-shot backfill of `dataset_year_availability` from observations.
+
+    Same purpose as `recompute-stats` but for the per-year coverage
+    sidecar. Useful for clusters that pre-date the table or for
+    datasets whose last sync was upstream-skipped (so the loader
+    didn't recompute on the way out).
+    """
+    db = StatsDatabase()
+    db.migrate_year_availability()
+    if args.codes:
+        codes = list(args.codes)
+    else:
+        codes = [d.code for d in db.list_datasets(only_enabled=False)]
+    if not codes:
+        print("error: no datasets registered", file=sys.stderr)
+        return 1
+    total = 0
+    for code in codes:
+        n = db.recompute_year_availability(code)
+        total += n
+        print(f"  {code:24} {n:5} (level,slice,year) row(s)")
+    print(f"summary: {len(codes)} dataset(s), {total} availability row(s) written")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="src.stats_etl")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -171,6 +197,16 @@ def main(argv: list[str] | None = None) -> int:
         help="dataset codes (default: every registered dataset)",
     )
     p_stats.set_defaults(func=cmd_recompute_stats)
+
+    p_avail = sub.add_parser(
+        "recompute-availability",
+        help="recompute dataset_year_availability from observations (backfill)",
+    )
+    p_avail.add_argument(
+        "codes", nargs="*",
+        help="dataset codes (default: every registered dataset)",
+    )
+    p_avail.set_defaults(func=cmd_recompute_availability)
 
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)

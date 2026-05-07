@@ -89,6 +89,28 @@ class SyncRun:
 
 
 @dataclass
+class YearAvailability:
+    """Per-(dataset, nuts_level, slice, year) coverage row.
+
+    `availability_pct` is `regions_with_value / regions_total`, with the
+    denominator being the distinct geo_codes ever observed at that NUTS
+    level across the whole stats schema (not just this dataset). That
+    gives a level-wide universe estimate without depending on
+    `nuts_region` being backfilled. The frontend uses the pct to hide
+    sparse years (per-row) and sparse datasets (max pct < threshold).
+    """
+    dataset_code: str
+    nuts_level: int
+    slice_key: str
+    dimensions: dict[str, object]
+    year: int
+    regions_with_value: int
+    regions_total: int | None
+    availability_pct: float | None
+    computed_at: datetime | None
+
+
+@dataclass
 class SliceStats:
     """Per-(dataset, dimension-slice) value statistics.
 
@@ -476,6 +498,183 @@ class StatsDatabase:
                 (dataset_code,),
             )
             return cur.rowcount or 0
+
+    # ── Year availability ──────────────────────────────────────
+    #
+    # Per-(dataset, nuts_level, slice, year) coverage. A year row's
+    # `regions_with_value` is the count of distinct geo_codes with a
+    # non-null value at that level/slice in that year. The denominator
+    # is the level-wide universe — distinct geo_codes ever observed at
+    # that NUTS level across the entire stats schema, prefering
+    # `nuts_region` when populated. Self-contained (doesn't require
+    # NUTS hierarchy backfill before it can run).
+    #
+    # The Atlas frontend uses these to hide low-coverage years
+    # (`availability_pct < threshold`) and low-coverage datasets
+    # (best year < threshold).
+
+    def migrate_year_availability(self) -> None:
+        """Idempotent CREATE TABLE for the availability sidecar.
+
+        Same rationale as `migrate_slice_stats`: init scripts only
+        run on fresh DB volumes, so an explicit migration runs from
+        the loader + API at boot to forward-port already-deployed
+        clusters.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fontem_stats.dataset_year_availability (
+                    dataset_code        text     NOT NULL
+                        REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+                    nuts_level          smallint NOT NULL,
+                    slice_key           text     NOT NULL,
+                    dimensions          jsonb    NOT NULL DEFAULT '{}'::jsonb,
+                    year                smallint NOT NULL,
+                    regions_with_value  int      NOT NULL DEFAULT 0,
+                    regions_total       int,
+                    availability_pct    double precision,
+                    computed_at         timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY (dataset_code, nuts_level, slice_key, year)
+                )
+                """,
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS dataset_year_availability_dataset_idx
+                    ON fontem_stats.dataset_year_availability (dataset_code)
+                """,
+            )
+
+    def recompute_year_availability(self, dataset_code: str) -> int:
+        """Recompute year availability for a single dataset.
+
+        Aggregates `fontem_stats.observation` grouped by
+        (nuts_level, dimensions, year) and stores the count of
+        distinct regions with a non-null value. The denominator
+        (level universe) is computed level-wide across all
+        datasets — this is robust to `nuts_region` being unpopulated
+        and gives a meaningful "fraction of regions in our system
+        that this dataset/year covers" reading.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            # Wipe and rewrite in one transaction — the universe (level
+            # denominator) drifts as new datasets land, so a stale
+            # row could carry an outdated `regions_total`. Cheaper to
+            # recompute everything for the dataset than to compute
+            # diffs.
+            cur.execute(
+                "DELETE FROM fontem_stats.dataset_year_availability "
+                "WHERE dataset_code = %s",
+                (dataset_code,),
+            )
+            cur.execute(
+                """
+                WITH level_universe AS (
+                    -- Prefer the NUTS region table when populated;
+                    -- fall back to distinct observed geo_codes at
+                    -- that level across all datasets.
+                    SELECT lvl AS nuts_level,
+                           COALESCE(nuts_n, observed_n) AS n
+                    FROM (
+                        SELECT generate_series(0, 3) AS lvl
+                    ) levels
+                    LEFT JOIN (
+                        SELECT level::int AS lvl, COUNT(*)::int AS nuts_n
+                        FROM fontem_stats.nuts_region
+                        GROUP BY level
+                    ) nr USING (lvl)
+                    LEFT JOIN (
+                        SELECT (char_length(geo_code) - 2)::int AS lvl,
+                               COUNT(DISTINCT geo_code)::int    AS observed_n
+                        FROM fontem_stats.observation
+                        WHERE value IS NOT NULL
+                        GROUP BY char_length(geo_code) - 2
+                    ) obs USING (lvl)
+                ),
+                per_year AS (
+                    SELECT
+                        dataset_code,
+                        (char_length(geo_code) - 2)::smallint AS nuts_level,
+                        md5(dimensions::text)                  AS slice_key,
+                        dimensions,
+                        EXTRACT(YEAR FROM time)::smallint      AS year,
+                        COUNT(DISTINCT geo_code)
+                            FILTER (WHERE value IS NOT NULL)::int
+                            AS regions_with_value
+                    FROM fontem_stats.observation
+                    WHERE dataset_code = %s
+                    GROUP BY dataset_code,
+                             char_length(geo_code) - 2,
+                             md5(dimensions::text),
+                             dimensions,
+                             EXTRACT(YEAR FROM time)
+                )
+                INSERT INTO fontem_stats.dataset_year_availability (
+                    dataset_code, nuts_level, slice_key, dimensions, year,
+                    regions_with_value, regions_total,
+                    availability_pct, computed_at
+                )
+                SELECT
+                    p.dataset_code, p.nuts_level, p.slice_key,
+                    p.dimensions, p.year,
+                    p.regions_with_value,
+                    u.n AS regions_total,
+                    CASE
+                        WHEN COALESCE(u.n, 0) = 0 THEN NULL
+                        ELSE p.regions_with_value::float / u.n
+                    END AS availability_pct,
+                    now()
+                FROM per_year p
+                LEFT JOIN level_universe u
+                    ON u.nuts_level = p.nuts_level
+                """,
+                (dataset_code,),
+            )
+            return cur.rowcount or 0
+
+    def list_year_availability(
+        self, dataset_code: str,
+    ) -> list[YearAvailability]:
+        """Return every (nuts_level, slice, year) row for a dataset."""
+        with self.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT dataset_code, nuts_level, slice_key, dimensions,
+                       year, regions_with_value, regions_total,
+                       availability_pct, computed_at
+                FROM fontem_stats.dataset_year_availability
+                WHERE dataset_code = %s
+                ORDER BY nuts_level, slice_key, year
+                """,
+                (dataset_code,),
+            )
+            rows = cur.fetchall()
+        out: list[YearAvailability] = []
+        for r in rows:
+            dims = r["dimensions"]
+            if isinstance(dims, str):
+                try:
+                    dims = json.loads(dims)
+                except json.JSONDecodeError:
+                    dims = {}
+            out.append(
+                YearAvailability(
+                    dataset_code=r["dataset_code"],
+                    nuts_level=int(r["nuts_level"]),
+                    slice_key=r["slice_key"],
+                    dimensions=dims or {},
+                    year=int(r["year"]),
+                    regions_with_value=int(r["regions_with_value"]),
+                    regions_total=(
+                        None if r["regions_total"] is None
+                        else int(r["regions_total"])
+                    ),
+                    availability_pct=r["availability_pct"],
+                    computed_at=r["computed_at"],
+                )
+            )
+        return out
 
     def list_slice_stats(self, dataset_code: str) -> list[SliceStats]:
         """Return every (dimensions slice → stats) row for a dataset.

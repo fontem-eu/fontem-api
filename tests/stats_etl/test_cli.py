@@ -64,6 +64,21 @@ def test_cli_sync_stale_after_with_no_results_returns_zero(capsys):
     assert "nothing stale" in capsys.readouterr().out
 
 
+def test_cli_recompute_availability_runs_for_all_datasets(capsys):
+    fake_db = MagicMock()
+    fake_db.list_datasets.return_value = [
+        MagicMock(code="a"), MagicMock(code="b"),
+    ]
+    fake_db.recompute_year_availability.side_effect = [12, 7]
+    with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):
+        rc = main(["recompute-availability"])
+    assert rc == 0
+    fake_db.migrate_year_availability.assert_called_once()
+    assert fake_db.recompute_year_availability.call_count == 2
+    out = capsys.readouterr().out
+    assert "summary: 2 dataset(s), 19 availability row(s) written" in out
+
+
 def test_cli_register_seed_upserts_all_seeds(capsys):
     fake_db = MagicMock()
     with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):

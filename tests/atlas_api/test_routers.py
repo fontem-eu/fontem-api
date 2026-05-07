@@ -122,6 +122,57 @@ def test_slice_stats_endpoint_returns_per_dataset_distribution():
     assert nr["value_kind"] == "sequential"
 
 
+def test_year_availability_endpoint_returns_per_level_year_rows():
+    """The Atlas low-coverage filter reads this endpoint to know which
+    (level, slice, year) combinations have enough region coverage to
+    be worth showing. Pin the response shape so the frontend filter
+    keeps working.
+    """
+    rows = [
+        {
+            "nuts_level": 2,
+            "dimensions": {"unit": "MIO_EUR"},
+            "year": 2018,
+            "regions_with_value": 240,
+            "regions_total": 281,
+            "availability_pct": 0.8540,
+        },
+        {
+            "nuts_level": 2,
+            "dimensions": {"unit": "MIO_EUR"},
+            "year": 2023,
+            "regions_with_value": 30,
+            "regions_total": 281,
+            "availability_pct": 0.1067,
+        },
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats."
+        "FontemStatsSource.fetch_year_availability",
+        return_value=rows,
+    ):
+        r = _client().get("/datasets/nama_10r_2gdp/availability")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 2
+    sparse = next(row for row in body if row["year"] == 2023)
+    assert sparse["availability_pct"] < 0.20
+    assert sparse["regions_with_value"] == 30
+
+
+def test_year_availability_empty_when_table_missing():
+    """Sidecar table is best-effort — frontend toggles must still
+    function (no-op) when the table hasn't been backfilled."""
+    with patch(
+        "src.atlas_api.sources.fontem_stats."
+        "FontemStatsSource.fetch_year_availability",
+        return_value=[],
+    ):
+        r = _client().get("/datasets/anything/availability")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
 def test_slice_stats_empty_when_table_missing():
     """Stats endpoint must not 500 if the table hasn't been
     backfilled yet — frontend's fallback path needs []."""

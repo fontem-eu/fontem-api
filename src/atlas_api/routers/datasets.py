@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from src.atlas_api.schemas import DatasetSummary, SliceStats
+from src.atlas_api.schemas import DatasetSummary, SliceStats, YearAvailability
 
 router = APIRouter(tags=["atlas"])
 
@@ -40,3 +40,18 @@ def list_slice_stats(code: str, request: Request) -> list[SliceStats]:
     """
     rows = _stats_source(request).fetch_slice_stats(code)
     return [SliceStats(**row) for row in rows]
+
+
+@router.get(
+    "/datasets/{code}/availability",
+    response_model=list[YearAvailability],
+)
+def list_year_availability(code: str, request: Request) -> list[YearAvailability]:
+    """Per-(nuts_level, slice, year) coverage for one dataset.
+
+    Drives the Atlas "hide low-coverage years/datasets" toggles.
+    Returns [] if the sidecar table is missing — the toggles then
+    no-op rather than failing the dataset picker.
+    """
+    rows = _stats_source(request).fetch_year_availability(code)
+    return [YearAvailability(**row) for row in rows]

@@ -59,6 +59,26 @@ class SliceStats(BaseModel):
     skew_ratio: float | None = None
 
 
+class YearAvailability(BaseModel):
+    """Per-(nuts_level, slice, year) coverage row for one dataset.
+
+    The frontend uses `availability_pct` (0..1) to:
+      - hide years where pct < threshold (default 0.20)
+      - hide datasets whose best year (max pct) is < threshold
+
+    `regions_total` is the level-wide universe — distinct geo_codes
+    ever observed at that NUTS level across the whole stats schema
+    (so a dataset that only covers EU-15 can still show "100%" for
+    its best year if no other dataset covers more level-0 codes).
+    """
+    nuts_level: int
+    dimensions: dict[str, Any] = Field(default_factory=dict)
+    year: int
+    regions_with_value: int
+    regions_total: int | None = None
+    availability_pct: float | None = None
+
+
 class DatasetSummary(BaseModel):
     code: str
     label: str

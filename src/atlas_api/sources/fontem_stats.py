@@ -170,6 +170,33 @@ class FontemStatsSource:
             cols = [c.name for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+    def fetch_year_availability(self, dataset: str) -> list[dict[str, Any]]:
+        """Per-(nuts_level, slice, year) coverage rows for one dataset.
+
+        Drives the Atlas "hide low-coverage years/datasets" toggles.
+        Returns an empty list when the table is missing (e.g.
+        mid-migration on a read-only role) — frontend treats absent
+        availability as "show everything" and the toggle simply
+        no-ops, which is safer than 500-ing the dataset selector.
+        """
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT nuts_level, dimensions, year,
+                           regions_with_value, regions_total,
+                           availability_pct
+                    FROM fontem_stats.dataset_year_availability
+                    WHERE dataset_code = %s
+                    ORDER BY nuts_level, slice_key, year
+                    """,
+                    (dataset,),
+                )
+                cols = [c.name for c in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except psycopg.errors.UndefinedTable:
+            return []
+
     def fetch_slice_stats(self, dataset: str) -> list[dict[str, Any]]:
         """Slice stats for a single dataset.
 

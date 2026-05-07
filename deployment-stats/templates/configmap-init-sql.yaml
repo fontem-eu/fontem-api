@@ -125,6 +125,28 @@ data:
     CREATE INDEX IF NOT EXISTS dataset_slice_stats_dataset_idx
         ON fontem_stats.dataset_slice_stats (dataset_code);
 
+    -- ── Per-(dataset, nuts_level, slice, year) coverage ────────
+    -- Powers the Atlas "hide low-coverage years/datasets" filter.
+    -- One row per (dataset, NUTS level, dimension slice, year)
+    -- with the count of regions that carried a non-null value
+    -- and the level-wide universe size (max distinct geo_codes
+    -- observed at that level across all datasets — robust without
+    -- requiring `nuts_region` to be backfilled).
+    CREATE TABLE IF NOT EXISTS fontem_stats.dataset_year_availability (
+        dataset_code        text     NOT NULL REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+        nuts_level          smallint NOT NULL,
+        slice_key           text     NOT NULL,
+        dimensions          jsonb    NOT NULL DEFAULT '{}'::jsonb,
+        year                smallint NOT NULL,
+        regions_with_value  int      NOT NULL DEFAULT 0,
+        regions_total       int,
+        availability_pct    double precision,
+        computed_at         timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (dataset_code, nuts_level, slice_key, year)
+    );
+    CREATE INDEX IF NOT EXISTS dataset_year_availability_dataset_idx
+        ON fontem_stats.dataset_year_availability (dataset_code);
+
     -- ── NUTS regions with PostGIS geometry ──────────────────────
     CREATE TABLE IF NOT EXISTS fontem_stats.nuts_region (
         code         text                          PRIMARY KEY,
