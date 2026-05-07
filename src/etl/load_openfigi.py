@@ -1,13 +1,26 @@
 """
-OpenFIGI ISIN-to-Ticker Enrichment
-====================================
-Reads Listing nodes that have an ISIN but no ticker from Neo4j, queries
-the OpenFIGI v3 mapping API in batches, and SETs ticker, exchange_code,
-and figi on matching Listing nodes.
+OpenFIGI ISIN-to-Ticker Enrichment → event log
+================================================
+Reads existing Listing nodes that have an ISIN but no ticker
+(typically inserted by FIRDS or another instrument-reference
+loader before OpenFIGI confirmed the canonical ticker), queries
+the OpenFIGI v3 mapping API in batches, and emits
+``UpsertListing`` events for each match. The Virtuoso + Neo4j
+sinks pick the events up and project the enriched Listing.
+
+Source for the ISIN list is still Neo4j today — the event log is
+canonical for *writes*, but the per-domain consumers (sinks) are
+the source for downstream queries. This loader queries Neo4j as
+a derived read store; the source-of-truth ISIN/Listing data
+originates upstream (FIRDS).
+
+Note: Listings are keyed by ticker. A Listing with ISIN and no
+ticker that gets enriched ends up keyed by the new ticker; the
+old isin-only Neo4j node is left in place. A separate cleanup
+sweep can drop those once OpenFIGI has run a full cycle.
 
 Usage:
-    python -m src.etl.load_openfigi --neo4j-uri bolt://localhost:7687
-    python -m src.etl.load_openfigi --api-key YOUR_KEY --limit 5000
+    python -m src.etl.load_openfigi --neo4j-uri bolt://neo4j:7687
 """
 from __future__ import annotations
 
@@ -16,48 +29,45 @@ import logging
 import os
 import sys
 import time
+import uuid
 
 import httpx
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 from neo4j import GraphDatabase
 
 logger = logging.getLogger(__name__)
 
 OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
 API_BATCH_SIZE = 100  # OpenFIGI max per request
-NEO4J_BATCH_SIZE = 500
 # Rate limit: 25 requests per 6 seconds
 RATE_LIMIT_SLEEP = 0.25  # seconds between requests (conservative)
 
 
+# Pull the parent Company so the UpsertListing events carry
+# company_gmr_id (the schema requires it). LISTED_AS is the
+# Company → Listing edge maintained by the sinks.
 FETCH_ISINS = """
-MATCH (l:Listing)
-WHERE l.isin IS NOT NULL AND l.ticker IS NULL
-RETURN l.isin AS isin
+MATCH (c:Company)-[:LISTED_AS]->(l:Listing)
+WHERE l.isin IS NOT NULL AND (l.ticker IS NULL OR l.ticker = '')
+RETURN l.isin AS isin, c.gmr_id AS company_gmr_id
 LIMIT $limit
-"""
-
-UPDATE_LISTING = """
-UNWIND $batch AS row
-MATCH (l:Listing {isin: row.isin})
-SET l.ticker        = row.ticker,
-    l.exchange_code = row.exchange_code,
-    l.figi          = row.figi
 """
 
 
 def fetch_isins(driver, limit):
-    """Get ISINs from Listing nodes that lack a ticker."""
+    """Get (isin, company_gmr_id) pairs for Listings without a ticker."""
     with driver.session() as session:
         result = session.run(FETCH_ISINS, limit=limit)
-        return [r["isin"] for r in result]
+        return [
+            {"isin": r["isin"], "company_gmr_id": r["company_gmr_id"]}
+            for r in result
+        ]
 
 
 def query_openfigi(isins, api_key=None):
-    """
-    Query OpenFIGI API for a batch of ISINs (max 100).
-
-    Returns a list of dicts with isin, ticker, exchange_code, figi.
-    """
+    """Query OpenFIGI for a batch of ISINs (max 100). Returns a
+    list of dicts keyed back to the input ISINs."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-OPENFIGI-APIKEY"] = api_key
@@ -66,7 +76,7 @@ def query_openfigi(isins, api_key=None):
 
     try:
         resp = httpx.post(
-            OPENFIGI_URL, json=payload, headers=headers, timeout=30
+            OPENFIGI_URL, json=payload, headers=headers, timeout=30,
         )
         resp.raise_for_status()
     except httpx.HTTPError:
@@ -78,44 +88,100 @@ def query_openfigi(isins, api_key=None):
         if "data" not in entry or not entry["data"]:
             continue
         best = entry["data"][0]
+        ticker = (best.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
         results.append({
             "isin": isins[i],
-            "ticker": best.get("ticker", ""),
-            "exchange_code": best.get("exchCode", ""),
-            "figi": best.get("figi", ""),
+            "ticker": ticker,
+            "exchange_code": (best.get("exchCode") or "").strip(),
+            "mic": (best.get("micCode") or "").strip() or None,
+            "figi": (best.get("figi") or "").strip(),
         })
     return results
 
 
-def load_into_neo4j(driver, enriched):
-    """SET ticker/exchange_code/figi on Listing nodes."""
+def emit_listing_events(log: EventLog, enriched: list[dict]) -> int:
+    """Emit one UpsertListing event per enriched ISIN. Returns the
+    count emitted."""
+    if not enriched:
+        return 0
+    batch_id = uuid.uuid4()
     total = 0
-    batch = []
-
-    with driver.session() as session:
+    with log.batch(batch_id, producer="load_openfigi") as emit:
         for rec in enriched:
-            batch.append(rec)
-            if len(batch) >= NEO4J_BATCH_SIZE:
-                session.run(UPDATE_LISTING, batch=batch)
-                total += len(batch)
-                batch = []
-
-        if batch:
-            session.run(UPDATE_LISTING, batch=batch)
-            total += len(batch)
-
+            emit.upsert(
+                "UpsertListing",
+                iri=f"http://data.fontem.eu/id/Listing/{rec['ticker']}",
+                domain="listing",
+                payload=builders.upsert_listing(
+                    ticker=rec["ticker"],
+                    company_gmr_id=rec["company_gmr_id"],
+                    exchange=rec.get("exchange_code") or None,
+                    isin=rec["isin"],
+                    mic=rec.get("mic"),
+                    active=True,
+                ),
+            )
+            total += 1
     return total
+
+
+def load_openfigi(driver, log: EventLog, limit: int, api_key: str | None) -> dict:
+    """Read ISINs needing enrichment, query OpenFIGI, emit events."""
+    rows = fetch_isins(driver, limit)
+    logger.info("Found %d Listings with ISIN but no ticker", len(rows))
+    if not rows:
+        return {"queried": 0, "enriched": 0, "errors": 0, "emitted": 0}
+
+    isins = [r["isin"] for r in rows]
+    isin_to_company = {r["isin"]: r["company_gmr_id"] for r in rows}
+
+    t0 = time.time()
+    all_enriched: list[dict] = []
+    errors = 0
+
+    for i in range(0, len(isins), API_BATCH_SIZE):
+        batch_isins = isins[i:i + API_BATCH_SIZE]
+        results = query_openfigi(batch_isins, api_key)
+        if not results and batch_isins:
+            errors += 1
+        for r in results:
+            r["company_gmr_id"] = isin_to_company[r["isin"]]
+        all_enriched.extend(results)
+
+        if (i + API_BATCH_SIZE) % 1000 < API_BATCH_SIZE:
+            logger.info(
+                "  %d / %d ISINs queried, %d enriched so far",
+                min(i + API_BATCH_SIZE, len(isins)), len(isins),
+                len(all_enriched),
+            )
+        time.sleep(RATE_LIMIT_SLEEP)
+
+    emitted = emit_listing_events(log, all_enriched)
+    elapsed = time.time() - t0
+    logger.info(
+        "OpenFIGI: %d ISINs queried, %d enriched, %d events emitted, "
+        "%d API errors in %.1fs",
+        len(isins), len(all_enriched), emitted, errors, elapsed,
+    )
+    return {
+        "queried": len(isins),
+        "enriched": len(all_enriched),
+        "emitted": emitted,
+        "errors": errors,
+    }
 
 
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Enrich Listing nodes with OpenFIGI ticker data"
+        description="Enrich Listing nodes with OpenFIGI ticker data",
     )
     parser.add_argument(
         "--api-key",
         default=os.environ.get("OPENFIGI_API_KEY", ""),
-        help="OpenFIGI API key (or set OPENFIGI_API_KEY env var)",
+        help="OpenFIGI API key (or OPENFIGI_API_KEY env var)",
     )
     parser.add_argument(
         "--limit", type=int, default=10000,
@@ -141,52 +207,18 @@ def main(argv=None):
     )
 
     driver = GraphDatabase.driver(
-        args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password)
+        args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password),
     )
+    log = EventLog.from_env()
 
     try:
-        isins = fetch_isins(driver, args.limit)
-        logger.info("Found %d Listing nodes without ticker", len(isins))
-
-        if not isins:
-            logger.info("Nothing to enrich — all Listing nodes have tickers")
-            return
-
-        t0 = time.time()
-        all_enriched = []
-        api_key = args.api_key or None
-        errors = 0
-
-        for i in range(0, len(isins), API_BATCH_SIZE):
-            batch_isins = isins[i : i + API_BATCH_SIZE]
-            results = query_openfigi(batch_isins, api_key)
-            if not results and batch_isins:
-                errors += 1
-            all_enriched.extend(results)
-
-            if (i + API_BATCH_SIZE) % 1000 < API_BATCH_SIZE:
-                logger.info(
-                    "  %d / %d ISINs queried, %d enriched so far",
-                    min(i + API_BATCH_SIZE, len(isins)),
-                    len(isins),
-                    len(all_enriched),
-                )
-
-            time.sleep(RATE_LIMIT_SLEEP)
-
-        updated = load_into_neo4j(driver, all_enriched)
-        elapsed = time.time() - t0
-
-        logger.info(
-            "Done: %d ISINs queried, %d enriched, %d updated in Neo4j, "
-            "%d API errors in %.1fs",
-            len(isins), len(all_enriched), updated, errors, elapsed,
-        )
+        load_openfigi(driver, log, args.limit, args.api_key or None)
     except httpx.HTTPError:
         logger.exception("Fatal HTTP error during OpenFIGI enrichment")
         sys.exit(1)
     finally:
         driver.close()
+        log.close()
 
 
 if __name__ == "__main__":
