@@ -1,203 +1,166 @@
-"""Tests for the EU listings and financials loader.
+"""Tests for the EU listings + ESEF financials loader.
 
-Listings still go to Neo4j (Companies haven't migrated). The
-financials side switched to a Virtuoso-backed RdfFilingsWriter
-in the FinancialYear cutover; the tests below mock that writer
-so they don't need a live Virtuoso to run.
+Post-event-log: the loader emits one event-log batch covering
+both listing/company upserts and a Begin/End-bracketed run of
+UpsertFiling events for ESEF.
 """
 import json
-from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from src.etl.load_eu_listings import (
     COUNTRY_CURRENCY,
-    load_financials,
-    load_listings,
+    ESEF_FINANCIALS_GRAPH,
+    _filing_uuid,
+    emit_financials,
+    emit_listings,
+    load_eu_listings,
 )
 
 
-def _mock_driver(lei_to_gmr: dict[str, str] | None = None):
-    """Mock Neo4j driver. When ``lei_to_gmr`` is supplied, the
-    first session.run() returns those rows so the LEI→gmr_id
-    index pre-pass succeeds.
-    """
-    driver = MagicMock()
-    session = MagicMock()
-    driver.session.return_value.__enter__ = MagicMock(return_value=session)
-    driver.session.return_value.__exit__ = MagicMock(return_value=False)
-    if lei_to_gmr is not None:
-        rows = [
-            {"lei": lei, "gmr_id": gid}
-            for lei, gid in lei_to_gmr.items()
-        ]
-        session.run.return_value = iter(rows)
-    return driver, session
+def _mock_log():
+    log = MagicMock()
+    emit = MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    return log, emit
 
 
-def _mock_writer():
-    """Stand-in for RdfFilingsWriter that records what it was
-    asked to push and returns the standard WriteResult shape."""
-    captured: list[dict] = []
+# ── emit_listings ────────────────────────────────────────────────────
 
-    def _write(records):
-        records = list(records)
-        captured.extend(records)
-        return SimpleNamespace(written=len(records),
-                               triples_pushed=len(records) * 4)
-
-    writer = MagicMock()
-    writer.write.side_effect = _write
-    writer._captured = captured
-    return writer
-
-
-# ── load_listings ────────────────────────────────────────────────────
-
-def test_listings_creates_constraint_and_merges():
-    """Loader creates a Listing constraint then MERGEs each entity."""
-    driver, session = _mock_driver()
+def test_emit_listings_companies_and_listings():
+    _log, emit = _mock_log()
     entities = {
-        "ADYEN.AS": {
+        "ADYEN": {
             "lei": "724500973ODKK3IFQ447",
-            "ticker": "ADYEN.AS",
-            "exchange": "AS",
             "name": "Adyen N.V.",
             "country": "NL",
+            "ticker": "ADYEN",
+            "exchange": "AMS",
+        },
+        "NOTICKER": {
+            "lei": "5493006IQ6OL2D9TZD89",
+            "name": "Some Holding",
+            "country": "NL",
+            "ticker": None,
         },
     }
-    total = load_listings(driver, entities)
-    assert total == 1
-    calls = session.run.call_args_list
-    assert "CONSTRAINT" in calls[0].args[0]
-    assert "MERGE" in calls[1].args[0]
+    companies, listings = emit_listings(emit, entities)
+    assert companies == 2
+    assert listings == 1
+    types = [c.args[0] for c in emit.upsert.call_args_list]
+    # Adyen company, Adyen listing, NoTicker company.
+    assert types == ["UpsertCompany", "UpsertListing", "UpsertCompany"]
 
 
-def test_listings_batches_multiple_entities():
-    """Multiple entities are batched correctly."""
-    driver, session = _mock_driver()
+def test_emit_listings_currency_from_country():
+    _log, emit = _mock_log()
     entities = {
-        f"T{i}.XX": {
-            "lei": f"{'A' * 18}{i:02d}",
-            "ticker": f"T{i}.XX",
-            "exchange": "XX",
-            "name": f"Co {i}",
-            "country": "DE",
-        }
-        for i in range(3)
-    }
-    total = load_listings(driver, entities)
-    assert total == 3
-
-
-def test_listings_short_lei_uses_name_fallback():
-    """Entities with non-standard LEIs fall back to name-based gmr_id."""
-    driver, session = _mock_driver()
-    entities = {
-        "BAD.UA": {
-            "lei": "12345",
-            "ticker": "BAD.UA",
-            "exchange": "PFTS",
-            "name": "Bad Corp",
-            "country": "UA",
+        "GB1": {
+            "lei": "724500973ODKK3IFQ44A",
+            "name": "Brit Plc", "country": "GB",
+            "ticker": "BRIT", "exchange": "LSE",
         },
     }
-    total = load_listings(driver, entities)
-    assert total == 1
-    batch = session.run.call_args_list[1].kwargs["batch"]
-    assert batch[0]["lei"] is None  # short LEI not stored
+    emit_listings(emit, entities)
+    listing_payload = emit.upsert.call_args_list[1].kwargs["payload"]
+    assert listing_payload["currency"] == COUNTRY_CURRENCY["GB"] == "GBP"
 
 
-def test_listings_derives_currency_from_country():
-    """Currency is derived from the country code."""
-    assert COUNTRY_CURRENCY["NL"] == "EUR"
-    assert COUNTRY_CURRENCY["GB"] == "GBP"
-    assert COUNTRY_CURRENCY["SE"] == "SEK"
+def test_emit_listings_falls_back_to_name_country_when_no_lei():
+    """No-LEI entries get a deterministic gmr_id from name+country
+    so re-runs land on the same Company."""
+    _log, emit = _mock_log()
+    entities = {
+        "X": {"lei": "", "name": "No-LEI Co", "country": "FR"},
+    }
+    emit_listings(emit, entities)
+    payload = emit.upsert.call_args.kwargs["payload"]
+    assert payload["country"] == "FR"
+    assert "lei" not in payload  # builder drops Nones
+    assert payload["gmr_id"]
 
 
-# ── load_financials ──────────────────────────────────────────────────
+# ── emit_financials ──────────────────────────────────────────────────
 
-_LEI = "7Z46009YA1DNEUQBVR42"
-_GMR_ID = "00000000-1111-5111-9111-000000000001"
-
-
-def test_financials_reads_summary_and_writes_filings(tmp_path):
-    """Filings from summary JSON become Virtuoso-bound records
-    keyed by the LEI→gmr_id index pulled from Neo4j first."""
-    driver, _ = _mock_driver(lei_to_gmr={_LEI: _GMR_ID})
-    writer = _mock_writer()
-    summaries = tmp_path / "summaries"
-    summaries.mkdir()
-    (summaries / "ADYEN.AS.json").write_text(json.dumps({
-        "lei": _LEI,
-        "ticker": "ADYEN.AS",
+def _make_summaries(tmp_path: Path, *, lei: str, years: list[int]) -> Path:
+    summaries_dir = tmp_path / "summaries"
+    summaries_dir.mkdir()
+    doc = {
+        "lei": lei,
         "filings": [
-            {"year": 2024, "revenue": 2225601000.0, "net_income": 925163000.0,
-             "filing_date": "2024-12-31"},
-            {"year": 2023, "revenue": 1863406000.0, "net_income": 698322000.0,
-             "filing_date": "2023-12-31"},
+            {"year": y, "revenue": 1000 * y, "net_income": 50 * y}
+            for y in years
         ],
-    }))
-
-    written = load_financials(driver, summaries, writer)
-    assert written == 2
-    assert writer.write.called
-    # gmr_id was resolved from the index, not echoed from the file.
-    assert writer._captured[0]["gmr_id"] == _GMR_ID
-    assert writer._captured[0]["year"] == 2024
-    assert writer._captured[0]["revenue"] == 2225601000.0
-    assert writer._captured[0]["filing_date"] == "2024-12-31"
+    }
+    (summaries_dir / f"{lei}.json").write_text(json.dumps(doc))
+    return summaries_dir
 
 
-def test_financials_skips_filing_without_year(tmp_path):
-    """Filings missing a year field are skipped."""
-    driver, _ = _mock_driver(lei_to_gmr={_LEI: _GMR_ID})
-    writer = _mock_writer()
-    summaries = tmp_path / "summaries"
-    summaries.mkdir()
-    (summaries / "BAD.XX.json").write_text(json.dumps({
-        "lei": _LEI,
-        "ticker": "BAD.XX",
-        "filings": [{"revenue": 100}],
-    }))
-
-    written = load_financials(driver, summaries, writer)
-    assert written == 0
-    # Empty batch — writer never called.
-    assert writer.write.call_count == 0
+def test_emit_financials_brackets_with_begin_and_end(tmp_path: Path):
+    summaries_dir = _make_summaries(
+        tmp_path, lei="724500973ODKK3IFQ447", years=[2022, 2023],
+    )
+    _log, emit = _mock_log()
+    n = emit_financials(emit, summaries_dir)
+    assert n == 2
+    assert emit.control.call_count == 2
+    begin = emit.control.call_args_list[0]
+    end = emit.control.call_args_list[1]
+    assert begin.args[0] == "BeginGraphReplace"
+    assert end.args[0] == "EndGraphReplace"
+    assert begin.args[1]["graph_iri"] == ESEF_FINANCIALS_GRAPH
 
 
-def test_financials_handles_missing_dir(tmp_path):
-    """Returns 0 when summaries directory doesn't exist."""
-    driver, _ = _mock_driver(lei_to_gmr={})
-    writer = _mock_writer()
-    total = load_financials(driver, tmp_path / "nonexistent", writer)
-    assert total == 0
+def test_emit_financials_brackets_even_when_dir_missing(tmp_path: Path):
+    """Missing summaries dir still emits Begin/End so the ESEF graph
+    becomes empty rather than retaining stale Filings."""
+    _log, emit = _mock_log()
+    n = emit_financials(emit, tmp_path / "does-not-exist")
+    assert n == 0
+    assert emit.control.call_count == 2
 
 
-def test_financials_skips_bad_json(tmp_path):
-    """Malformed JSON files are skipped without crashing."""
-    driver, _ = _mock_driver(lei_to_gmr={_LEI: _GMR_ID})
-    writer = _mock_writer()
-    summaries = tmp_path / "summaries"
-    summaries.mkdir()
-    (summaries / "BAD.XX.json").write_text("not json{{{")
+def test_emit_financials_skips_summary_with_invalid_lei(tmp_path: Path):
+    summaries_dir = tmp_path / "summaries"
+    summaries_dir.mkdir()
+    (summaries_dir / "broken.json").write_text(
+        json.dumps({"lei": "TOOSHORT", "filings": [{"year": 2023, "revenue": 1}]})
+    )
+    _log, emit = _mock_log()
+    n = emit_financials(emit, summaries_dir)
+    assert n == 0
+    # Bracket still emits.
+    assert emit.control.call_count == 2
 
-    written = load_financials(driver, summaries, writer)
-    assert written == 0
-    assert writer.write.call_count == 0
+
+def test_filing_iri_deterministic():
+    a = _filing_uuid("abc-123", 2023, "esef")
+    b = _filing_uuid("abc-123", 2023, "esef")
+    assert a == b
 
 
-def test_financials_skips_company_without_resolvable_lei(tmp_path):
-    """If the LEI isn't in the Neo4j Company index, the filings
-    for that company are dropped — no orphan Filings."""
-    driver, _ = _mock_driver(lei_to_gmr={})  # empty index
-    writer = _mock_writer()
-    summaries = tmp_path / "summaries"
-    summaries.mkdir()
-    (summaries / "X.json").write_text(json.dumps({
-        "lei": _LEI,
-        "filings": [{"year": 2024, "revenue": 100}],
-    }))
+# ── load_eu_listings (end-to-end) ────────────────────────────────────
 
-    written = load_financials(driver, summaries, writer)
-    assert written == 0
+def test_load_eu_listings_one_batch_for_listings_and_filings(tmp_path: Path):
+    """Listings and filings share a single log.batch() context — one
+    event-log transaction, all-or-nothing."""
+    esef_dir = tmp_path / "esef"
+    esef_dir.mkdir()
+    entities = {
+        "X": {
+            "lei": "724500973ODKK3IFQ447",
+            "name": "Adyen N.V.", "country": "NL",
+            "ticker": "ADYEN", "exchange": "AMS",
+        },
+    }
+    (esef_dir / "eu_entities.json").write_text(json.dumps(entities))
+    _make_summaries(esef_dir, lei="724500973ODKK3IFQ447", years=[2023])
+
+    log, emit = _mock_log()
+    res = load_eu_listings(log, esef_dir)
+    assert res == {"companies": 1, "listings": 1, "filings": 1}
+    # Exactly one batch context for the entire run.
+    assert log.batch.call_count == 1
+    # Begin + End around the financials block.
+    assert emit.control.call_count == 2

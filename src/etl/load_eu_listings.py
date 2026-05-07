@@ -1,22 +1,19 @@
 """
-EU Listings → Neo4j   |   ESEF Financials → Virtuoso
-======================================================
-Reads eu_entities.json and summaries/*.json from the ESEF data
-directory.
+EU Listings + ESEF Financials → events.entity_events
+=========================================================
+Reads ``eu_entities.json`` and ``summaries/*.json`` from the ESEF
+data directory and emits events into the canonical log:
 
-  * Listings still live in Neo4j (Companies + Listings haven't
-    migrated yet — that's Phase 4 work). load_listings creates
-    the Listing nodes and LISTED_AS edges as before.
+  * ``eu_entities.json`` → UpsertCompany (incremental upsert) plus
+    UpsertListing per ticker (LISTED_AS edge materialised by sinks).
+  * ``summaries/*.json`` → BeginGraphReplace + UpsertFiling × N +
+    EndGraphReplace against the ESEF financials graph.
 
-  * Financial filings move to Virtuoso. load_financials resolves
-    each summary's LEI → gmr_id against Neo4j Company nodes,
-    then emits fontem:Filing triples via RdfFilingsWriter into
-    the ``http://data.fontem.eu/graph/financials/esef`` named
-    graph.
+The two phases share one event-log batch so the run is atomic in
+the log.
 
 Usage:
-    python -m src.etl.load_eu_listings --esef-dir /esef-data/esef \\
-        --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
+    python -m src.etl.load_eu_listings --esef-dir /esef-data/esef
 """
 from __future__ import annotations
 
@@ -24,18 +21,19 @@ import argparse
 import json
 import logging
 import os
-import sys
 import time
+import uuid
 from pathlib import Path
 
-from neo4j import GraphDatabase
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 from . import gmr_id
-from .rdf_filings_writer import RdfFilingsWriter
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 500
+ESEF_FINANCIALS_GRAPH = "http://data.fontem.eu/graph/financials/esef"
+SOURCE = "esef"
 
 # Simplified country → currency mapping for major EU/EEA markets
 COUNTRY_CURRENCY = {
@@ -50,81 +48,6 @@ COUNTRY_CURRENCY = {
     "LI": "CHF",
 }
 
-
-def load_listings(driver, entities: dict):
-    """Create Company nodes (always) and Listing nodes (only when ticker is not null)."""
-    company_query = """
-    UNWIND $batch AS row
-    MERGE (c:Company {gmr_id: row.gmr_id})
-    ON CREATE SET c.lei = row.lei, c.name = row.name,
-                  c.country = row.country, c.active = true
-    """
-    listing_query = """
-    UNWIND $batch AS row
-    MATCH (c:Company {gmr_id: row.gmr_id})
-    MERGE (l:Listing {ticker: row.ticker})
-    SET l.exchange = row.exchange,
-        l.currency = row.currency,
-        l.active   = true
-    MERGE (c)-[:LISTED_AS]->(l)
-    """
-    company_batch = []
-    listing_batch = []
-    total_companies = 0
-    total_listings = 0
-
-    with driver.session() as session:
-        session.run(
-            "CREATE CONSTRAINT listing_ticker IF NOT EXISTS "
-            "FOR (l:Listing) REQUIRE l.ticker IS UNIQUE"
-        )
-        for _key, meta in entities.items():
-            lei = meta.get("lei", "")
-            gid = gmr_id.from_lei(lei) if len(lei) == 20 else (
-                gmr_id.from_name(
-                    meta.get("country", "XX"),
-                    meta.get("name", _key),
-                )
-            )
-            company_batch.append({
-                "gmr_id": gid,
-                "lei": lei if len(lei) == 20 else None,
-                "name": meta.get("name", ""),
-                "country": meta.get("country", ""),
-            })
-
-            ticker = meta.get("ticker")
-            if ticker is not None:
-                listing_batch.append({
-                    "gmr_id": gid,
-                    "ticker": ticker,
-                    "exchange": meta.get("exchange", ""),
-                    "currency": COUNTRY_CURRENCY.get(
-                        meta.get("country", ""), "EUR"
-                    ),
-                })
-
-            if len(company_batch) >= BATCH_SIZE:
-                session.run(company_query, batch=company_batch)
-                total_companies += len(company_batch)
-                company_batch = []
-            if len(listing_batch) >= BATCH_SIZE:
-                session.run(listing_query, batch=listing_batch)
-                total_listings += len(listing_batch)
-                listing_batch = []
-
-        if company_batch:
-            session.run(company_query, batch=company_batch)
-            total_companies += len(company_batch)
-        if listing_batch:
-            session.run(listing_query, batch=listing_batch)
-            total_listings += len(listing_batch)
-
-    logger.info("Companies: %d created/updated, Listings: %d (skipped %d without ticker)",
-                total_companies, total_listings, total_companies - total_listings)
-    return total_companies
-
-
 _FILING_FIELDS = (
     "filing_date", "revenue", "gross_profit",
     "operating_income", "net_income", "eps",
@@ -138,45 +61,89 @@ _FILING_FIELDS = (
 )
 
 
-def _build_lei_to_gmr_index(driver, leis: list[str]) -> dict[str, str]:
-    """Resolve LEI → gmr_id for the LEIs we actually care about.
-
-    The previous "full Company scan" form blew the server-side
-    transaction timeout against a 3.5M-row Company table. Pass
-    in just the LEIs that have summaries on disk and the
-    `c.lei IN $leis` predicate uses the existing
-    company_lei index for an indexed lookup.
-    """
-    if not leis:
-        return {}
-    out: dict[str, str] = {}
-    with driver.session() as session:
-        for row in session.run(
-            "MATCH (c:Company) WHERE c.lei IN $leis "
-            "RETURN c.lei AS lei, c.gmr_id AS gmr_id",
-            leis=leis,
-        ):
-            out[row["lei"]] = row["gmr_id"]
-    return out
+def _gmr_id_for_entity(meta: dict, fallback_key: str) -> str:
+    """LEI → gmr_id when present, else name+country fallback.
+    Same rule the Neo4j-era loader used so the gmr_id is stable
+    across re-runs."""
+    lei = meta.get("lei", "")
+    if len(lei) == 20:
+        return str(gmr_id.from_lei(lei))
+    return str(gmr_id.from_name(
+        meta.get("country", "XX"),
+        meta.get("name", fallback_key),
+    ))
 
 
-def load_financials(driver, summaries_dir: Path, writer: RdfFilingsWriter):
-    """Read summary JSON files, resolve LEI→gmr_id from Neo4j,
-    and PUT a fontem:Filing batch to the ESEF named graph.
+def emit_listings(emit, entities: dict) -> tuple[int, int]:
+    """Emit UpsertCompany for every entity and UpsertListing for
+    every entity that carries a ticker. Returns (companies, listings)."""
+    companies = 0
+    listings = 0
+    for key, meta in entities.items():
+        gid = _gmr_id_for_entity(meta, key)
+        lei = meta.get("lei", "")
+        emit.upsert(
+            "UpsertCompany",
+            iri=f"http://data.fontem.eu/id/Company/{gid}",
+            domain="company",
+            payload=builders.upsert_company(
+                gmr_id=gid,
+                lei=lei if len(lei) == 20 else None,
+                name=meta.get("name") or None,
+                country=meta.get("country") or None,
+                active=True,
+            ),
+        )
+        companies += 1
 
-    Matches Companies by LEI (the same key the Neo4j-era loader
-    used) so financial data is preserved for entities without a
-    resolved Listing ticker.
+        ticker = meta.get("ticker")
+        if ticker is None:
+            continue
+        emit.upsert(
+            "UpsertListing",
+            iri=f"http://data.fontem.eu/id/Listing/{ticker}",
+            domain="listing",
+            payload=builders.upsert_listing(
+                ticker=str(ticker),
+                company_gmr_id=gid,
+                exchange=meta.get("exchange") or None,
+                currency=COUNTRY_CURRENCY.get(meta.get("country") or "", "EUR"),
+                active=True,
+            ),
+        )
+        listings += 1
+    return companies, listings
+
+
+def emit_financials(emit, summaries_dir: Path) -> int:
+    """Emit Begin/End-bracketed UpsertFiling events against the ESEF
+    graph. Each summary file may contribute multiple Filing events
+    (one per fiscal year). Returns total filing events emitted.
+
+    The bracket gives PUT-replace semantics: the ESEF financials
+    graph is rebuilt to exactly the events between Begin and End.
     """
     if not summaries_dir.exists():
         logger.warning("Summaries dir not found: %s", summaries_dir)
+        emit.control(
+            "BeginGraphReplace",
+            builders.begin_graph_replace(
+                graph_iri=ESEF_FINANCIALS_GRAPH,
+                label="FinancialYear",
+                domain="financials/esef",
+            ),
+        )
+        emit.control(
+            "EndGraphReplace",
+            builders.end_graph_replace(
+                graph_iri=ESEF_FINANCIALS_GRAPH,
+                domain="financials/esef",
+            ),
+        )
         return 0
 
-    # Prefetch the LEI list from disk so the Neo4j lookup is
-    # bounded — full Company scans timed out in prod.
     summaries = sorted(summaries_dir.glob("*.json"))
-    needed_leis: list[str] = []
-    docs: list[tuple[Path, dict]] = []
+    docs: list[dict] = []
     for path in summaries:
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
@@ -186,85 +153,112 @@ def load_financials(driver, summaries_dir: Path, writer: RdfFilingsWriter):
         lei = doc.get("lei")
         if not lei or len(lei) != 20:
             continue
-        needed_leis.append(lei)
-        docs.append((path, doc))
+        docs.append(doc)
 
-    lei_to_gmr = _build_lei_to_gmr_index(driver, list(set(needed_leis)))
-    logger.info(
-        "Built LEI→gmr_id index for %d distinct LEIs (resolved %d)",
-        len(set(needed_leis)), len(lei_to_gmr),
+    emit.control(
+        "BeginGraphReplace",
+        builders.begin_graph_replace(
+            graph_iri=ESEF_FINANCIALS_GRAPH,
+            label="FinancialYear",
+            domain="financials/esef",
+        ),
     )
 
-    all_records: list[dict] = []
+    filings = 0
     files_processed = 0
-    skipped_no_lei = len(summaries) - len(docs)
-    skipped_no_company = 0
-
-    for path, doc in docs:
-        lei = doc["lei"]
-        company_gmr = lei_to_gmr.get(lei)
-        if not company_gmr:
-            skipped_no_company += 1
-            continue
-
+    for doc in docs:
+        company_gmr = str(gmr_id.from_lei(doc["lei"]))
         for filing in doc.get("filings", []):
             year = filing.get("year")
             if year is None:
                 continue
-            rec = {"gmr_id": company_gmr, "year": int(year)}
-            for key in _FILING_FIELDS:
-                if (val := filing.get(key)) is not None:
-                    rec[key] = val
-            all_records.append(rec)
-
+            year_int = int(year)
+            extras = {
+                k: filing.get(k) for k in _FILING_FIELDS
+                if filing.get(k) is not None
+            }
+            emit.upsert(
+                "UpsertFiling",
+                iri=(
+                    f"http://data.fontem.eu/id/Filing/"
+                    f"{_filing_uuid(company_gmr, year_int, SOURCE)}"
+                ),
+                domain="financials/esef",
+                payload=builders.upsert_filing(
+                    gmr_id=company_gmr,
+                    year=year_int,
+                    source=SOURCE,
+                    **extras,
+                ),
+            )
+            filings += 1
         files_processed += 1
         if files_processed % 1000 == 0:
             logger.info(
                 "  %d files, %d filings",
-                files_processed, len(all_records),
+                files_processed, filings,
             )
 
-    if not all_records:
-        logger.warning("no ESEF records found; skipping write")
-        return 0
-
-    res = writer.write(all_records)
-    logger.info(
-        "ESEF: wrote %d filings (%d triples) from %d files "
-        "(skipped %d without LEI, %d without resolvable Company)",
-        res.written, res.triples_pushed, files_processed,
-        skipped_no_lei, skipped_no_company,
+    emit.control(
+        "EndGraphReplace",
+        builders.end_graph_replace(
+            graph_iri=ESEF_FINANCIALS_GRAPH,
+            domain="financials/esef",
+        ),
     )
-    return res.written
+    logger.info(
+        "ESEF: %d filings emitted from %d files (%d entities had "
+        "no LEI / unparseable summary)",
+        filings, files_processed, len(summaries) - len(docs),
+    )
+    return filings
+
+
+def _filing_uuid(gmr_id_str: str, year: int, source: str) -> uuid.UUID:
+    """Deterministic Filing IRI key — must match the sink renderers
+    so re-runs land on the same IRI."""
+    seed = f"filing:{gmr_id_str}:{year}:{source}"
+    return uuid.uuid5(
+        uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8"), seed,
+    )
+
+
+def load_eu_listings(log: EventLog, esef_dir: Path) -> dict:
+    """Single batch covering listings + ESEF financials."""
+    entities_path = esef_dir / "eu_entities.json"
+    if not entities_path.exists():
+        logger.error("eu_entities.json not found at %s", entities_path)
+        return {"companies": 0, "listings": 0, "filings": 0}
+
+    entities = json.loads(entities_path.read_text(encoding="utf-8"))
+    logger.info("Loaded %d EU entities from %s", len(entities), entities_path)
+
+    summaries_dir = esef_dir / "summaries"
+    batch_id = uuid.uuid4()
+    t0 = time.time()
+
+    with log.batch(batch_id, producer="load_eu_listings") as emit:
+        companies, listings = emit_listings(emit, entities)
+        filings = emit_financials(emit, summaries_dir)
+
+    elapsed = time.time() - t0
+    logger.info(
+        "Done: %d companies, %d listings, %d filings in %.1fs",
+        companies, listings, filings, elapsed,
+    )
+    return {
+        "companies": companies, "listings": listings, "filings": filings,
+    }
 
 
 def main(argv=None):
-    """CLI entry point.
-
-    Listings continue to land in Neo4j; financials land in
-    Virtuoso. Both stores have to be reachable for a full run.
-    """
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load EU listings (Neo4j) + ESEF financials (Virtuoso)",
+        description="Emit EU listings + ESEF financials events",
     )
     parser.add_argument(
         "--esef-dir",
         default=os.environ.get("GMR_ESEF_DATA_DIR", "/esef-data/esef"),
-    )
-    parser.add_argument("--neo4j-uri", default="bolt://neo4j:7687")
-    parser.add_argument("--neo4j-user", default="neo4j")
-    parser.add_argument("--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""))
-    parser.add_argument(
-        "--virtuoso-sparql-endpoint",
-        default=os.environ.get("VIRTUOSO_SPARQL_ENDPOINT", ""),
-    )
-    parser.add_argument(
-        "--virtuoso-dba-user",
-        default=os.environ.get("VIRTUOSO_DBA_USER", "dba"),
-    )
-    parser.add_argument(
-        "--virtuoso-dba-password",
-        default=os.environ.get("VIRTUOSO_DBA_PASSWORD", ""),
     )
     args = parser.parse_args(argv)
 
@@ -273,40 +267,11 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    if not args.virtuoso_sparql_endpoint:
-        logger.error(
-            "VIRTUOSO_SPARQL_ENDPOINT must be set; ESEF financials "
-            "now write to Virtuoso (FinancialYear cutover)."
-        )
-        sys.exit(2)
-
-    esef_dir = Path(args.esef_dir)
-    entities_path = esef_dir / "eu_entities.json"
-    if not entities_path.exists():
-        logger.error("eu_entities.json not found at %s", entities_path)
-        return
-
-    entities = json.loads(entities_path.read_text(encoding="utf-8"))
-    logger.info("Loaded %d EU entities from %s", len(entities), entities_path)
-
-    writer = RdfFilingsWriter(
-        source="esef",
-        sparql_endpoint=args.virtuoso_sparql_endpoint,
-        dba_user=args.virtuoso_dba_user,
-        dba_password=args.virtuoso_dba_password,
-    )
-    driver = GraphDatabase.driver(
-        args.neo4j_uri,
-        auth=(args.neo4j_user, args.neo4j_password),
-    )
-    t0 = time.time()
+    log = EventLog.from_env()
     try:
-        load_listings(driver, entities)
-        load_financials(driver, esef_dir / "summaries", writer)
+        load_eu_listings(log, Path(args.esef_dir))
     finally:
-        driver.close()
-
-    logger.info("EU load complete in %.1fs", time.time() - t0)
+        log.close()
 
 
 if __name__ == "__main__":
