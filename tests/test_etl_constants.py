@@ -1,22 +1,17 @@
 """
 Tests for ETL module constants — kills mutants on configuration values.
 
-These tests verify that critical constants (batch sizes, exchange rates,
-taxonomy codes, URLs) haven't been accidentally mutated.
+These tests verify that critical constants (URLs, taxonomy codes)
+haven't been accidentally mutated. Per-loader batch sizes were
+removed when the loaders moved to the event log; the gmr-events
+EventLog handles transaction grouping internally.
 """
 # pylint: disable=missing-function-docstring,missing-class-docstring
-from src.etl.load_ted_contracts import BATCH_SIZE as TED_BATCH
 from src.etl.load_eu_lobbying import (
     BATCH_SIZE as LOBBY_BATCH, TR_XML_URL,
     CONSTRAINT_CYPHER, MERGE_LOBBYIST, MERGE_REPRESENTS,
 )
 from src.etl.load_cpv import CPV_DIVISIONS
-from src.etl.load_us_companies import BATCH_SIZE as US_BATCH
-
-
-class TestTedContractConstants:
-    def test_batch_size(self):
-        assert TED_BATCH == 500
 
 
 class TestLobbyingConstants:
@@ -65,6 +60,3 @@ class TestCPVDivisions:
         assert len(CPV_DIVISIONS) >= 40
 
 
-class TestUSCompaniesConstants:
-    def test_batch_size(self):
-        assert US_BATCH == 2000
