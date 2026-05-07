@@ -1,9 +1,16 @@
 """
-TED Contract Awards → Neo4j
-=============================
+TED Contract Awards → events.entity_events
+=============================================
 Downloads TED monthly/daily packages, parses eForms XML via the
-eforms-parser library, matches companies, and MERGEs Contract +
-Authority + Company nodes into Neo4j.
+eforms-parser library, matches companies via the TedMatcher (which
+reads existing Companies from Neo4j to find a stable gmr_id), and
+emits ``UpsertCompany`` + ``UpsertAuthority`` + ``UpsertContract``
+events into the canonical event log.
+
+The CATEGORIZED_AS → CPV edge is dropped from this loader for now;
+``cpv`` rides along as a property on the Contract event. A follow-up
+introduces an UpsertTaxonomyCode schema and the relationship event
+once the generic schemas land.
 
 Usage:
     python -m src.etl.load_ted_contracts --year 2024 --month 6
@@ -17,11 +24,14 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import date as _date, datetime
 from decimal import Decimal as _Decimal
 from pathlib import Path
 
 import httpx
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 from neo4j import GraphDatabase
 
 from eforms.filters import awards_only
@@ -31,8 +41,6 @@ from ..services.currency import CurrencyService
 from .ted_matcher import TedMatcher
 
 logger = logging.getLogger(__name__)
-
-BATCH_SIZE = 500
 
 # Path to currency data directory (per-currency JSON files)
 _DEFAULT_CURRENCY_DIR = os.environ.get(
@@ -80,81 +88,55 @@ def _download_monthly(year: int, month: int, dest: Path) -> Path:
 
 def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     driver,
+    log: EventLog,
     archive_path: Path,
     currency_svc: CurrencyService | None = None,
 ):
-    """Parse a TED archive and load contracts into Neo4j."""
-    merge_contract = """
-    UNWIND $batch AS row
-    MERGE (co:Company {gmr_id: row.company_gmr_id})
-    ON CREATE SET co.name    = row.company_name,
-                  co.country = row.company_country,
-                  co.vat     = row.company_vat,
-                  co.active  = true
-    MERGE (auth:Authority {authority_id: row.authority_id})
-    ON CREATE SET auth.name    = row.authority_name,
-                  auth.country = row.authority_country
-    MERGE (ct:Contract {ted_notice_id: row.notice_id})
-    SET ct.bt701              = row.bt701,
-        ct.ted_url            = row.ted_url,
-        ct.title              = row.title,
-        ct.description        = row.description,
-        ct.value_original     = row.value_original,
-        ct.value_original_str = row.value_original_str,
-        ct.value_eur          = row.value_eur,
-        ct.value_eur_str      = row.value_eur_str,
-        ct.value_currency     = row.currency,
-        ct.value_undisclosed  = row.value_undisclosed,
-        ct.currency_inferred  = row.currency_inferred,
-        ct.cpv_main           = row.cpv,
-        ct.procedure_type     = row.procedure_type,
-        ct.notice_type        = row.notice_type,
-        ct.publication_date   = row.pub_date,
-        ct.award_date         = row.award_date,
-        ct.award_date_source  = row.award_date_source,
-        ct.country            = row.authority_country,
-        ct.loaded_at          = row.loaded_at
-    MERGE (auth)-[:AWARDED]->(ct)
-    MERGE (ct)-[:AWARDED_TO]->(co)
-    WITH ct, row
-    WHERE row.cpv IS NOT NULL
-    MERGE (cpv:CPV {code: row.cpv})
-    MERGE (ct)-[:CATEGORIZED_AS]->(cpv)
-    """
+    """Parse a TED archive and emit Authority/Contract/Company events.
 
-    batch = []
+    The Neo4j driver is used READ-ONLY by ``TedMatcher`` to resolve
+    each contractor to a stable gmr_id; the actual writes go through
+    the event log."""
+    batch_id = uuid.uuid4()
     total = 0
     t0 = time.time()
     loaded_at = datetime.now().astimezone().isoformat()
-    touched_companies: set[str] = set()
-    touched_authorities: set[str] = set()
 
-    with driver.session() as session:
-        # Create constraints
-        session.run(
-            "CREATE CONSTRAINT contract_notice_id IF NOT EXISTS "
-            "FOR (ct:Contract) REQUIRE ct.ted_notice_id IS UNIQUE"
-        )
-        session.run(
-            "CREATE CONSTRAINT authority_id IF NOT EXISTS "
-            "FOR (a:Authority) REQUIRE a.authority_id IS UNIQUE"
-        )
-
+    with driver.session() as session, log.batch(
+        batch_id, producer="load_ted_contracts",
+    ) as emit:
         matcher = TedMatcher(session)
+        seen_authorities: set[str] = set()
+        seen_companies: set[str] = set()
 
-        for notice in awards_only(
-            stream_notices(archive_path)
-        ):
+        for notice in awards_only(stream_notices(archive_path)):
             buyer = notice.buyer()
             if not buyer:
                 continue
-
-            # eforms-parser 0.2.0 returns legal_id as LegalIdentifier(value, scheme_name).
-            # The matcher expects a bare string — pass the value through.
-            buyer_legal_value = buyer.legal_id.value if buyer.legal_id else None
+            buyer_legal_value = (
+                buyer.legal_id.value if buyer.legal_id else None
+            )
             authority_id = matcher.match_authority(
                 buyer.name, buyer.country, buyer_legal_value,
             )
+
+            # Emit the Authority once per run, even if it appears on
+            # many notices (the sink would MERGE either way, but this
+            # keeps the event log compact and replay-faster).
+            if authority_id not in seen_authorities:
+                emit.upsert(
+                    "UpsertAuthority",
+                    iri=f"http://data.fontem.eu/id/Authority/{authority_id}",
+                    domain="authority",
+                    payload=builders.upsert_authority(
+                        authority_id=authority_id,
+                        name=buyer.name,
+                        country=(buyer.country or "").upper() or None,
+                        authority_type="contracting",
+                        national_id=buyer_legal_value,
+                    ),
+                )
+                seen_authorities.add(authority_id)
 
             for award in notice.awards:
                 contractor = notice.organizations.get(
@@ -163,16 +145,9 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                 if not contractor:
                     continue
 
-                # eforms-parser 0.2.0 returns `legal_id` as a LegalIdentifier
-                # (value + scheme_name). Route based on scheme_name when the
-                # publisher sets one; fall back to canon_vat validation when
-                # scheme_name is absent (most French TED notices).
-                #
-                # Only `scheme_name == "VAT"` (or salvage-valid canonical) ends
-                # up in `Company.vat`. National IDs (SIREN, SIRET, etc.) are
-                # intentionally dropped here — we don't have a `siren` property
-                # yet. When we add one this is the place to route them.
-                from src.etl.identifiers import canon_vat
+                # eforms-parser 0.2.0 returns `legal_id` as a LegalIdentifier.
+                # Same VAT-routing logic as the pre-migration loader.
+                from src.etl.identifiers import canon_vat  # pylint: disable=import-outside-toplevel
 
                 raw_vat: str | None = None
                 if contractor.legal_id is not None:
@@ -181,11 +156,7 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                     if scheme == "VAT":
                         raw_vat = canon_vat(value)
                     elif scheme in ("NATIONAL", "EORI", ""):
-                        # schemeName missing or not-VAT — still try canon_vat
-                        # so publishers who stuff a VAT under a bad scheme
-                        # (happens) aren't lost.
                         raw_vat = canon_vat(value)
-                    # else: explicit non-VAT scheme, drop.
 
                 match = matcher.match_company(
                     contractor.name, contractor.country, raw_vat,
@@ -194,22 +165,20 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                 pub_num = notice.publication_number or notice.notice_id
                 declared_currency = award.currency or notice.currency
                 raw_value = award.value or notice.total_value
+                effective_date, _date_source = _coalesce_date(award, notice)
 
-                # Coalesce best available date
-                effective_date, date_source = _coalesce_date(award, notice)
-
-                # Parse value with sentinel detection
+                # Parse + currency-resolve via the currency service.
                 if currency_svc:
-                    parsed_value, was_sentinel = currency_svc.parse_value(raw_value)
+                    parsed_value, _was_sentinel = currency_svc.parse_value(
+                        raw_value,
+                    )
                 else:
                     parsed_value = (
-                        _Decimal(str(raw_value)) if raw_value is not None else None
+                        _Decimal(str(raw_value))
+                        if raw_value is not None else None
                     )
-                    was_sentinel = False
-
-                # Resolve currency: declared, then country fallback
-                currency_inferred = False
                 resolved_currency = None
+                value_eur_decimal = None
                 if currency_svc:
                     rate_date_str = effective_date or notice.issue_date
                     try:
@@ -219,110 +188,89 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                         )
                     except (ValueError, TypeError):
                         rate_date_obj = None
-                    resolved_currency, currency_inferred = currency_svc.resolve_currency(
+                    resolved_currency, _inferred = currency_svc.resolve_currency(
                         declared_currency,
                         country=(buyer.country or "").upper(),
                         on=rate_date_obj,
                     )
+                    if parsed_value is not None and resolved_currency:
+                        value_eur_decimal = currency_svc.to_eur(
+                            parsed_value, resolved_currency, rate_date_obj,
+                        )
                 else:
                     resolved_currency = declared_currency
 
-                # Convert to EUR
-                value_eur_decimal = None
-                if currency_svc and parsed_value is not None and resolved_currency:
-                    rate_date_str = effective_date or notice.issue_date
-                    try:
-                        rate_date_obj = (
-                            _date.fromisoformat(rate_date_str[:10])
-                            if rate_date_str else None
-                        )
-                    except (ValueError, TypeError):
-                        rate_date_obj = None
-                    value_eur_decimal = currency_svc.to_eur(
-                        parsed_value, resolved_currency, rate_date_obj,
-                    )
-
-                # Float for fast aggregation, string for lossless display
                 value_original_float = (
                     float(parsed_value) if parsed_value is not None else None
                 )
-                value_original_str = (
-                    str(parsed_value) if parsed_value is not None else None
-                )
                 value_eur_float = (
-                    float(value_eur_decimal) if value_eur_decimal is not None else None
-                )
-                value_eur_str = (
-                    str(value_eur_decimal) if value_eur_decimal is not None else None
+                    float(value_eur_decimal)
+                    if value_eur_decimal is not None else None
                 )
 
-                # Capture for the post-ETL consolidator hook
-                touched_companies.add(match.gmr_id)
-                touched_authorities.add(authority_id)
+                # Emit Company once per run too.
+                if match.gmr_id not in seen_companies:
+                    emit.upsert(
+                        "UpsertCompany",
+                        iri=f"http://data.fontem.eu/id/Company/{match.gmr_id}",
+                        domain="company",
+                        payload=builders.upsert_company(
+                            gmr_id=str(match.gmr_id),
+                            name=contractor.name or None,
+                            country=(contractor.country or "").upper() or None,
+                            vat=raw_vat,
+                            active=True,
+                        ),
+                    )
+                    seen_companies.add(match.gmr_id)
 
-                batch.append({
-                    "notice_id": pub_num,
-                    "bt701": notice.notice_id,
-                    "ted_url": (
-                        f"https://ted.europa.eu/en/notice/{pub_num}"
+                emit.upsert(
+                    "UpsertContract",
+                    iri=f"http://data.fontem.eu/id/Contract/{pub_num}",
+                    domain="contract",
+                    payload=builders.upsert_contract(
+                        ted_notice_id=pub_num,
+                        title=notice.title or None,
+                        authority_id=authority_id,
+                        company_gmr_id=str(match.gmr_id),
+                        publication_date=notice.issue_date or None,
+                        value_eur=value_eur_float,
+                        value_currency=resolved_currency,
+                        value_original=value_original_float,
+                        cpv=notice.cpv_main,
+                        nuts=getattr(notice, "place_nuts", None),
+                        language=getattr(notice, "language", None),
                     ),
-                    "title": notice.title or "",
-                    "description": notice.description,
-                    "value_original": value_original_float,
-                    "value_original_str": value_original_str,
-                    "value_eur": value_eur_float,
-                    "value_eur_str": value_eur_str,
-                    "currency": resolved_currency,
-                    "value_undisclosed": was_sentinel,
-                    "currency_inferred": currency_inferred,
-                    "cpv": notice.cpv_main,
-                    "procedure_type": notice.procedure_type,
-                    "notice_type": notice.notice_type,
-                    "pub_date": notice.issue_date,
-                    "award_date": effective_date,
-                    "award_date_source": date_source,
-                    "loaded_at": loaded_at,
-                    "company_gmr_id": match.gmr_id,
-                    "company_name": contractor.name,
-                    "company_country": contractor.country or "",
-                    "company_vat": raw_vat,
-                    "authority_id": authority_id,
-                    "authority_name": buyer.name,
-                    "authority_country": buyer.country or "",
-                })
-
-                if len(batch) >= BATCH_SIZE:
-                    session.run(merge_contract, batch=batch)
-                    total += len(batch)
-                    batch = []
+                )
+                total += 1
+                if total % 2000 == 0:
                     elapsed = time.time() - t0
                     rate = total / elapsed if elapsed else 0
-                    if total % 2000 < BATCH_SIZE:
-                        logger.info(
-                            "  %d contracts loaded (%.0f/s)", total, rate
-                        )
-
-        if batch:
-            session.run(merge_contract, batch=batch)
-            total += len(batch)
+                    logger.info(
+                        "  %d contracts emitted (%.0f/s)", total, rate,
+                    )
 
     elapsed = time.time() - t0
     logger.info(
-        "Done: %d contracts in %.1fs", total, elapsed,
+        "Done: %d contracts (%d authorities, %d companies) "
+        "in %.1fs (loaded_at=%s)",
+        total, len(seen_authorities), len(seen_companies),
+        elapsed, loaded_at,
     )
     logger.info("Match stats: %s", json.dumps(matcher.stats.summary()))
-    # Notify the consolidator about touched Company + Authority nodes.
-    from src.etl._hooks import notify_consolidator
-    notify_consolidator("Company", list(touched_companies))
-    notify_consolidator("Authority", list(touched_authorities))
-    return {"total": total, "elapsed_s": round(elapsed, 1),
-            "match_stats": matcher.stats.summary()}
+    return {
+        "total": total,
+        "authorities": len(seen_authorities),
+        "companies": len(seen_companies),
+        "elapsed_s": round(elapsed, 1),
+        "match_stats": matcher.stats.summary(),
+    }
 
 
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load TED contract awards into Neo4j",
+        description="Emit UpsertAuthority + UpsertContract events for TED awards",
     )
     parser.add_argument("--file", help="Path to a local TED archive")
     parser.add_argument("--year", type=int)
@@ -344,8 +292,6 @@ def main(argv=None):
         default=os.environ.get("CURRENCY_DATA_DIR", _DEFAULT_CURRENCY_DIR),
         help="Path to currency data directory (per-currency rate files)",
     )
-    # Legacy alias for backward compat
-    parser.add_argument("--rates-file", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -353,7 +299,6 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Load currency service
     currency_svc = None
     currency_dir = Path(args.currency_dir)
     if currency_dir.exists():
@@ -361,12 +306,13 @@ def main(argv=None):
         logger.info("CurrencyService loaded from %s", currency_dir)
     else:
         logger.warning(
-            "No currency data at %s — EUR conversion will be skipped", currency_dir,
+            "No currency data at %s — EUR conversion skipped", currency_dir,
         )
 
     driver = GraphDatabase.driver(
         args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password),
     )
+    log = EventLog.from_env()
 
     try:
         if args.file:
@@ -379,12 +325,16 @@ def main(argv=None):
             parser.error("Provide --file or --year + --month")
             return
 
-        # Load CPV first
+        # CPV bootstrap still happens via load_cpv (Neo4j-only for
+        # now; UpsertTaxonomyCode is a follow-up schema).
         from .load_cpv import load_cpv_divisions  # pylint: disable=import-outside-toplevel
         load_cpv_divisions(driver)
 
-        load_contracts(driver, archive, currency_svc=currency_svc)
+        load_contracts(
+            driver, log, archive, currency_svc=currency_svc,
+        )
     finally:
+        log.close()
         driver.close()
 
 
