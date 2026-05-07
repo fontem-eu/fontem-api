@@ -1,11 +1,11 @@
-"""Tests for the GLEIF XML parser and Neo4j loader."""
+"""Tests for the GLEIF XML parser and event-log loader."""
 import io
 from unittest.mock import MagicMock, patch
 from xml.etree.ElementTree import fromstring
 
 from src.etl.load_gleif import (
     _text,
-    load_into_neo4j,
+    emit_gleif,
     parse_gleif_xml,
     resolve_latest_url,
 )
@@ -117,7 +117,7 @@ def test_parse_missing_legal_form():
     """
     results = list(parse_gleif_xml(_make_xml(xml)))
     assert len(results) == 1
-    assert results[0]["legal_form"] == ""
+    assert results[0]["legal_form"] is None
 
 
 def test_parse_entity_legal_form_code():
@@ -152,59 +152,63 @@ def test_text_returns_none_for_missing():
     assert _text(el, "child") is None
 
 
-# ── load_into_neo4j ─────────────────────────────────────────────────
+# ── emit_gleif ──────────────────────────────────────────────────────
 
-def test_load_creates_constraint_and_merges():
-    """Loader creates a uniqueness constraint then MERGEs records."""
-    mock_driver = MagicMock()
-    mock_session = MagicMock()
-    mock_driver.session.return_value.__enter__ = MagicMock(
-        return_value=mock_session
-    )
-    mock_driver.session.return_value.__exit__ = MagicMock(
-        return_value=False
-    )
+def _mock_log():
+    log = MagicMock()
+    emit = MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    return log, emit
 
+
+def test_emit_gleif_one_event_per_record():
+    """One UpsertCompany event per LEI; LEI passed through verbatim."""
+    log, emit = _mock_log()
+    records = iter([
+        {"lei": "724500973ODKK3IFQ447", "name": "Adyen N.V.",
+         "country": "NL", "postal_code": "1077 ZX",
+         "legal_form": "N.V.", "active": True},
+        {"lei": "529900D69KFL8IAP8Q63", "name": "Code Corp",
+         "country": "DE", "postal_code": None,
+         "legal_form": "8888", "active": True},
+    ])
+    summary = emit_gleif(log, records)
+    assert summary["total"] == 2
+    assert emit.upsert.call_count == 2
+    assert all(c.args[0] == "UpsertCompany" for c in emit.upsert.call_args_list)
+    payloads = [c.kwargs["payload"] for c in emit.upsert.call_args_list]
+    assert payloads[0]["lei"] == "724500973ODKK3IFQ447"
+    assert payloads[0]["country"] == "NL"
+    assert payloads[0]["legal_form"] == "N.V."
+    # gmr_id is deterministic from LEI; we don't assert the exact value
+    # here (it's gmr_id.from_lei's contract) but it must be present.
+    assert "gmr_id" in payloads[0]
+
+
+def test_emit_gleif_no_bracket_for_incremental_load():
+    """GLEIF dump is multi-million records with overlap across other
+    sources; the loader must NOT bracket-replace the Company graph."""
+    log, emit = _mock_log()
     records = iter([
         {"lei": "724500973ODKK3IFQ447", "name": "Adyen",
-         "country": "NL", "postal_code": "1077 ZX", "legal_form": "N.V.", "active": True},
+         "country": "NL", "postal_code": None,
+         "legal_form": None, "active": True},
     ])
-
-    summary = load_into_neo4j(mock_driver, records, batch_size=100)
-
-    assert summary["total"] == 1
-    # First call: CREATE CONSTRAINT, second: UNWIND MERGE
-    calls = mock_session.run.call_args_list
-    assert "CONSTRAINT" in calls[0].args[0]
-    assert "MERGE" in calls[1].args[0]
+    emit_gleif(log, records)
+    emit.control.assert_not_called()
 
 
-def test_load_batches_correctly():
-    """Five records with batch_size=2 yields three MERGE calls."""
-    mock_driver = MagicMock()
-    mock_session = MagicMock()
-    mock_driver.session.return_value.__enter__ = MagicMock(
-        return_value=mock_session
-    )
-    mock_driver.session.return_value.__exit__ = MagicMock(
-        return_value=False
-    )
-
-    # 5 records with batch_size=2 → 3 batches (2+2+1)
+def test_emit_gleif_active_status_preserved():
+    log, emit = _mock_log()
     records = iter([
-        {"lei": f"{'A' * 18}{i:02d}", "name": f"Co{i}",
-         "country": "XX", "postal_code": "", "legal_form": "", "active": True}
-        for i in range(5)
+        {"lei": "213800ZL2PEC4C6UOQ53", "name": "Defunct Ltd",
+         "country": "GB", "postal_code": None,
+         "legal_form": None, "active": False},
     ])
-
-    summary = load_into_neo4j(mock_driver, records, batch_size=2)
-    assert summary["total"] == 5
-    # 1 constraint call + 3 batch calls
-    merge_calls = [
-        c for c in mock_session.run.call_args_list
-        if "MERGE" in c.args[0]
-    ]
-    assert len(merge_calls) == 3
+    emit_gleif(log, records)
+    payload = emit.upsert.call_args.kwargs["payload"]
+    assert payload["active"] is False
 
 
 # ── resolve_latest_url ───────────────────────────────────────────────

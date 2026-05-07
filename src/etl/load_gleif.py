@@ -1,12 +1,18 @@
 """
-GLEIF Full Dump → Neo4j Company Loader
-=======================================
-Downloads (or reads a local copy of) the GLEIF Level 1 concatenated
-ZIP, streams the XML with iterparse, and MERGEs Company nodes into
-Neo4j.
+GLEIF Full Dump → events.entity_events
+=========================================
+Downloads (or reads a local copy of) the GLEIF Level 1
+concatenated ZIP, streams the XML with iterparse, and emits
+``UpsertCompany`` events for each LEI record.
+
+Incremental MERGE-style — no Begin/EndGraphReplace bracket. The
+GLEIF dump is multi-million records; bulk-replacing the Company
+graph would wipe entries from US listings, sanctions, etc. The
+sinks treat each event as MERGE-by-gmr_id, so re-runs are
+idempotent.
 
 Usage:
-    python -m src.etl.load_gleif --neo4j-uri bolt://localhost:7687
+    python -m src.etl.load_gleif
     python -m src.etl.load_gleif --file /tmp/gleif-lei2.zip
 """
 from __future__ import annotations
@@ -14,14 +20,15 @@ from __future__ import annotations
 import argparse
 import io
 import logging
-import os
 import sys
 import time
+import uuid
 import zipfile
 from xml.etree.ElementTree import iterparse
 
 import httpx
-from neo4j import GraphDatabase
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 from . import gmr_id
 
@@ -29,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 GLEIF_API = "https://leidata.gleif.org/api/v1/concatenated-files/lei2"
 NS = "http://www.gleif.org/data/schema/leidata/2016"
-BATCH_SIZE = 2000
 
 # XPath-style tag helpers using the GLEIF namespace
 _t = f"{{{NS}}}"
@@ -75,13 +81,12 @@ def download_zip(url: str) -> io.BytesIO:
 
 
 def parse_gleif_xml(xml_stream):
-    """
-    Streaming parser for LEI-CDF v3.1 XML.
+    """Streaming parser for LEI-CDF v3.1 XML.
 
     Yields dicts with keys: lei, name, country, postal_code, legal_form, active.
     Memory-efficient: clears each element after processing.
     """
-    for event, elem in iterparse(xml_stream, events=("end",)):
+    for _event, elem in iterparse(xml_stream, events=("end",)):
         if elem.tag != TAG_RECORD:
             continue
 
@@ -112,10 +117,10 @@ def parse_gleif_xml(xml_stream):
 
         yield {
             "lei": lei,
-            "name": name or "",
-            "country": country or "",
-            "postal_code": postal_code or "",
-            "legal_form": legal_form or "",
+            "name": name or None,
+            "country": country or None,
+            "postal_code": postal_code or None,
+            "legal_form": legal_form or None,
             "active": status == "ACTIVE",
         }
 
@@ -126,82 +131,51 @@ def _text(parent, tag):
     return child.text.strip() if child is not None and child.text else None
 
 
-def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
-    """
-    MERGE Company nodes into Neo4j in batches.
+def emit_gleif(log: EventLog, records) -> dict:
+    """Emit one ``UpsertCompany`` event per LEI record. MERGE-style
+    upsert (no bracket); the GLEIF dump is multi-million rows and a
+    PUT-replace would wipe Companies from other sources.
 
-    Returns a summary dict with counts.
-    """
-    query = """
-    UNWIND $batch AS row
-    MERGE (c:Company {gmr_id: row.gmr_id})
-    SET c.lei         = row.lei,
-        c.name        = row.name,
-        c.country     = row.country,
-        c.postal_code = CASE row.postal_code WHEN '' THEN null ELSE row.postal_code END,
-        c.legal_form  = row.legal_form,
-        c.active      = row.active
-    """
-
+    Returns ``{"total": <events>, "elapsed_s": <seconds>}``."""
+    batch_id = uuid.uuid4()
     total = 0
-    batch = []
     t0 = time.time()
 
-    with driver.session() as session:
-        # Create constraint (idempotent)
-        session.run(
-            "CREATE CONSTRAINT company_gmr_id IF NOT EXISTS "
-            "FOR (c:Company) REQUIRE c.gmr_id IS UNIQUE"
-        )
-
-        written_ids: list[str] = []
+    with log.batch(batch_id, producer="load_gleif") as emit:
         for rec in records:
-            rec["gmr_id"] = gmr_id.from_lei(rec["lei"])
-            batch.append(rec)
-            written_ids.append(rec["gmr_id"])
-
-            if len(batch) >= batch_size:
-                session.run(query, batch=batch)
-                total += len(batch)
-                batch = []
-                if total % 50000 < batch_size:
-                    elapsed = time.time() - t0
-                    rate = total / elapsed if elapsed else 0
-                    logger.info(
-                        "  %d companies loaded (%.0f/s)", total, rate
-                    )
-
-        if batch:
-            session.run(query, batch=batch)
-            total += len(batch)
+            company_gmr_id = str(gmr_id.from_lei(rec["lei"]))
+            emit.upsert(
+                "UpsertCompany",
+                iri=f"http://data.fontem.eu/id/Company/{company_gmr_id}",
+                domain="company",
+                payload=builders.upsert_company(
+                    gmr_id=company_gmr_id,
+                    lei=rec["lei"],
+                    name=rec.get("name"),
+                    country=rec.get("country"),
+                    legal_form=rec.get("legal_form"),
+                    postal_code=rec.get("postal_code"),
+                    active=rec.get("active"),
+                ),
+            )
+            total += 1
+            if total % 50000 == 0:
+                elapsed = time.time() - t0
+                rate = total / elapsed if elapsed else 0
+                logger.info("  %d companies emitted (%.0f/s)", total, rate)
 
     elapsed = time.time() - t0
-    # Notify the consolidator about the new/updated companies. Best-effort.
-    from src.etl._hooks import notify_consolidator
-    notify_consolidator("Company", written_ids)
+    logger.info("Done: %d companies in %.1fs", total, elapsed)
     return {"total": total, "elapsed_s": round(elapsed, 1)}
 
 
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load GLEIF LEI data into Neo4j"
+        description="Emit UpsertCompany events for the GLEIF dump",
     )
     parser.add_argument(
-        "--file", help="Path to a local GLEIF ZIP file"
-    )
-    parser.add_argument(
-        "--neo4j-uri",
-        default="bolt://neo4j:7687",
-        help="Neo4j bolt URI (default: bolt://neo4j:7687)",
-    )
-    parser.add_argument(
-        "--neo4j-user", default="neo4j",
-        help="Neo4j username",
-    )
-    parser.add_argument(
-        "--neo4j-password", default=os.environ.get("NEO4J_PASSWORD", ""),
-        help="Neo4j password",
+        "--file", help="Path to a local GLEIF ZIP file",
     )
     args = parser.parse_args(argv)
 
@@ -210,7 +184,6 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Open the ZIP
     if args.file:
         logger.info("Reading local file: %s", args.file)
         zf = zipfile.ZipFile(args.file)
@@ -219,7 +192,6 @@ def main(argv=None):
         buf = download_zip(url)
         zf = zipfile.ZipFile(buf)
 
-    # Find the XML inside the ZIP
     xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
     if not xml_names:
         logger.error("No XML file found in ZIP")
@@ -228,23 +200,13 @@ def main(argv=None):
     xml_name = xml_names[0]
     logger.info("Parsing %s ...", xml_name)
 
-    with zf.open(xml_name) as xml_stream:
-        records = parse_gleif_xml(xml_stream)
-
-        driver = GraphDatabase.driver(
-            args.neo4j_uri,
-            auth=(args.neo4j_user, args.neo4j_password),
-        )
-        try:
-            summary = load_into_neo4j(driver, records)
-        finally:
-            driver.close()
-
-    logger.info(
-        "Done: %d companies in %.1fs",
-        summary["total"],
-        summary["elapsed_s"],
-    )
+    log = EventLog.from_env()
+    try:
+        with zf.open(xml_name) as xml_stream:
+            records = parse_gleif_xml(xml_stream)
+            emit_gleif(log, records)
+    finally:
+        log.close()
 
 
 if __name__ == "__main__":
