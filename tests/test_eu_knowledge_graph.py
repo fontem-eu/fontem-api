@@ -217,3 +217,51 @@ class TestParseKohesioCsv:
                 assert r["project_id"] not in all_ids, \
                     f"Duplicate project_id from {cc}"
                 all_ids.add(r["project_id"])
+
+
+# ── Event-emit tests ──────────────────────────────────────────────
+
+class TestEmitDisclosure:  # pylint: disable=missing-class-docstring
+    def _mock_log(self):  # pylint: disable=missing-function-docstring
+        from unittest.mock import MagicMock  # pylint: disable=import-outside-toplevel
+        log = MagicMock()
+        emit = MagicMock()
+        log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+        log.batch.return_value.__exit__ = MagicMock(return_value=False)
+        return log, emit
+
+    def test_emit_uses_qid_as_disclosure_id(self):  # pylint: disable=missing-function-docstring
+        from src.etl import load_eu_knowledge_graph  # pylint: disable=import-outside-toplevel
+        log, emit = self._mock_log()
+        rec = {
+            "project_id": "p1", "qid": "Q12345",
+            "wikibase_qid": "Q12345",
+            "title": "T", "description": "D",
+            "total_budget": 1000.0, "eu_contribution": 500.0,
+            "fund": "EFRD", "programme": "POL",
+            "start_date": "2024-09-01", "end_date": "2026-12-31",
+            "nuts_code": "PT10", "country": "PRT",
+            "beneficiary_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
+            "beneficiary_qid": "Q67890",
+        }
+        load_eu_knowledge_graph.emit_disclosure_events(log, [rec])
+        assert emit.upsert.call_count == 1
+        payload = emit.upsert.call_args.kwargs["payload"]
+        assert payload["system"] == "eu-cohesion"
+        assert payload["disclosure_id"] == "Q12345"
+        assert payload["company_gmr_id"] == "00040372-dad6-5d34-882c-8b8624b4e734"
+        assert payload["year"] == 2024
+        # details flattened, includes nuts_code
+        assert payload["details"]["nuts_code"] == "PT10"
+        assert payload["details"]["beneficiary_qid"] == "Q67890"
+
+    def test_emit_handles_missing_beneficiary(self):  # pylint: disable=missing-function-docstring
+        """Project without a beneficiary still gets a disclosure
+        event — company_gmr_id is optional in the relaxed schema."""
+        from src.etl import load_eu_knowledge_graph  # pylint: disable=import-outside-toplevel
+        log, emit = self._mock_log()
+        rec = {"project_id": "p1", "qid": "Q1", "wikibase_qid": "Q1",
+               "title": "t", "start_date": "2024-01-01"}
+        load_eu_knowledge_graph.emit_disclosure_events(log, [rec])
+        payload = emit.upsert.call_args.kwargs["payload"]
+        assert "company_gmr_id" not in payload

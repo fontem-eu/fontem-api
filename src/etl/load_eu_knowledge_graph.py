@@ -1,13 +1,20 @@
 """
-EU Knowledge Graph (Kohesio) → Neo4j
-=====================================
+EU Knowledge Graph (Kohesio) → event log
+==========================================
 Ingests EU cohesion policy projects and beneficiaries from the
-Kohesio per-country CSV exports into Neo4j as CohesionProject nodes.
-Matches beneficiaries against existing Company nodes and links
-projects to NUTSRegion nodes.
+Kohesio per-country CSV exports and emits ``UpsertDisclosure``
+events keyed by Wikibase QID, with system='eu-cohesion'. Each
+project's beneficiary (when known) is captured as the disclosure's
+``company_gmr_id`` so the sinks materialise the FILED_BY edge;
+otherwise the disclosure stands alone.
+
+Disclosure-shape choice: a cohesion project is a disclosure of
+EU funding directed at a beneficiary, with structured details.
+Reusing UpsertDisclosure avoids minting a CohesionProject-specific
+schema for what is effectively the same shape.
 
 Data source: per-country CSV files from the official Kohesio data
-export API, NOT the SPARQL endpoint (which is for targeted queries).
+export API.
 
 URL pattern:
   https://kohesio.ec.europa.eu/api/data/object?id=data/projects-2021-2027/latest/{CC}-pp21-27-latest.csv
@@ -27,9 +34,11 @@ import logging
 import os
 import sys
 import time
+import uuid
 
 import httpx
-from neo4j import GraphDatabase
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 from src.services.location_service import LocationService
 
@@ -48,54 +57,7 @@ EU_COUNTRIES = [
     "NL", "PL", "PT", "RO", "SE", "SI", "SK",
 ]
 
-BATCH_SIZE = 500
-
-CONSTRAINT_CYPHER = """
-CREATE CONSTRAINT cohesion_project_id IF NOT EXISTS
-FOR (p:CohesionProject) REQUIRE p.project_id IS UNIQUE
-"""
-
-MERGE_PROJECT = """
-UNWIND $batch AS row
-MERGE (p:CohesionProject {project_id: row.project_id})
-SET p.wikibase_qid    = row.wikibase_qid,
-    p.title           = row.title,
-    p.description     = row.description,
-    p.total_budget    = row.total_budget,
-    p.eu_contribution = row.eu_contribution,
-    p.fund            = row.fund,
-    p.programme       = row.programme,
-    p.start_date      = row.start_date,
-    p.end_date        = row.end_date,
-    p.nuts_code       = row.nuts_code,
-    p.country         = row.country
-"""
-
-LINK_NUTS = """
-UNWIND $batch AS row
-WITH row WHERE row.nuts_code IS NOT NULL AND row.nuts_code <> ''
-MATCH (p:CohesionProject {project_id: row.project_id})
-OPTIONAL MATCH (exact:NUTSRegion {code: row.nuts_code})
-OPTIONAL MATCH (parent2:NUTSRegion)
-  WHERE parent2.code = left(row.nuts_code, size(row.nuts_code) - 1)
-    AND exact IS NULL
-OPTIONAL MATCH (parent1:NUTSRegion)
-  WHERE parent1.code = left(row.nuts_code, size(row.nuts_code) - 2)
-    AND exact IS NULL AND parent2 IS NULL
-WITH p, coalesce(exact, parent2, parent1) AS region
-WHERE region IS NOT NULL
-MERGE (p)-[:LOCATED_IN]->(region)
-"""
-
-MERGE_BENEFICIARY = """
-UNWIND $batch AS row
-WITH row WHERE row.beneficiary_gmr_id IS NOT NULL
-MATCH (p:CohesionProject {project_id: row.project_id})
-MERGE (c:Company {gmr_id: row.beneficiary_gmr_id})
-ON CREATE SET c.name    = row.beneficiary_name,
-              c.country = row.country
-MERGE (c)-[:BENEFICIARY_OF]->(p)
-"""
+EMIT_CHUNK = 1000
 
 
 def _extract_qid(uri: str) -> str:
@@ -113,10 +75,8 @@ def _normalize_date(raw: str) -> str:
     raw = (raw or "").strip()[:10]
     if not raw:
         return ""
-    # Already ISO? (starts with 4-digit year)
     if len(raw) >= 10 and raw[4] == "-":
         return raw[:10]
-    # DD/MM/YYYY
     parts = raw.split("/")
     if len(parts) == 3 and len(parts[2]) == 4:
         return f"{parts[2]}-{parts[1]}-{parts[0]}"
@@ -136,8 +96,10 @@ def download_country_csv(country_code: str) -> bytes:
     """Download a single country's CSV from Kohesio."""
     url = KOHESIO_CSV_URL.format(cc=country_code)
     logger.info("Downloading %s ...", url)
-    resp = httpx.get(url, timeout=300, follow_redirects=True,
-                     headers={"User-Agent": "GMR-KnowledgeGraph/1.0"})
+    resp = httpx.get(
+        url, timeout=300, follow_redirects=True,
+        headers={"User-Agent": "GMR-KnowledgeGraph/1.0"},
+    )
     resp.raise_for_status()
     logger.info("  %s: %d KB", country_code, len(resp.content) // 1024)
     return resp.content
@@ -149,30 +111,25 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
     reader = csv.DictReader(text)
 
     for row in reader:
-        # Normalize DD/MM/YYYY → YYYY-MM-DD for comparison and storage
         start_date = _normalize_date(row.get("Operation_Start_Date", ""))
         end_date = _normalize_date(row.get("Operation_End_Date", ""))
 
-        # Use the best available date for --since filtering:
-        # prefer start_date, fall back to end_date, skip if both missing
+        # --since filter: prefer start_date, fall back to end_date.
         filter_date = start_date or end_date
         if since:
             if not filter_date:
-                continue  # no temporal info at all — cannot determine relevance
+                continue
             if filter_date < since:
                 continue
 
-        # Extract QID from the Operation_Unique_Identifier URI
         op_uri = row.get("Operation_Unique_Identifier", "")
         qid = _extract_qid(op_uri)
         if not qid:
             continue
 
-        project_id = str(gmr_id.from_name("EU", f"eukg:{qid}"))
         raw_country = (row.get("CountryCode") or "")[:5].strip()
         country_code = LocationService.to_alpha3(raw_country) or raw_country
 
-        # Best NUTS code: prefer NUTS3, then NUTS2, then NUTS1
         nuts_code = (
             row.get("NUTS3_Code")
             or row.get("NUTS2_Code")
@@ -180,21 +137,23 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
             or ""
         ).strip()
 
-        # Beneficiary
-        beneficiary_name = None
         beneficiary_gmr_id = None
         ben_uri = row.get("Beneficiary_Unique_Identifier", "")
         ben_qid = _extract_qid(ben_uri)
         if ben_qid:
-            # Use the QID-based ID for the beneficiary company
             beneficiary_gmr_id = str(
                 gmr_id.from_name(country_code or "EU", f"kohesio_ben:{ben_qid}")
             )
-            # No name available in the CSV for beneficiaries (just URI)
-            beneficiary_name = ben_qid
+
+        # project_id remains in the parsed record as a stable
+        # UUID5 derived from the QID — not used by the emit path
+        # (which uses qid directly as disclosure_id) but kept for
+        # backward-compat with the existing parser tests.
+        project_id = str(gmr_id.from_name("EU", f"eukg:{qid}"))
 
         yield {
             "project_id": project_id,
+            "qid": qid,
             "wikibase_qid": qid,
             "title": (
                 row.get("Operation_Name_English")
@@ -219,51 +178,78 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
             "nuts_code": nuts_code or None,
             "country": country_code or None,
             "beneficiary_gmr_id": beneficiary_gmr_id,
-            "beneficiary_name": beneficiary_name,
+            "beneficiary_qid": ben_qid or None,
         }
 
 
-def load_into_neo4j(driver, records):
-    """MERGE CohesionProject nodes and beneficiary relationships."""
+def emit_disclosure_events(log: EventLog, records: list[dict]) -> dict:
+    """Emit one UpsertDisclosure per project. Chunked into
+    EMIT_CHUNK-sized batches so each Postgres transaction stays
+    bounded."""
     total = 0
-    batch = []
-    t0 = time.time()
+    emitted = 0
+    chunk: list[dict] = []
 
-    with driver.session() as session:
-        session.run(CONSTRAINT_CYPHER)
-        logger.info("Constraint ensured")
+    def _flush(buf: list[dict]) -> int:
+        if not buf:
+            return 0
+        batch_id = uuid.uuid4()
+        n = 0
+        with log.batch(batch_id, producer="load_eu_knowledge_graph") as emit:
+            for rec in buf:
+                year = None
+                if rec.get("start_date"):
+                    try:
+                        year = int(rec["start_date"][:4])
+                    except ValueError:
+                        year = None
+                # Capture the structured project fields in details.
+                details: dict[str, object] = {}
+                for k in (
+                    "description", "total_budget", "eu_contribution",
+                    "fund", "programme", "start_date", "end_date",
+                    "nuts_code", "country", "beneficiary_qid",
+                ):
+                    v = rec.get(k)
+                    if v not in (None, ""):
+                        details[k] = v
+                emit.upsert(
+                    "UpsertDisclosure",
+                    iri=(
+                        f"http://data.fontem.eu/id/EuCohesionDisclosure/"
+                        f"{rec['qid']}"
+                    ),
+                    domain="eu_cohesion",
+                    payload=builders.upsert_disclosure(
+                        system="eu-cohesion",
+                        disclosure_id=rec["qid"],
+                        company_gmr_id=rec.get("beneficiary_gmr_id"),
+                        disclosure_type="cohesion-project",
+                        year=year,
+                        title=rec.get("title"),
+                        details=details or None,
+                    ),
+                )
+                n += 1
+        return n
 
-        for record in records:
-            batch.append(record)
-            if len(batch) >= BATCH_SIZE:
-                session.run(MERGE_PROJECT, batch=batch)
-                session.run(LINK_NUTS, batch=batch)
-                session.run(MERGE_BENEFICIARY, batch=batch)
-                total += len(batch)
-                batch = []
-                if total % 10000 < BATCH_SIZE:
-                    elapsed = time.time() - t0
-                    rate = total / max(elapsed, 0.1)
-                    logger.info("  %d projects loaded (%.0f/s)", total, rate)
+    for rec in records:
+        total += 1
+        chunk.append(rec)
+        if len(chunk) >= EMIT_CHUNK:
+            emitted += _flush(chunk)
+            chunk = []
 
-        if batch:
-            session.run(MERGE_PROJECT, batch=batch)
-            session.run(LINK_NUTS, batch=batch)
-            session.run(MERGE_BENEFICIARY, batch=batch)
-            total += len(batch)
-
-    elapsed = time.time() - t0
-    return {"total": total, "elapsed_s": round(elapsed, 1)}
+    emitted += _flush(chunk)
+    return {"total": total, "emitted": emitted}
 
 
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load EU Knowledge Graph cohesion projects into Neo4j"
+        description="Emit EU cohesion projects into the event log",
     )
-    parser.add_argument(
-        "--file", help="Path to a local Kohesio CSV file",
-    )
+    parser.add_argument("--file", help="Path to a local Kohesio CSV file")
     parser.add_argument(
         "--countries",
         default=",".join(EU_COUNTRIES),
@@ -273,18 +259,6 @@ def main(argv=None):
         "--since", default="2025-09-01",
         help="Only ingest projects with start_date >= YYYY-MM-DD",
     )
-    parser.add_argument(
-        "--neo4j-uri",
-        default=os.environ.get("NEO4J_URI", "bolt://neo4j:7687"),
-    )
-    parser.add_argument(
-        "--neo4j-user",
-        default=os.environ.get("NEO4J_USER", "neo4j"),
-    )
-    parser.add_argument(
-        "--neo4j-password",
-        default=os.environ.get("NEO4J_PASSWORD", ""),
-    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -292,8 +266,7 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Collect all records
-    all_records = []
+    all_records: list[dict] = []
 
     if args.file:
         logger.info("Reading local file: %s", args.file)
@@ -316,23 +289,22 @@ def main(argv=None):
             except httpx.HTTPError:
                 logger.warning("  %s: download failed, skipping", cc)
 
-    logger.info("Total: %d projects to load", len(all_records))
+    logger.info("Total: %d projects to emit", len(all_records))
 
     if not all_records:
-        logger.info("No records to load, exiting")
+        logger.info("No records to emit, exiting")
         return
 
-    driver = GraphDatabase.driver(
-        args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password)
-    )
+    log = EventLog.from_env()
+    t0 = time.time()
     try:
-        summary = load_into_neo4j(driver, all_records)
+        summary = emit_disclosure_events(log, all_records)
     finally:
-        driver.close()
-
+        log.close()
+    elapsed = time.time() - t0
     logger.info(
-        "Done: %d projects in %.1fs",
-        summary["total"], summary["elapsed_s"],
+        "Done: %d projects, %d events emitted in %.1fs",
+        summary["total"], summary["emitted"], elapsed,
     )
 
 
