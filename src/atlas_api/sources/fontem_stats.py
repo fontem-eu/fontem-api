@@ -147,8 +147,8 @@ class FontemStatsSource:
                d.notes, d.dim_ids, d.dim_labels,
                r.started_at         AS last_sync_started_at,
                r.upstream_modified  AS last_upstream_modified,
-               r.rows_total         AS last_sync_rows
-               {extra_cols}
+               r.rows_total         AS last_sync_rows,
+               '[]'::jsonb          AS slice_stats
         FROM fontem_stats.dataset d
         LEFT JOIN LATERAL (
             SELECT started_at, upstream_modified, rows_total
@@ -156,54 +156,45 @@ class FontemStatsSource:
             WHERE dataset_code = d.code AND status = 'success'
             ORDER BY started_at DESC LIMIT 1
         ) r ON true
-        {extra_join}
         ORDER BY d.theme, d.code
     """
 
-    _SLICE_EXTRA_COLS = ", COALESCE(s.slices, '[]'::jsonb) AS slice_stats"
-    _SLICE_EXTRA_JOIN = """
-        LEFT JOIN LATERAL (
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'dimensions',        ds.dimensions,
-                    'value_min',         ds.value_min,
-                    'value_max',         ds.value_max,
-                    'value_p02',         ds.value_p02,
-                    'value_p50',         ds.value_p50,
-                    'value_p98',         ds.value_p98,
-                    'observation_count', ds.observation_count,
-                    'value_kind',        ds.value_kind,
-                    'skew_ratio',        ds.skew_ratio
-                )
-                ORDER BY ds.slice_key
-            ) AS slices
-            FROM fontem_stats.dataset_slice_stats ds
-            WHERE ds.dataset_code = d.code
-        ) s ON true
-    """
-
     def list_datasets(self) -> list[dict[str, Any]]:
-        # Embed slice stats in the same query so the frontend gets
-        # legend bounds without a second round-trip. If the
-        # `dataset_slice_stats` table is missing (clusters that
-        # haven't migrated and where the API user can't CREATE),
-        # fall back to the legacy shape with `slice_stats = []`.
-        sql_with_stats = self._DATASETS_CORE_SQL.format(
-            extra_cols=self._SLICE_EXTRA_COLS,
-            extra_join=self._SLICE_EXTRA_JOIN,
-        )
-        sql_legacy = self._DATASETS_CORE_SQL.format(
-            extra_cols=", '[]'::jsonb AS slice_stats",
-            extra_join="",
-        )
+        # Slice stats are NOT embedded here — migration datasets
+        # carry tens of thousands of dimension combinations (45k for
+        # migr_imm1ctz alone, 230k+ across the catalog). Embedding
+        # would push /datasets to 57MB. Frontend fetches per-dataset
+        # via fetch_slice_stats() once a dataset is selected.
         with self._connect() as conn, conn.cursor() as cur:
-            try:
-                cur.execute(sql_with_stats)
-            except psycopg.errors.UndefinedTable:
-                conn.rollback()
-                cur.execute(sql_legacy)
+            cur.execute(self._DATASETS_CORE_SQL)
             cols = [c.name for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def fetch_slice_stats(self, dataset: str) -> list[dict[str, Any]]:
+        """Slice stats for a single dataset.
+
+        Catalog-time aggregation; nothing is recomputed here, just a
+        SELECT against `dataset_slice_stats`. Returns an empty list
+        when the table is missing (e.g. mid-migration on a read-only
+        role) — frontend falls back to per-data bounds.
+        """
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT dimensions, value_min, value_max,
+                           value_p02, value_p50, value_p98,
+                           observation_count, value_kind, skew_ratio
+                    FROM fontem_stats.dataset_slice_stats
+                    WHERE dataset_code = %s
+                    ORDER BY observation_count DESC, slice_key
+                    """,
+                    (dataset,),
+                )
+                cols = [c.name for c in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except psycopg.errors.UndefinedTable:
+            return []
 
     # ── Series ───────────────────────────────────────────────────────
 

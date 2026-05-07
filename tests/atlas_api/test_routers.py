@@ -85,52 +85,53 @@ def test_datasets_returns_summary():
     assert body[0]["slice_stats"] == []
 
 
-def test_datasets_surfaces_slice_stats():
-    """Slice stats are the bedrock of the stable cross-year colour
-    scale + legend. Pin the response shape so a future tweak to the
-    SQL-to-JSON mapping doesn't drop them silently.
+def test_slice_stats_endpoint_returns_per_dataset_distribution():
+    """Slice stats are fetched lazily per-dataset to keep
+    /datasets small (the catalog payload was 57 MB when the stats
+    were embedded inline). Pin the dedicated endpoint's shape so
+    the frontend's per-dataset fetch keeps working.
     """
-    rows = [
+    slices = [
         {
-            "code": "crim_off_cat", "label": "Crime", "theme": "social",
-            "nuts_levels": [0, 2], "time_unit": "year", "update_freq": "1 year",
-            "enabled": True, "notes": None,
-            "last_sync_started_at": None, "last_upstream_modified": None,
-            "last_sync_rows": None,
-            "slice_stats": [
-                {
-                    "dimensions": {"iccs": "ICCS0101", "unit": "NR"},
-                    "value_min": 0.0, "value_max": 12_345.0,
-                    "value_p02": 1.0, "value_p50": 80.0, "value_p98": 9_500.0,
-                    "observation_count": 1024,
-                    "value_kind": "sequential",
-                    "skew_ratio": 4.7,
-                },
-                {
-                    "dimensions": {"iccs": "ICCS0101", "unit": "P_HTHAB"},
-                    "value_min": 0.0, "value_max": 18.5,
-                    "value_p02": 0.1, "value_p50": 1.4, "value_p98": 12.3,
-                    "observation_count": 1024,
-                    "value_kind": "sequential",
-                    "skew_ratio": 2.1,
-                },
-            ],
+            "dimensions": {"iccs": "ICCS0101", "unit": "NR"},
+            "value_min": 0.0, "value_max": 12_345.0,
+            "value_p02": 1.0, "value_p50": 80.0, "value_p98": 9_500.0,
+            "observation_count": 1024,
+            "value_kind": "sequential",
+            "skew_ratio": 4.7,
+        },
+        {
+            "dimensions": {"iccs": "ICCS0101", "unit": "P_HTHAB"},
+            "value_min": 0.0, "value_max": 18.5,
+            "value_p02": 0.1, "value_p50": 1.4, "value_p98": 12.3,
+            "observation_count": 1024,
+            "value_kind": "sequential",
+            "skew_ratio": 2.1,
         },
     ]
     with patch(
-        "src.atlas_api.sources.fontem_stats.FontemStatsSource.list_datasets",
-        return_value=rows,
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.fetch_slice_stats",
+        return_value=slices,
     ):
-        r = _client().get("/datasets")
+        r = _client().get("/datasets/crim_off_cat/slice-stats")
     assert r.status_code == 200
     body = r.json()
-    slices = body[0]["slice_stats"]
-    assert len(slices) == 2
-    nr = next(s for s in slices if s["dimensions"]["unit"] == "NR")
+    assert len(body) == 2
+    nr = next(s for s in body if s["dimensions"]["unit"] == "NR")
     assert nr["value_p98"] == 9_500.0
     assert nr["value_kind"] == "sequential"
-    pht = next(s for s in slices if s["dimensions"]["unit"] == "P_HTHAB")
-    assert pht["value_p98"] == 12.3
+
+
+def test_slice_stats_empty_when_table_missing():
+    """Stats endpoint must not 500 if the table hasn't been
+    backfilled yet — frontend's fallback path needs []."""
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.fetch_slice_stats",
+        return_value=[],
+    ):
+        r = _client().get("/datasets/anything/slice-stats")
+    assert r.status_code == 200
+    assert r.json() == []
 
 
 # ── /series ──────────────────────────────────────────────────────────
