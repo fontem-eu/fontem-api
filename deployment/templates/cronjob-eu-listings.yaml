@@ -1,8 +1,7 @@
-{{- $extra := list }}
-{{- if .Values.virtuoso.enabled }}
-{{- $extra = append $extra (dict "name" "VIRTUOSO_SPARQL_ENDPOINT" "value" .Values.virtuoso.sparqlEndpoint) }}
-{{- $extra = append $extra (dict "name" "VIRTUOSO_DBA_PASSWORD" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.virtuoso.dbaPasswordSecret "key" .Values.virtuoso.dbaPasswordKey))) }}
-{{- end }}
+{{- /*
+EU listings + ESEF financials → events.entity_events.
+Sinks own the projection — loader needs no Virtuoso credentials.
+*/ -}}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-eu-listings"
       "schedule"        "0 6 * * 0"
@@ -13,7 +12,7 @@
       "cpuLimit"        "1"
       "memRequest"      "1Gi"
       "memLimit"        "3Gi"
-      "extraEnv"        $extra
+      "extraEnv"        (list)
       "needsEsefData"   true
       "Values"          .Values
       "Release"         .Release) -}}
