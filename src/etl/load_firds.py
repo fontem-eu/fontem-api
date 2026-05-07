@@ -1,15 +1,26 @@
 """
-ESMA FIRDS (Financial Instruments Reference Data) → Neo4j
-=========================================================
-Downloads delta files from the ESMA FIRDS Solr register, extracts XML
-from ZIPs, and MERGEs Listing nodes into Neo4j.  Only equity and
-collective-investment instruments (CFI starting with 'E' or 'C') are
-kept.
+ESMA FIRDS (Financial Instruments Reference Data) → event log
+==============================================================
+Downloads delta files from the ESMA FIRDS Solr register, extracts
+XML from ZIPs, and emits ``UpsertListing`` events keyed by ISIN.
+Only equity and collective-investment instruments (CFI starting
+with 'E' or 'C') are kept.
+
+Listings are keyed by ticker in the schema, but FIRDS only carries
+ISINs — there is no ticker attached to an instrument until OpenFIGI
+or another mapping source confirms one. We use the ISIN as the
+ticker primary key. OpenFIGI subsequently emits a separate
+UpsertListing event with the canonical ticker; the consolidator
+links the two via AssertSameAs.
+
+Issuer linkage (Listing → parent Company) goes through the
+``Issr`` LEI in the FIRDS XML. Companies are matched by LEI in
+the derived Neo4j store (the canonical write path is
+load_gleif which already runs before us).
 
 Usage:
-    python -m src.etl.load_firds --neo4j-uri bolt://localhost:7687
+    python -m src.etl.load_firds --since 2025-09-01
     python -m src.etl.load_firds --file /tmp/firds_delta.zip
-    python -m src.etl.load_firds --since 2025-10-01
 """
 from __future__ import annotations
 
@@ -19,10 +30,14 @@ import logging
 import os
 import sys
 import time
+import uuid
 import zipfile
+from collections.abc import Iterable
 from xml.etree.ElementTree import iterparse
 
 import httpx
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 from neo4j import GraphDatabase
 
 logger = logging.getLogger(__name__)
@@ -31,31 +46,15 @@ FIRDS_SOLR = (
     "https://registers.esma.europa.eu/solr/"
     "esma_registers_firds_files/select"
 )
-BATCH_SIZE = 2000
+EMIT_BATCH = 1000
 
-CONSTRAINT_CYPHER = """
-CREATE CONSTRAINT listing_isin IF NOT EXISTS
-FOR (l:Listing) REQUIRE l.isin IS UNIQUE
-"""
-
-MERGE_LISTING = """
-UNWIND $batch AS row
-MERGE (l:Listing {isin: row.isin})
-SET l.instrument_name    = row.instrument_name,
-    l.instrument_type    = row.instrument_type,
-    l.cfi_code           = row.cfi_code,
-    l.trading_venue_mic  = row.trading_venue_mic,
-    l.currency           = row.currency,
-    l.lei                = row.lei
-"""
-
-LINK_COMPANY = """
-UNWIND $batch AS row
-MATCH (l:Listing {isin: row.isin})
-WHERE row.lei IS NOT NULL AND size(row.lei) = 20
-WITH l, row
-MATCH (c:Company {lei: row.lei})
-MERGE (c)-[:LISTED_AS]->(l)
+# Resolve LEI → gmr_id from the derived Neo4j store. Companies must
+# have been projected by load_gleif (or another LEI-aware loader)
+# before FIRDS runs — the ETL CronJob schedule reflects that.
+LEI_TO_GMR = """
+UNWIND $leis AS lei
+MATCH (c:Company) WHERE c.lei = lei
+RETURN c.lei AS lei, c.gmr_id AS gmr_id
 """
 
 
@@ -98,36 +97,27 @@ def download_zip(url):
 
 
 def parse_firds_xml(xml_stream):
-    """
-    Stream-parse FIRDS DLTINS XML and yield instrument dicts.
-
-    Keeps only equities (CFI starts with 'E') and collective investment
-    schemes (CFI starts with 'C').
-    """
+    """Stream-parse FIRDS DLTINS XML and yield instrument dicts.
+    Keeps only equities (CFI starts with 'E') and collective
+    investment schemes (CFI starts with 'C')."""
     for _event, elem in iterparse(xml_stream, events=("end",)):
         tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-        if tag not in ("FinInstrmGnlAttrbts", "RefData"):
+        if tag != "RefData":
             elem.clear()
             continue
-
-        if tag == "RefData":
-            # Try to extract from full RefData element
-            gnl = None
-            for child in elem:
-                child_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-                if child_tag == "FinInstrmGnlAttrbts":
-                    gnl = child
-                    break
-            if gnl is None:
-                elem.clear()
-                continue
-            record = _extract_instrument(gnl, elem)
+        gnl = None
+        for child in elem:
+            child_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if child_tag == "FinInstrmGnlAttrbts":
+                gnl = child
+                break
+        if gnl is None:
             elem.clear()
-            if record:
-                yield record
             continue
-
+        record = _extract_instrument(gnl, elem)
         elem.clear()
+        if record:
+            yield record
 
 
 def _extract_instrument(gnl_elem, ref_data_elem):
@@ -143,7 +133,6 @@ def _extract_instrument(gnl_elem, ref_data_elem):
 
     currency = _child_text(gnl_elem, "NtnlCcy")
 
-    # Trading venue from parent
     mic = ""
     lei = ""
     for child in ref_data_elem:
@@ -175,45 +164,81 @@ def _child_text(elem, tag_suffix):
     return ""
 
 
-def load_into_neo4j(driver, records, batch_size=BATCH_SIZE):
-    """MERGE Listing nodes and link to Company via LEI."""
-    total = 0
-    linked = 0
-    batch = []
-    t0 = time.time()
-
+def resolve_leis(driver, records: list[dict]) -> dict[str, str]:
+    """Look up gmr_id for each record's LEI. Returns {lei: gmr_id}.
+    Records whose LEI doesn't resolve will be emitted without a
+    company_gmr_id — the schema allows None for now (those orphan
+    Listings are the price of incremental migration; the
+    consolidator can later re-link them when the parent Company
+    lands)."""
+    leis = list({r["lei"] for r in records if r.get("lei")})
+    if not leis:
+        return {}
+    resolved: dict[str, str] = {}
     with driver.session() as session:
-        session.run(CONSTRAINT_CYPHER)
-        logger.info("Constraint ensured")
-
-        for rec in records:
-            batch.append(rec)
-            if len(batch) >= batch_size:
-                session.run(MERGE_LISTING, batch=batch)
-                result = session.run(LINK_COMPANY, batch=batch)
-                linked += result.consume().counters.relationships_created
-                total += len(batch)
-                batch = []
-                if total % 50000 < batch_size:
-                    elapsed = time.time() - t0
-                    rate = total / elapsed if elapsed else 0
-                    logger.info(
-                        "  %d listings loaded (%.0f/s), %d linked",
-                        total, rate, linked,
-                    )
-
-        if batch:
-            session.run(MERGE_LISTING, batch=batch)
-            result = session.run(LINK_COMPANY, batch=batch)
-            linked += result.consume().counters.relationships_created
-            total += len(batch)
-
-    elapsed = time.time() - t0
-    return {"total": total, "linked": linked, "elapsed_s": round(elapsed, 1)}
+        for row in session.run(LEI_TO_GMR, leis=leis):
+            resolved[row["lei"]] = row["gmr_id"]
+    return resolved
 
 
-def _load_from_file(driver, file_path):
-    """Parse a local ZIP and load all instruments."""
+def emit_listings(
+    log: EventLog, records: Iterable[dict], lei_to_gmr: dict[str, str],
+) -> dict:
+    """Emit UpsertListing events for the given records. Records
+    without a resolvable LEI → gmr_id mapping are skipped (we need
+    a parent Company to anchor the Listing). Returns counters.
+
+    To keep the per-batch transaction bounded we emit in EMIT_BATCH
+    chunks; each chunk is its own batch_id."""
+    total = 0
+    emitted = 0
+    skipped = 0
+    chunk: list[dict] = []
+
+    def _flush(buf: list[dict]) -> int:
+        if not buf:
+            return 0
+        batch_id = uuid.uuid4()
+        n = 0
+        with log.batch(batch_id, producer="load_firds") as emit:
+            for rec in buf:
+                emit.upsert(
+                    "UpsertListing",
+                    iri=f"http://data.fontem.eu/id/Listing/{rec['isin']}",
+                    domain="listing",
+                    payload=builders.upsert_listing(
+                        # FIRDS has no ticker — ISIN is the stable
+                        # identifier. OpenFIGI later emits the
+                        # canonical ticker as a separate event.
+                        ticker=rec["isin"],
+                        company_gmr_id=rec["company_gmr_id"],
+                        currency=rec["currency"] or None,
+                        isin=rec["isin"],
+                        mic=rec["trading_venue_mic"] or None,
+                        active=True,
+                    ),
+                )
+                n += 1
+        return n
+
+    for rec in records:
+        total += 1
+        gmr_id = lei_to_gmr.get(rec.get("lei") or "")
+        if not gmr_id:
+            skipped += 1
+            continue
+        rec["company_gmr_id"] = gmr_id
+        chunk.append(rec)
+        if len(chunk) >= EMIT_BATCH:
+            emitted += _flush(chunk)
+            chunk = []
+
+    emitted += _flush(chunk)
+    return {"total": total, "emitted": emitted, "skipped": skipped}
+
+
+def _load_from_file(driver, log, file_path) -> dict:
+    """Parse a local ZIP and emit all instruments."""
     logger.info("Reading local file: %s", file_path)
     try:
         with zipfile.ZipFile(file_path) as zf:
@@ -221,20 +246,23 @@ def _load_from_file(driver, file_path):
             if not xml_names:
                 logger.error("No XML file found in ZIP")
                 sys.exit(1)
-            all_records = []
+            all_records: list[dict] = []
             for xml_name in xml_names:
                 with zf.open(xml_name) as xml_stream:
                     all_records.extend(parse_firds_xml(xml_stream))
     except (OSError, zipfile.BadZipFile):
         logger.exception("Failed to open ZIP %s", file_path)
         sys.exit(1)
-    return load_into_neo4j(driver, all_records)
+    if not all_records:
+        return {"total": 0, "emitted": 0, "skipped": 0}
+    lei_to_gmr = resolve_leis(driver, all_records)
+    return emit_listings(log, all_records, lei_to_gmr)
 
 
-def _load_from_solr(driver, since):
-    """Download delta ZIPs from FIRDS Solr and load instruments."""
+def _load_from_solr(driver, log, since) -> dict:
+    """Download delta ZIPs from FIRDS Solr and emit instruments."""
     urls = query_firds_files(since)
-    summary = {"total": 0, "linked": 0, "elapsed_s": 0}
+    summary = {"total": 0, "emitted": 0, "skipped": 0}
     for url in urls:
         buf = download_zip(url)
         if buf is None:
@@ -248,18 +276,19 @@ def _load_from_solr(driver, since):
         for xml_name in xml_names:
             with zf.open(xml_name) as xml_stream:
                 records = list(parse_firds_xml(xml_stream))
-            if records:
-                part = load_into_neo4j(driver, records)
-                summary["total"] += part["total"]
-                summary["linked"] += part["linked"]
-                summary["elapsed_s"] += part["elapsed_s"]
+            if not records:
+                continue
+            lei_to_gmr = resolve_leis(driver, records)
+            part = emit_listings(log, records, lei_to_gmr)
+            for k in summary:
+                summary[k] += part[k]
     return summary
 
 
 def main(argv=None):
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Load ESMA FIRDS instrument data into Neo4j"
+        description="Emit FIRDS instrument events into the event log",
     )
     parser.add_argument("--file", help="Path to a local FIRDS ZIP file")
     parser.add_argument(
@@ -286,22 +315,23 @@ def main(argv=None):
     )
 
     driver = GraphDatabase.driver(
-        args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password)
+        args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password),
     )
-
+    log = EventLog.from_env()
+    t0 = time.time()
     try:
         if args.file:
-            summary = _load_from_file(driver, args.file)
+            summary = _load_from_file(driver, log, args.file)
         else:
-            summary = _load_from_solr(driver, args.since)
+            summary = _load_from_solr(driver, log, args.since)
     finally:
         driver.close()
-
+        log.close()
+    elapsed = time.time() - t0
     logger.info(
-        "Done: %d listings, %d linked to companies in %.1fs",
-        summary["total"],
-        summary["linked"],
-        summary["elapsed_s"],
+        "FIRDS: %d instruments, %d events emitted, %d skipped (no LEI match) "
+        "in %.1fs",
+        summary["total"], summary["emitted"], summary["skipped"], elapsed,
     )
 
 
