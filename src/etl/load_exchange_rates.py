@@ -1,12 +1,18 @@
 """
 Exchange Rate Loader
 ====================
-Downloads daily exchange rates from the ECB Statistical Data Warehouse for
-all currencies seen in TED procurement data, plus secondary sources for
-currencies ECB doesn't cover (MDL, MKD, UAH, RSD, BAM, etc.).
+Downloads daily exchange rates from the ECB Statistical Data
+Warehouse for all currencies seen in TED procurement data, plus
+secondary sources for currencies ECB doesn't cover (MDL, MKD,
+UAH, RSD, BAM, etc.).
 
-Output: per-currency JSON files in {rates_dir}/rates/{CCY}.json
-Each file maps date strings (YYYY-MM-DD) to rate strings (units of CCY per 1 EUR).
+Two outputs:
+  1. Per-currency JSON files in ``{rates_dir}/rates/{CCY}.json``
+     (consumed by the existing CurrencyService API).
+  2. ``UpsertExchangeRate`` events emitted into the event log so
+     the rates land in both projection stores.
+
+Each rate is base=EUR, target=<CCY>, units of <CCY> per 1 EUR.
 
 Usage:
     python -m src.etl.load_exchange_rates --rates-dir /srv/nfs/currency-data
@@ -20,10 +26,13 @@ import io
 import json
 import logging
 import os
+import uuid
 from datetime import date
 from pathlib import Path
 
 import httpx
+from gmr_event_schemas import builders
+from gmr_events import EventLog
 
 logger = logging.getLogger(__name__)
 
@@ -132,13 +141,58 @@ def save_currency_file(rates_dir: Path, ccy: str, daily: dict[str, str]) -> None
                 max(daily) if daily else "—")
 
 
+# Event-emit chunk size — the gmr-events EventLog wraps every batch
+# in one Postgres transaction, and tens-of-thousands of inserts in
+# a single tx is a fast way to time out the writer's lock budget.
+EMIT_CHUNK = 2000
+
+
+def emit_currency_events(
+    log: EventLog | None, ccy: str, source: str, daily: dict[str, str],
+) -> int:
+    """Emit one UpsertExchangeRate per (date, rate). No-op when
+    ``log`` is None — we always write the JSON file (CurrencyService
+    is the existing reader); the event log is the new canonical
+    write path the sinks project."""
+    if log is None or not daily:
+        return 0
+    items = sorted(daily.items())
+    emitted = 0
+    for i in range(0, len(items), EMIT_CHUNK):
+        chunk = items[i:i + EMIT_CHUNK]
+        batch_id = uuid.uuid4()
+        with log.batch(batch_id, producer="load_exchange_rates") as emit:
+            for d, rate_str in chunk:
+                try:
+                    rate = float(rate_str)
+                except (TypeError, ValueError):
+                    continue
+                emit.upsert(
+                    "UpsertExchangeRate",
+                    iri=(
+                        f"http://data.fontem.eu/id/ExchangeRate/"
+                        f"EUR-{ccy}-{d}"
+                    ),
+                    domain="exchange_rate",
+                    payload=builders.upsert_exchange_rate(
+                        base="EUR", target=ccy, date=d, rate=rate,
+                        source=source,
+                    ),
+                )
+                emitted += 1
+    return emitted
+
+
 def load_all(
     rates_dir: str | Path,
     start: str = "2000-01-01",
     end: str | None = None,
     currencies: list[str] | None = None,
-) -> None:
-    """Load all currencies and write per-currency files."""
+    log: EventLog | None = None,
+) -> dict:
+    """Load all currencies, write per-currency JSON files and
+    optionally emit UpsertExchangeRate events. Returns a counts
+    summary."""
     rates_dir = Path(rates_dir)
     if end is None:
         end = date.today().isoformat()
@@ -154,17 +208,23 @@ def load_all(
     logger.info("Loading %d ECB + %d non-ECB currencies (%s to %s)",
                 len(ecb_list), len(non_ecb_list), start, end)
 
+    summary = {"ccy_loaded": 0, "events_emitted": 0}
+
     # ECB primary source
     for ccy in ecb_list:
         logger.info("Fetching %s from ECB...", ccy)
         daily = fetch_ecb(ccy, start, end)
-        if daily:
-            save_currency_file(rates_dir, ccy, daily)
-        else:
+        source = "ecb"
+        if not daily:
             logger.warning("  %s: ECB returned no data, trying Frankfurter", ccy)
             daily = fetch_frankfurter(ccy, start, end)
-            if daily:
-                save_currency_file(rates_dir, ccy, daily)
+            source = "frankfurter"
+        if daily:
+            save_currency_file(rates_dir, ccy, daily)
+            summary["ccy_loaded"] += 1
+            summary["events_emitted"] += emit_currency_events(
+                log, ccy, source, daily,
+            )
 
     # Non-ECB fallback source
     for ccy in non_ecb_list:
@@ -172,6 +232,10 @@ def load_all(
         daily = fetch_frankfurter(ccy, start, end)
         if daily:
             save_currency_file(rates_dir, ccy, daily)
+            summary["ccy_loaded"] += 1
+            summary["events_emitted"] += emit_currency_events(
+                log, ccy, "frankfurter", daily,
+            )
 
     # Write metadata
     metadata = {
@@ -184,6 +248,7 @@ def load_all(
     }
     with open(rates_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
+    return summary
 
 
 def main(argv=None):
@@ -200,7 +265,28 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    load_all(args.rates_dir, args.start, args.end, args.currencies)
+    log: EventLog | None = None
+    try:
+        log = EventLog.from_env()
+    except Exception:  # pylint: disable=broad-exception-caught
+        # No EVENTS_DATABASE_URL configured (CLI runs / tests) —
+        # fall through to JSON-only mode without crashing.
+        logger.warning(
+            "EVENTS_DATABASE_URL unset; running in JSON-only mode "
+            "(no event-log emit)",
+        )
+    try:
+        summary = load_all(
+            args.rates_dir, args.start, args.end, args.currencies,
+            log=log,
+        )
+    finally:
+        if log is not None:
+            log.close()
+    logger.info(
+        "Done: %d currencies loaded, %d events emitted",
+        summary["ccy_loaded"], summary["events_emitted"],
+    )
 
 
 if __name__ == "__main__":
