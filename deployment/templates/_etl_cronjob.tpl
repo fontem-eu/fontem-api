@@ -33,6 +33,13 @@ metadata:
     app: {{ .name }}
     component: etl
 spec:
+  # CronJobs run on schedule unless .Values.cronjobsSuspended is true.
+  # Default false so dev/staging/dast keep running; prod sets it to
+  # true during the empty-stores phase before the wipe-and-replay
+  # cutover. (Inverted from cronjobsEnabled so the Go-template
+  # `default` zero-value trap doesn't bite — `default true false`
+  # returns true.)
+  suspend: {{ .Values.cronjobsSuspended | default false }}
   schedule: {{ .schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
