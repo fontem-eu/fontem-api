@@ -133,3 +133,11 @@ spec:
         - name: esef-data
           persistentVolumeClaim:
             claimName: esef-data
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
