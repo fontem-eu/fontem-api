@@ -31,7 +31,11 @@ spec:
         # current schema rather than whatever was committed at chart
         # install time.
         checksum/init-sql: {{ include (print $.Template.BasePath "/configmap-init-sql.yaml") . | sha256sum }}
-        checksum/pg-conf: {{ include (print $.Template.BasePath "/configmap-postgresql-conf.yaml") . | sha256sum }}
+        # Roll the pod whenever the StatefulSet's args change too —
+        # the pg-conf ConfigMap is gone (settings moved to args), so
+        # what used to be `checksum/pg-conf` now collapses into the
+        # StatefulSet's own template hash, which Kubernetes already
+        # tracks. No explicit checksum needed here.
     spec:
       securityContext:
         # timescale/timescaledb-ha:pg16 ships with the postgres user as
@@ -88,15 +92,66 @@ spec:
         - name: postgres
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
-          # Pass `-c include_dir=…` so the conf snippet mounted at
-          # /etc/postgresql/conf.d/ is actually loaded. The
-          # timescaledb-ha image's `postgresql.conf` does NOT
-          # auto-include conf.d (the previous comment in this chart
-          # was wrong — `SHOW shared_preload_libraries` showed only
-          # `timescaledb` even with the file mounted). Postgres
-          # command-line `-c` overrides postgresql.conf, so any
-          # value our custom.conf sets actually wins.
-          args: ["postgres", "-c", "include_dir=/etc/postgresql/conf.d/"]
+          # Apply our custom settings via individual `-c name=value`
+          # flags. We discovered the hard way that
+          # `-c include_dir=…` is rejected ("unrecognized configuration
+          # parameter") — `include_dir` is a config-file-only
+          # directive, not a regular GUC. Per-setting `-c` is the
+          # most direct, no-mutation-of-PGDATA way to make these
+          # values actually take effect.
+          #
+          # NB: extension-namespaced GUCs (`pg_stat_statements.*`,
+          # `auto_explain.*`) are accepted at parse time even before
+          # the modules load, because Postgres treats anything with
+          # a `.` as a custom variable.
+          args:
+            - postgres
+            # Extensions loaded at startup. Adding pg_stat_statements
+            # + auto_explain alongside the existing timescaledb.
+            - -c
+            - shared_preload_libraries=timescaledb,pg_stat_statements,auto_explain
+            # Memory + connections — keep the chart's default values
+            # in lockstep with values.yaml's pgConfig.* (omitted here:
+            # the timescaledb-ha image already picks reasonable
+            # defaults from postgresql.conf, our custom settings only
+            # override what we want different).
+            # I/O timing — splits CPU vs disk read time in stats.
+            - -c
+            - track_io_timing=on
+            # Slow query log + plan log paired at the same threshold,
+            # so the histogram-of-pain (pg_stat_statements) and the
+            # per-query plan (auto_explain) land together in pod logs.
+            - -c
+            - log_min_duration_statement=1000
+            - -c
+            - log_lock_waits=on
+            - -c
+            - log_line_prefix=%t [%p] %u@%d
+            # pg_stat_statements knobs.
+            - -c
+            - pg_stat_statements.max=10000
+            - -c
+            - pg_stat_statements.track=all
+            - -c
+            - pg_stat_statements.track_utility=off
+            - -c
+            - pg_stat_statements.save=on
+            # auto_explain knobs. Threshold matches
+            # log_min_duration_statement above.
+            - -c
+            - auto_explain.log_min_duration=1000
+            - -c
+            - auto_explain.log_analyze=on
+            - -c
+            - auto_explain.log_buffers=on
+            - -c
+            - auto_explain.log_timing=on
+            - -c
+            - auto_explain.log_nested_statements=on
+            - -c
+            - auto_explain.log_format=json
+            - -c
+            - auto_explain.sample_rate=1.0
           ports:
             - name: postgres
               containerPort: 5432
@@ -118,9 +173,6 @@ spec:
             - name: init-sql
               mountPath: /docker-entrypoint-initdb.d
               readOnly: true
-            - name: pg-conf
-              mountPath: /etc/postgresql/conf.d
-              readOnly: true
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:
@@ -139,9 +191,6 @@ spec:
         - name: init-sql
           configMap:
             name: fontem-stats-init-sql
-        - name: pg-conf
-          configMap:
-            name: fontem-stats-postgresql-conf
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
