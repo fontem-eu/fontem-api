@@ -11,6 +11,16 @@ data:
   00-extensions.sql: |
     CREATE EXTENSION IF NOT EXISTS timescaledb;
     CREATE EXTENSION IF NOT EXISTS postgis;
+    -- pg_stat_statements + pgstattuple are the workhorses for finding
+    -- queries that should have an index, and for spotting bloat.
+    -- pg_stat_statements *also* needs `pg_stat_statements` in
+    -- shared_preload_libraries (see configmap-postgresql-conf.yaml);
+    -- the CREATE EXTENSION here registers the views in the database.
+    -- auto_explain is a `_PG_init`-only library — there's no
+    -- corresponding CREATE EXTENSION; loading it via
+    -- shared_preload_libraries is enough.
+    CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+    CREATE EXTENSION IF NOT EXISTS pgstattuple;
 
   10-schema.sql: |
     CREATE SCHEMA IF NOT EXISTS fontem_stats;

@@ -24,7 +24,41 @@ data:
     archive_mode = {{ .Values.pgConfig.archive_mode | default "off" | quote }}
 
     # ── TimescaleDB / extensions ──────────────────────────────────
-    shared_preload_libraries = 'timescaledb'
+    # `pg_stat_statements` — query-level cumulative stats (count, total
+    # time, mean time, rows, blocks read). The single most useful tool
+    # for finding "should this have an index?" — sort by total_exec_time
+    # or by mean_exec_time and the offenders surface immediately.
+    # `auto_explain` — emits EXPLAIN output to the postgres log for any
+    # query that crosses the duration threshold. With timescaledb +
+    # pg_stat_statements + auto_explain, *both* the histogram-of-pain
+    # and the per-query plan are available without instrumenting the
+    # app.
+    shared_preload_libraries = 'timescaledb,pg_stat_statements,auto_explain'
+
+    # ── pg_stat_statements ────────────────────────────────────────
+    pg_stat_statements.max = 10000           # rotate FIFO, plenty of room
+    pg_stat_statements.track = all           # also track nested (inside funcs)
+    pg_stat_statements.track_utility = off   # skip CREATE/ALTER/etc.
+    pg_stat_statements.save = on             # persist across pod restarts
+
+    # ── auto_explain ──────────────────────────────────────────────
+    # Threshold matches log_min_duration_statement so the slow-query
+    # line and its EXPLAIN land together. log_analyze adds runtime
+    # measurements at a small overhead — acceptable for a low-QPS
+    # analytical workload.
+    auto_explain.log_min_duration = 1000     # ms
+    auto_explain.log_analyze = on
+    auto_explain.log_buffers = on
+    auto_explain.log_timing = on
+    auto_explain.log_nested_statements = on
+    auto_explain.log_format = json
+    auto_explain.sample_rate = 1.0
+
+    # ── I/O timing ───────────────────────────────────────────────
+    # Cheap on Linux post-2.6, lets pg_stat_statements split shared-
+    # block read time from CPU time. Without it `total_exec_time` is
+    # one opaque number.
+    track_io_timing = on
 
     # ── Logging ───────────────────────────────────────────────────
     log_min_duration_statement = 1000   # ms — slow query log
