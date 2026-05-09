@@ -137,15 +137,30 @@ spec:
         - name: pg-conf
           configMap:
             name: fontem-stats-postgresql-conf
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data
       spec:
         accessModes: [ "ReadWriteOnce" ]
-        # Empty storageClassName matches the manually-provisioned NFS PV
-        # in gitops/infra/<env>.yaml. volumeName binds it explicitly.
+        {{- if .Values.storage.storageClassName }}
+        # Dynamic provisioning via the named StorageClass — the PVC
+        # will land on whichever node the pod is scheduled to (with
+        # local-path it follows the pod's nodeSelector).
+        storageClassName: {{ .Values.storage.storageClassName | quote }}
+        {{- else }}
+        # Empty storageClassName matches a manually-provisioned PV
+        # (NFS in dev/dast/staging). volumeName binds it explicitly.
         storageClassName: ""
         volumeName: {{ .Values.storage.volumeName | quote }}
+        {{- end }}
         resources:
           requests:
             storage: {{ .Values.storage.size }}
