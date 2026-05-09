@@ -88,6 +88,15 @@ spec:
         - name: postgres
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          # Pass `-c include_dir=…` so the conf snippet mounted at
+          # /etc/postgresql/conf.d/ is actually loaded. The
+          # timescaledb-ha image's `postgresql.conf` does NOT
+          # auto-include conf.d (the previous comment in this chart
+          # was wrong — `SHOW shared_preload_libraries` showed only
+          # `timescaledb` even with the file mounted). Postgres
+          # command-line `-c` overrides postgresql.conf, so any
+          # value our custom.conf sets actually wins.
+          args: ["postgres", "-c", "include_dir=/etc/postgresql/conf.d/"]
           ports:
             - name: postgres
               containerPort: 5432
@@ -112,10 +121,6 @@ spec:
             - name: pg-conf
               mountPath: /etc/postgresql/conf.d
               readOnly: true
-          # Ask Postgres to load our custom config snippet via -c
-          # config_file=... is heavy-handed; the timescaledb-ha image
-          # already includes /etc/postgresql/conf.d/* via the main
-          # postgresql.conf, so just dropping the file in is enough.
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:
