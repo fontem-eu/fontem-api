@@ -246,7 +246,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: golden/gmr-ci
+          repository: void42/gmr-ci
           path: .gmr-ci
           token: ${{ secrets.GMR_CI_READ_TOKEN }}
       - name: OSV-Scanner lockfile gate
@@ -270,7 +270,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: golden/gmr-ci
+          repository: void42/gmr-ci
           path: .gmr-ci
           token: ${{ secrets.GMR_CI_READ_TOKEN }}
 
