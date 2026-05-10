@@ -17,7 +17,9 @@ from src.analysis.geo_source import GeoSource
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.person_data_source import PersonDataSource
 from src.data.graph.neo4j_client import Neo4jClient
+from src.data.graph.graph_recommendations_source import GraphRecommendationsSource
 from src.data.sparql.virtuoso_client import VirtuosoClient
+from src.services.ip_to_country import IpToCountryService
 
 
 _UUID_RE = re.compile(
@@ -88,6 +90,20 @@ class DataSourceProvider(Provider):
     def geo_source(self, neo4j: Neo4jClient) -> GeoSource:
         from src.data.graph.graph_geo_source import GraphGeoSource
         return GraphGeoSource(neo4j_client=neo4j)
+
+    @provide(scope=Scope.APP)
+    def recommendations_source(
+        self, neo4j: Neo4jClient,
+    ) -> "GraphRecommendationsSource":  # noqa: F821 — forward ref imported below
+        from src.data.graph.graph_recommendations_source import (
+            GraphRecommendationsSource,
+        )
+        return GraphRecommendationsSource(neo4j_client=neo4j)
+
+    @provide(scope=Scope.APP)
+    def ip_to_country(self) -> "IpToCountryService":  # noqa: F821
+        from src.services.ip_to_country import IpToCountryService
+        return IpToCountryService()
 
 
 def resolve_company_id(identifier: str, neo4j: Neo4jClient) -> dict:

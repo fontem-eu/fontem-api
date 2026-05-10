@@ -34,6 +34,7 @@ from src.api.routers.persons import router as persons_router
 from src.api.routers.graph import router as graph_router
 from src.api.routers.geo import router as geo_router
 from src.api.routers.mentions import router as mentions_router
+from src.api.routers.euro_tracker import router as euro_tracker_router
 from src.atlas_api import build_router as build_atlas_router
 from src.atlas_api.app import _attach_state as attach_atlas_state
 
@@ -100,6 +101,7 @@ app.include_router(persons_router)
 app.include_router(graph_router)
 app.include_router(geo_router)
 app.include_router(mentions_router)
+app.include_router(euro_tracker_router)
 
 # Atlas API — mounted under /atlas as a self-contained module.
 # `attach_atlas_state` stashes per-source connection state on `app.state`

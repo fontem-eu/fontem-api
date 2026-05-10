@@ -31,6 +31,42 @@ spec:
     spec:
       imagePullSecrets:
         - name: regcred
+      initContainers:
+        # Download DB-IP Country Lite (free, CC BY 4.0, no API key)
+        # into a shared emptyDir. Powers `IpToCountryService` ↦ the
+        # /euro-tracker/me/country endpoint. Best-effort: if the
+        # download fails the main container still starts; the API
+        # just falls back to "country: null" and the frontend asks
+        # for a country pick.
+        - name: geoip-download
+          image: docker.io/curlimages/curl:8.10.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Try the current month's DB; fall back to the previous
+              # one if it isn't published yet (DB-IP releases mid-month).
+              for offset in 0 1 2; do
+                ym=$(date -u -d "${offset} months ago" +%Y-%m 2>/dev/null \
+                  || date -u +%Y-%m)
+                url="https://download.db-ip.com/free/dbip-country-lite-${ym}.mmdb.gz"
+                echo "[geoip] trying $url"
+                if curl -fsS --max-time 30 -o /tmp/db.mmdb.gz "$url"; then
+                  gunzip -c /tmp/db.mmdb.gz > /geoip/dbip-country-lite.mmdb
+                  echo "[geoip] installed $(stat -c %s /geoip/dbip-country-lite.mmdb) bytes from $ym"
+                  exit 0
+                fi
+              done
+              echo "[geoip] WARNING: download failed; main container will fall back to country=null"
+              # Exit 0 so the main container still boots — feature
+              # degrades gracefully when the DB is missing.
+              exit 0
+          volumeMounts:
+            - name: geoip
+              mountPath: /geoip
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 200m, memory: 64Mi }
       containers:
         - name: gmr-api
           image: contribute.void42.internal/golden/gmr-api:{{ .Values.version }}
@@ -125,6 +161,9 @@ spec:
             - name: esef-data
               mountPath: /esef-data
               readOnly: true
+            - name: geoip
+              mountPath: /app/geoip
+              readOnly: true
 
       volumes:
         - name: edgar-data
@@ -133,6 +172,9 @@ spec:
         - name: esef-data
           persistentVolumeClaim:
             claimName: esef-data
+        - name: geoip
+          emptyDir:
+            sizeLimit: 32Mi
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

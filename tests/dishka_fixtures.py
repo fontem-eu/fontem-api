@@ -17,6 +17,8 @@ from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.person_data_source import PersonDataSource
 from src.api.app import app
 from src.data.graph.neo4j_client import Neo4jClient
+from src.data.graph.graph_recommendations_source import GraphRecommendationsSource
+from src.services.ip_to_country import IpToCountryService
 
 
 class _FakeNeo4jSession:
@@ -91,6 +93,23 @@ class FlexibleMockProvider(Provider):
     @provide(scope=Scope.APP)
     def geo_source(self) -> GeoSource:
         return self._mocks.get("geo_source")  # type: ignore[return-value]
+
+    @provide(scope=Scope.APP)
+    def recommendations_source(self) -> GraphRecommendationsSource:
+        return self._mocks.get(
+            "recommendations_source",
+            GraphRecommendationsSource(_FakeNeo4jClient()),
+        )
+
+    @provide(scope=Scope.APP)
+    def ip_to_country(self) -> IpToCountryService:
+        # Default: a service that points at a path that doesn't exist
+        # → reports unavailable, returns None for every lookup. Tests
+        # that need a "detected" country can pass their own mock.
+        return self._mocks.get(
+            "ip_to_country",
+            IpToCountryService(db_path="/nonexistent.mmdb"),
+        )
 
 
 def make_test_client(data_source=None, **kwargs) -> TestClient:
