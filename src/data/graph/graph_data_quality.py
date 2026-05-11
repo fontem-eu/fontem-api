@@ -1119,3 +1119,103 @@ class GraphDataQualitySource(DataQualitySource):
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "cache_ttl_seconds": _CONNECTEDNESS_TTL_SECONDS,
         }
+
+    # ── Virtuoso content stats ────────────────────────────
+    #
+    # Triple-store view of the data: total triples, per-named-graph
+    # counts, and a class/predicate breakdown per graph. Powers the
+    # /data-quality/triples view in gmr-web. Costs ~3 SPARQL queries
+    # total (not N+1 per graph) so it stays cheap even with a dozen
+    # named graphs.
+
+    def get_triples_stats(
+        self, *, predicate_limit: int = 20, class_limit: int = 20,
+    ) -> dict:
+        """Snapshot of the Virtuoso RDF store.
+
+        Returns ``{"available": False, ...}`` when no Virtuoso
+        client is configured (e.g. on envs that haven't enabled the
+        sanctions cutover) so the frontend can render an explicit
+        "Virtuoso not configured" state instead of erroring.
+        """
+        if self._virtuoso is None:
+            return {
+                "available": False,
+                "total_triples": 0,
+                "graphs": [],
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        # 1. Total triples across all data graphs (the
+        # http://data.fontem.eu/graph/* prefix filter excludes
+        # Virtuoso's own system graphs).
+        total_rows = self._virtuoso.query(
+            """
+            SELECT (COUNT(*) AS ?n) WHERE {
+                GRAPH ?g { ?s ?p ?o }
+                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+            }
+            """
+        )
+        total = int(total_rows[0]["n"]) if total_rows else 0
+
+        # 2. Per-graph triple counts.
+        graph_rows = self._virtuoso.query(
+            """
+            SELECT ?g (COUNT(*) AS ?n) WHERE {
+                GRAPH ?g { ?s ?p ?o }
+                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+            } GROUP BY ?g ORDER BY DESC(?n)
+            """
+        )
+
+        # 3. Per-graph predicate frequency, then trimmed to top-N
+        # per graph in Python (LIMIT inside a GROUP BY-by-graph
+        # query is not portable). One query for everything is much
+        # cheaper than N queries per-graph.
+        pred_rows = self._virtuoso.query(
+            """
+            SELECT ?g ?p (COUNT(*) AS ?n) WHERE {
+                GRAPH ?g { ?s ?p ?o }
+                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+            } GROUP BY ?g ?p ORDER BY ?g DESC(?n)
+            """
+        )
+        preds_by_graph: dict[str, list[dict]] = {}
+        for row in pred_rows:
+            preds_by_graph.setdefault(row["g"], []).append(
+                {"predicate": row["p"], "n": int(row["n"])},
+            )
+
+        # 4. Per-graph class counts (rdf:type → counts).
+        class_rows = self._virtuoso.query(
+            """
+            SELECT ?g ?type (COUNT(*) AS ?n) WHERE {
+                GRAPH ?g { ?s a ?type }
+                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+            } GROUP BY ?g ?type ORDER BY ?g DESC(?n)
+            """
+        )
+        classes_by_graph: dict[str, list[dict]] = {}
+        for row in class_rows:
+            classes_by_graph.setdefault(row["g"], []).append(
+                {"class": row["type"], "n": int(row["n"])},
+            )
+
+        graphs = []
+        for row in graph_rows:
+            iri = row["g"]
+            graphs.append({
+                "iri": iri,
+                "label": iri.rsplit("/", 1)[-1],
+                "triples": int(row["n"]),
+                "top_predicates": preds_by_graph.get(iri, [])[:predicate_limit],
+                "classes": classes_by_graph.get(iri, [])[:class_limit],
+            })
+
+        return {
+            "available": True,
+            "total_triples": total,
+            "graphs": graphs,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }

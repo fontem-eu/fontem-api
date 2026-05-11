@@ -56,3 +56,10 @@ class DataQualitySource(ABC):
             "generated_at": None,
             "cache_ttl_seconds": 0,
         }
+    def get_triples_stats(self, **_kwargs) -> dict:
+        return {
+            "available": False,
+            "total_triples": 0,
+            "graphs": [],
+            "generated_at": None,
+        }
