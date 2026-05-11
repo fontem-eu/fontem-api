@@ -142,6 +142,17 @@ def sanctions_stats(source: FromDishka[DataQualitySource]):
     return source.get_sanctions_stats()
 
 
+@router.get("/triples")
+@inject
+def triples_stats(source: FromDishka[DataQualitySource]):
+    """RDF triple-store inventory: total + per-graph counts +
+    per-graph class/predicate breakdown. Returns
+    ``{"available": false, ...}`` when no Virtuoso is configured
+    so the frontend can render a clean empty state instead of a 500.
+    """
+    return source.get_triples_stats()
+
+
 @router.get("/firds")
 @inject
 def firds_stats(source: FromDishka[DataQualitySource]):
