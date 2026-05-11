@@ -6,7 +6,11 @@ metadata:
   labels:
     app: gmr-api
 spec:
-  type: NodePort
+  # Default kept as NodePort for backward compat with existing non-prod
+  # envs that may have external consumers wired up. Real prod overrides
+  # this to ClusterIP — gmr-web reverse-proxies /api/ over cluster DNS,
+  # there's no reason to expose port 31xxx on every node in prod.
+  type: {{ .Values.service.type | default "NodePort" }}
   selector:
     app: gmr-api
   ports:
