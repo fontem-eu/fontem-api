@@ -33,3 +33,13 @@ virtuoso:
 # cluster DNS, and a per-node 31xxx port serves no purpose there.
 service:
   type: NodePort
+
+# Per-cronjob tuning. Today only the OpenFIGI loader exposes a runtime
+# knob (its --limit caps how many IDs each scheduled run consumes).
+# Default empty → loader uses its own internal default (10000/mode).
+# Staging overrides this to a few hundred so non-prod runs don't
+# hammer OpenFIGI while we're still validating the LEI-discovery
+# path; prod will lift it once the path proves itself.
+cronjobs:
+  openfigi:
+    limit: ""
