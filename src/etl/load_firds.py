@@ -40,6 +40,8 @@ from gmr_event_schemas import builders
 from gmr_events import EventLog
 from neo4j import GraphDatabase
 
+from src.etl._http_retry import get_with_retry
+
 logger = logging.getLogger(__name__)
 
 FIRDS_SOLR = (
@@ -72,7 +74,7 @@ def query_firds_files(since):
     }
     logger.info("Querying FIRDS Solr for deltas since %s ...", since)
     try:
-        resp = httpx.get(FIRDS_SOLR, params=params, timeout=60)
+        resp = get_with_retry(FIRDS_SOLR, params=params, timeout=60)
         resp.raise_for_status()
     except httpx.HTTPError:
         logger.exception("Failed to query FIRDS Solr")
@@ -88,7 +90,7 @@ def download_zip(url):
     """Download a ZIP file into an in-memory buffer."""
     logger.info("Downloading %s ...", url)
     try:
-        resp = httpx.get(url, timeout=300, follow_redirects=True)
+        resp = get_with_retry(url, timeout=300, follow_redirects=True)
         resp.raise_for_status()
     except httpx.HTTPError:
         logger.exception("Failed to download %s", url)

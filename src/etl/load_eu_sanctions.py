@@ -33,12 +33,13 @@ from gmr_events import EventLog
 
 from . import gmr_id
 from ._hooks import resolve_entity
+from ._http_retry import get_with_retry
 
 logger = logging.getLogger(__name__)
 
 SANCTIONS_URL = (
     "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
-    "xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
+    "xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"  # gitleaks:allow — public EU sanctions portal param, not a credential
 )
 
 BATCH_SIZE = 500
@@ -308,7 +309,7 @@ def main(argv=None):
     else:
         logger.info("Downloading sanctions list from %s", SANCTIONS_URL)
         try:
-            resp = httpx.get(SANCTIONS_URL, timeout=120, follow_redirects=True)
+            resp = get_with_retry(SANCTIONS_URL, timeout=120, follow_redirects=True)
             resp.raise_for_status()
             xml_bytes = resp.content
         except httpx.HTTPError:

@@ -38,6 +38,7 @@ from eforms.filters import awards_only
 from eforms.stream import stream_notices
 
 from ..services.currency import CurrencyService
+from ._http_retry import call_with_retry
 from .ted_matcher import TedMatcher
 
 logger = logging.getLogger(__name__)
@@ -76,14 +77,23 @@ def _download_monthly(year: int, month: int, dest: Path) -> Path:
     if out.exists():
         logger.info("Using cached %s", out)
         return out
-    logger.info("Downloading %s ...", url)
-    with httpx.stream("GET", url, timeout=600, follow_redirects=True) as r:
-        r.raise_for_status()
-        with open(out, "wb") as f:
-            for chunk in r.iter_bytes(chunk_size=256 * 1024):
-                f.write(chunk)
-    logger.info("Downloaded %s (%.0f MB)", out, out.stat().st_size / 1e6)
-    return out
+
+    def _do_download() -> Path:
+        # Clear any partial bytes left by a previous attempt so each
+        # retry starts from zero — the upstream tar.gz is not
+        # resume-friendly (no Range support on TED's CDN).
+        if out.exists():
+            out.unlink()
+        logger.info("Downloading %s ...", url)
+        with httpx.stream("GET", url, timeout=600, follow_redirects=True) as r:
+            r.raise_for_status()
+            with open(out, "wb") as f:
+                for chunk in r.iter_bytes(chunk_size=256 * 1024):
+                    f.write(chunk)
+        logger.info("Downloaded %s (%.0f MB)", out, out.stat().st_size / 1e6)
+        return out
+
+    return call_with_retry(_do_download)
 
 
 def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
