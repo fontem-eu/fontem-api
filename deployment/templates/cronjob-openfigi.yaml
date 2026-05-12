@@ -10,11 +10,19 @@ been seeded yet (greenfield environments, etc.).
           "name" "openfigi-credentials"
           "key" "api_key"
           "optional" true))) -}}
+{{/*
+Optional --limit override. The loader defaults to 10000 IDs per mode;
+non-prod environments set a smaller value (a few hundred) so the cron
+doesn't churn through OpenFIGI's daily quota during validation.
+*/}}
+{{- $limit := default "" .Values.cronjobs.openfigi.limit -}}
+{{- $args := list -}}
+{{- if $limit }}{{- $args = list "--limit" (toString $limit) -}}{{- end }}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-openfigi"
       "schedule"        "0 8 * * 1"
       "module"          "src.etl.load_openfigi"
-      "args"            (list)
+      "args"            $args
       "deadlineSeconds" 7200
       "cpuRequest"      "250m"
       "cpuLimit"        "1"
