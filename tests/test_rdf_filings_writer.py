@@ -24,7 +24,7 @@ from src.etl.rdf_filings_writer import (
     RdfFilingsWriter,
 )
 
-VIRTUOSO_IMAGE = "contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14"
+VIRTUOSO_IMAGE = "contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.14"
 SHAPES_PATH = Path(
     "/config/repos/fontem-ontology/shapes/filing.shacl.ttl"
 )

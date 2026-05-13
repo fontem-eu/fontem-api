@@ -16,7 +16,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: currency-refresh
-              image: contribute.void42.internal/golden/gmr-api:latest
+              image: contribute.void42.internal/fontem/gmr-api:latest
               command:
                 - python3
                 - -m

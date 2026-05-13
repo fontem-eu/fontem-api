@@ -79,7 +79,7 @@ kumaSecretName: fontem-stats-kuma
 # (both ship from edgar-gmr-etl), so we just need its tag. Override
 # `cronjobs.imageTag` per env in gitops/<env>/fontem-stats.yaml.
 cronjobs:
-  imageRepository: contribute.void42.internal/golden/gmr-api
+  imageRepository: contribute.void42.internal/fontem/gmr-api
   imageTag: ""   # required — e.g. "ve7da9af"
   daily:
     # Default 03:00 UTC; well after Eurostat's nightly publish window.

@@ -38,7 +38,7 @@ from src.etl.rdf_sanctions_writer import (
     SanctionsValidationError,
 )
 
-VIRTUOSO_IMAGE = "contribute.void42.internal/golden/virtuoso-opensource-7:7.2.14"
+VIRTUOSO_IMAGE = "contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.14"
 GRAPH_IRI = "http://data.fontem.eu/graph/sanctions-test"
 SHAPES_PATH = Path(
     "/config/repos/fontem-ontology/shapes/sanctions.shacl.ttl"

@@ -61,7 +61,7 @@ spec:
             - name: regcred
           containers:
             - name: etl
-              image: contribute.void42.internal/golden/gmr-api:{{ .Values.version }}
+              image: contribute.void42.internal/fontem/gmr-api:{{ .Values.version }}
               imagePullPolicy: Always
               env:
                 - name: NEO4J_URI
