@@ -32,8 +32,8 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 import httpx
-from gmr_event_schemas import builders
-from gmr_events import EventLog
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 
 from src.etl._hooks import resolve_entity
 

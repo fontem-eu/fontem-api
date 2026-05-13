@@ -30,8 +30,8 @@ from decimal import Decimal as _Decimal
 from pathlib import Path
 
 import httpx
-from gmr_event_schemas import builders
-from gmr_events import EventLog
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 from neo4j import GraphDatabase
 
 from eforms.filters import awards_only

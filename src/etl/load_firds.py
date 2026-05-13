@@ -36,8 +36,8 @@ from collections.abc import Iterable
 from xml.etree.ElementTree import iterparse
 
 import httpx
-from gmr_event_schemas import builders
-from gmr_events import EventLog
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 from neo4j import GraphDatabase
 
 from src.etl._http_retry import get_with_retry

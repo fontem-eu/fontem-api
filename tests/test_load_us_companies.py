@@ -1,7 +1,7 @@
 """Tests for the US companies loader.
 
 Post-event-log: the loader emits UpsertCompany + UpsertListing events
-into the event log via gmr_events.EventLog. Sinks project them; the
+into the event log via fontem_events.EventLog. Sinks project them; the
 loader itself never touches Neo4j or Virtuoso directly.
 """
 from unittest.mock import MagicMock
