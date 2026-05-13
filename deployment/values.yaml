@@ -14,13 +14,9 @@ fontemStats:
   database: fontem_stats
   secretName: fontem-stats-credentials
 
-# Virtuoso target for the sanctions ETL's RDF dual-write. When
-# enabled, the sanctions cronjob picks up VIRTUOSO_SPARQL_ENDPOINT
-# + VIRTUOSO_DBA_PASSWORD from the secret below and pushes Turtle
-# to its default graph (http://data.fontem.eu/graph/sanctions) in
-# addition to the legacy Neo4j writes. Disabled by default — only
-# prod opts in until non-prod envs get their own Virtuoso or are
-# retired alongside the cutover.
+# Virtuoso SPARQL endpoint surfaced to the API for read-only sanctions
+# panels. Disabled by default — non-prod consumes the shared Virtuoso
+# at fontem-shared via cluster DNS, prod its own.
 virtuoso:
   enabled: false
   sparqlEndpoint: ""
@@ -28,18 +24,7 @@ virtuoso:
   dbaPasswordKey: VIRTUOSO_DBA_PASSWORD
 
 # Service type. Default NodePort keeps backward compat with non-prod
-# envs; real prod (fontem-prod) overrides this to ClusterIP in
-# gitops/prod/fontem-api.yaml since gmr-web reverse-proxies /api/ over
-# cluster DNS, and a per-node 31xxx port serves no purpose there.
+# envs; real prod overrides to ClusterIP since fontem-web reverse-proxies
+# /api/ over cluster DNS.
 service:
   type: NodePort
-
-# Per-cronjob tuning. Today only the OpenFIGI loader exposes a runtime
-# knob (its --limit caps how many IDs each scheduled run consumes).
-# Default empty → loader uses its own internal default (10000/mode).
-# Staging overrides this to a few hundred so non-prod runs don't
-# hammer OpenFIGI while we're still validating the LEI-discovery
-# path; prod will lift it once the path proves itself.
-cronjobs:
-  openfigi:
-    limit: ""

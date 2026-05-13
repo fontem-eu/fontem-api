@@ -1,0 +1,7 @@
+apiVersion: v1
+name: fontem-api-etl
+description: Fontem ETL pipeline — CronJobs that load FIRDS / TED / GLEIF / EDGAR /
+  EU-listings / OpenFIGI / sanctions / etc. into Neo4j and emit events to
+  events.entity_events. Same image as the API chart but isolated lifecycle —
+  deployed to fontem-shared (non-prod) and fontem-prod separately.
+version: 1.0.0

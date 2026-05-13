@@ -92,7 +92,7 @@ spec:
                 - name: EVENTS_DATABASE_URL
                   valueFrom:
                     secretKeyRef:
-                      name: gmr-postgres-credentials
+                      name: fontem-postgres-credentials
                       key: EVENTS_DATABASE_URL
                 {{- range .extraEnv }}
                 - {{ toYaml . | nindent 18 | trim }}
