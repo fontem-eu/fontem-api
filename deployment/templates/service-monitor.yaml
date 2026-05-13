@@ -1,16 +1,16 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: gmr-api
+  name: fontem-api
   namespace: {{ .Release.Namespace }}
   labels:
-    app: gmr-api
+    app: fontem-api
     # Must match the Prometheus operator's serviceMonitorSelector
     release: monitoring-stack
 spec:
   selector:
     matchLabels:
-      app: gmr-api
+      app: fontem-api
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}

@@ -61,7 +61,7 @@ spec:
             - name: regcred
           containers:
             - name: etl
-              image: contribute.void42.internal/fontem/gmr-api:{{ .Values.version }}
+              image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
               imagePullPolicy: Always
               env:
                 - name: NEO4J_URI
@@ -125,7 +125,7 @@ spec:
                   # exit. Status only flips to "up" on rc=0.
                   #
                   # We push via python urllib rather than curl — the
-                  # gmr-api Docker image is python:3.12-slim with no
+                  # fontem-api Docker image is python:3.12-slim with no
                   # curl. Python is guaranteed present (it's how we run
                   # the loader anyway).
                   KUMA_STATUS=down

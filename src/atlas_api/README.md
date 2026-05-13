@@ -1,7 +1,7 @@
 # Atlas API
 
 Read surface for the Fontem Atlas frontend (`gmr-web/src/views/AtlasView.vue`).
-Lives inside the main `gmr-api` image today; designed to be extracted to
+Lives inside the main `fontem-api` image today; designed to be extracted to
 its own service when traffic or feature scope justifies it.
 
 ## What's served

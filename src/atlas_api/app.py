@@ -2,7 +2,7 @@
 
 Two flavours, same routes:
 
-- ``build_router()`` returns an APIRouter that the main gmr-api app
+- ``build_router()`` returns an APIRouter that the main fontem-api app
   mounts under ``/atlas``. Sources are stashed on the parent app's
   state at mount time so all the Atlas routers share one connection
   surface.
@@ -31,7 +31,7 @@ def _attach_state(app: FastAPI) -> None:
 
 
 def build_router() -> APIRouter:
-    """Mountable router for the main gmr-api app.
+    """Mountable router for the main fontem-api app.
 
     Caller must run ``_attach_state`` against its own app — see
     ``mount_into(parent_app)`` for the typical wiring.

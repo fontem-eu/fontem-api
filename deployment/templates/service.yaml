@@ -2,9 +2,9 @@ apiVersion: v1
 kind: Service
 metadata:
   namespace: {{ .Release.Namespace }}
-  name: gmr-api
+  name: fontem-api
   labels:
-    app: gmr-api
+    app: fontem-api
 spec:
   # Default kept as NodePort for backward compat with existing non-prod
   # envs that may have external consumers wired up. Real prod overrides
@@ -12,7 +12,7 @@ spec:
   # there's no reason to expose port 31xxx on every node in prod.
   type: {{ .Values.service.type | default "NodePort" }}
   selector:
-    app: gmr-api
+    app: fontem-api
   ports:
     - name: http
       port: 80

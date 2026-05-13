@@ -25,7 +25,7 @@ exportfs -ra
 No `chown` needed: the StatefulSet sets `securityContext.fsGroup: 999`,
 which makes kubelet recursively chown the mounted volume to the
 postgres group on first start. This is the only side of the chart
-where pods need write access; consumers (gmr-api, the sync CronJobs)
+where pods need write access; consumers (fontem-api, the sync CronJobs)
 read via the database connection, never the filesystem.
 
 The matching `PersistentVolume` resource lives in
@@ -86,8 +86,8 @@ If you'd rather run the bootstrap steps individually (e.g. to debug
 one in isolation), the same commands still work via:
 
 ```sh
-kubectl -n gmr exec -it deploy/gmr-api -- python -m src.stats_etl register-seed
-kubectl -n gmr exec -it deploy/gmr-api -- python -m src.stats_etl nuts-polygons --version 2024
+kubectl -n gmr exec -it deploy/fontem-api -- python -m src.stats_etl register-seed
+kubectl -n gmr exec -it deploy/fontem-api -- python -m src.stats_etl nuts-polygons --version 2024
 ```
 
 ### 5. Backfill Neo4j NUTS hierarchy
@@ -95,7 +95,7 @@ kubectl -n gmr exec -it deploy/gmr-api -- python -m src.stats_etl nuts-polygons 
 After step 5, populate the NUTS-1/2/3 nodes in the graph:
 
 ```sh
-kubectl -n gmr exec -it deploy/gmr-api -- \
+kubectl -n gmr exec -it deploy/fontem-api -- \
     python -m src.etl.sync_nuts_from_stats
 ```
 
@@ -183,7 +183,7 @@ kubectl -n gmr create job --from=cronjob/fontem-stats-sync-daily \
 For one specific dataset:
 
 ```sh
-kubectl -n gmr exec -it deploy/gmr-api -- \
+kubectl -n gmr exec -it deploy/fontem-api -- \
     python -m src.stats_etl sync demo_r_pjangrp3 --force
 ```
 
@@ -254,7 +254,7 @@ observation table).
 | Daily Kuma monitor goes red | `kubectl get jobs -n gmr -l app=fontem-stats-sync` | Inspect the latest failed pod's logs; usually upstream 5xx — wait one cycle. |
 | `sync_run.error_message` shows `psycopg.errors.UndefinedColumn` | Schema drifted | Apply migrations; current version of init SQL is in the chart's ConfigMap. |
 | Pod stuck in `CrashLoopBackOff` after a chart bump | `kubectl logs -p` on the pod | Usually a TimescaleDB-HA image-tag bump that broke the data dir; pin back to the previous tag in `gitops/<env>/fontem-stats.yaml`. |
-| `/stats/datasets` returns 503 | `STATS_DATABASE_URL` env var missing on `gmr-api` | Add the env var to the gmr-api Deployment in [edgar-gmr-etl/deployment/templates/deployment.yaml](../deployment/templates/deployment.yaml) — it's intentionally optional so dev/dast can run without the stats store. |
+| `/stats/datasets` returns 503 | `STATS_DATABASE_URL` env var missing on `fontem-api` | Add the env var to the fontem-api Deployment in [edgar-gmr-etl/deployment/templates/deployment.yaml](../deployment/templates/deployment.yaml) — it's intentionally optional so dev/dast can run without the stats store. |
 | All datasets report 0 rows but `success` | `iter_observations` parser drift on a Eurostat header change | Capture the raw TSV (`curl -O <source_url>`) and run the parser locally; usually a new flag or column. |
 
 ---

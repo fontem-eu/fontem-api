@@ -71,7 +71,7 @@ Out of scope for this plan, called out so they don't drift in:
 └──────────────┬───────────────────────────────────────────────────────┘
                │
                │ read by:
-               │   - gmr-api (bivariate analysis endpoints)
+               │   - fontem-api (bivariate analysis endpoints)
                │   - edgar-gmr-etl (NUTS hierarchy backfill into Neo4j)
                │   - DQ dashboard (sync_run + dataset coverage panels)
                ▼
@@ -123,7 +123,7 @@ service per environment. Either:
 
 Singleton fits better. The `fontem-stats-postgres` chart lives at
 `edgar-gmr-etl/deployment-stats/` (new sibling chart; doesn't pollute the
-existing `deployment/` chart that ships the gmr-api app).
+existing `deployment/` chart that ships the fontem-api app).
 
 ---
 
@@ -502,7 +502,7 @@ end-to-end, leaves a `success` row in `sync_run` and ~74k rows in
 green status for each dataset.
 
 ### Phase D — read path + Neo4j NUTS hierarchy backfill (week 4)
-12. Read endpoint on `gmr-api`: `GET /stats/series?dataset=<code>&geo=<code>&from=<year>&to=<year>`
+12. Read endpoint on `fontem-api`: `GET /stats/series?dataset=<code>&geo=<code>&from=<year>&to=<year>`
     returns the time-series. Joinable to the existing entity APIs by NUTS
     code.
 13. Use `nuts_region` to backfill the NUTS-1/2/3 hierarchy in Neo4j —

@@ -5,9 +5,9 @@
 //    (ESEF) have completed at least one full Virtuoso run, and the
 //    /api/data-quality/edgar + /api/data-quality/esef endpoints
 //    return Virtuoso-sourced numbers consistent with the Neo4j ones;
-//  - the gmr-api Deployment has VIRTUOSO_SPARQL_URL set in prod (it
+//  - the fontem-api Deployment has VIRTUOSO_SPARQL_URL set in prod (it
 //    does, since Phase 2);
-//  - the new gmr-api image with the SPARQL DQ source is deployed.
+//  - the new fontem-api image with the SPARQL DQ source is deployed.
 //
 // Effect:
 //  1. REPORTED edges between Company → FinancialYear are removed.

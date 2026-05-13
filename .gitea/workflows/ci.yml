@@ -304,7 +304,7 @@ jobs:
         name: Build, push, sign, attest
         uses: ./.fontem-ci/actions/docker-build-sign
         with:
-          image: contribute.void42.internal/fontem/gmr-api
+          image: contribute.void42.internal/fontem/fontem-api
           cosign-key: ${{ secrets.COSIGN_KEY }}
           registry-user: ${{ secrets.REGISTRY_USER }}
           registry-password: ${{ secrets.REGISTRY_PASSWORD }}
@@ -312,7 +312,7 @@ jobs:
 
       - uses: ./.fontem-ci/actions/gitops-bump
         with:
-          service: gmr-api
+          service: fontem-api
           tag: ${{ steps.image.outputs.tag }}
           env: testing
           registry-password: ${{ secrets.REGISTRY_PASSWORD }}

@@ -29,7 +29,7 @@ class FontemStatsSource:
         )
         # `$(VAR)` survives untouched if the Kubernetes env-var ordering
         # puts the URL before the variable it references — once observed
-        # in prod (gmr-api with STATS_DATABASE_URL declared before
+        # in prod (fontem-api with STATS_DATABASE_URL declared before
         # STATS_POSTGRES_PASSWORD). Detect and fail clean rather than
         # passing the literal to libpq, which 28P01s with the actual
         # username and a useless detail.

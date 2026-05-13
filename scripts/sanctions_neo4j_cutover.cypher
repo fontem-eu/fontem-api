@@ -7,7 +7,7 @@
 //    Virtuoso-sourced numbers);
 //  - the read paths in graph_data_quality.py have flipped to
 //    Virtuoso for entity counts, regimes, completeness;
-//  - the gmr-api Deployment has VIRTUOSO_SPARQL_URL set in prod.
+//  - the fontem-api Deployment has VIRTUOSO_SPARQL_URL set in prod.
 //
 // Effect:
 //  1. Each SANCTIONED edge gets re-pointed at a :SanctionRef stub

@@ -2,9 +2,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   namespace: {{ .Release.Namespace }}
-  name: gmr-api
+  name: fontem-api
   labels:
-    app: gmr-api
+    app: fontem-api
 spec:
   replicas: {{ .Values.replicas | default 1 }}
   strategy:
@@ -14,13 +14,13 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      app: gmr-api
+      app: fontem-api
   template:
     metadata:
       labels:
-        app: gmr-api
+        app: fontem-api
         kube-monkey/enabled: enabled
-        kube-monkey/identifier: gmr-api
+        kube-monkey/identifier: fontem-api
         kube-monkey/mtbf: "2"
         kube-monkey/kill-mode: fixed
         kube-monkey/kill-value: "1"
@@ -68,8 +68,8 @@ spec:
             requests: { cpu: 10m, memory: 16Mi }
             limits:   { cpu: 200m, memory: 64Mi }
       containers:
-        - name: gmr-api
-          image: contribute.void42.internal/fontem/gmr-api:{{ .Values.version }}
+        - name: fontem-api
+          image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
           imagePullPolicy: Always
           ports:
             - containerPort: 8000

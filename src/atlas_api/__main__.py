@@ -1,7 +1,7 @@
 """Standalone runner — `python -m src.atlas_api`.
 
 Useful for local dev and as the entry point when the service is
-extracted from gmr-api. In the consolidated build we serve Atlas
+extracted from fontem-api. In the consolidated build we serve Atlas
 mounted under /atlas in the main app instead (see src/api/app.py).
 """
 from __future__ import annotations

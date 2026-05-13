@@ -29,7 +29,7 @@ virtuoso:
 
 # Service type. Default NodePort keeps backward compat with non-prod
 # envs; real prod (fontem-prod) overrides this to ClusterIP in
-# gitops/prod/gmr-api.yaml since gmr-web reverse-proxies /api/ over
+# gitops/prod/fontem-api.yaml since gmr-web reverse-proxies /api/ over
 # cluster DNS, and a per-node 31xxx port serves no purpose there.
 service:
   type: NodePort

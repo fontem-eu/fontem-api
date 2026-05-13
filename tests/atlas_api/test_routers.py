@@ -20,7 +20,7 @@ from src.atlas_api.schemas import Observation, SourceHealth
 
 
 def _client(stats_dsn: str | None = "postgresql://test:test@h/d"):
-    """Build an isolated standalone app — no shared state with gmr-api."""
+    """Build an isolated standalone app — no shared state with fontem-api."""
     with patch.dict("os.environ", {} if stats_dsn is None
                     else {"STATS_DATABASE_URL": stats_dsn}, clear=False):
         if stats_dsn is None:

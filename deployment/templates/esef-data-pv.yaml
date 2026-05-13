@@ -3,7 +3,7 @@ kind: PersistentVolume
 metadata:
   name: esef-data-pv-{{ .Release.Namespace }}
   labels:
-    app: gmr-api
+    app: fontem-api
 spec:
   capacity:
     storage: 10Gi

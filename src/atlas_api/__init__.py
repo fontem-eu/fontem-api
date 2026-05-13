@@ -11,7 +11,7 @@ that boundary is the contract you'll preserve when extracting.
 
 Two integration paths:
 
-1. Mount inside the main gmr-api FastAPI app (current production path)::
+1. Mount inside the main fontem-api FastAPI app (current production path)::
 
        from src.atlas_api import build_router
        app.include_router(build_router(), prefix="/atlas")

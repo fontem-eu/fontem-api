@@ -3,7 +3,7 @@
 Target audience: the Phase 3 cutover. Each ETL still writes to Neo4j
 today. This script stages the parity migration by mapping live Neo4j
 state into Turtle and pushing it into per-domain named graphs in
-Virtuoso. Once read paths flip (gmr-api, gmr-community-api), the
+Virtuoso. Once read paths flip (fontem-api, gmr-community-api), the
 loaders themselves get rewritten to skip Neo4j entirely and Neo4j
 can come down.
 
