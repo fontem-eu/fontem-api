@@ -38,6 +38,7 @@ from eforms.filters import awards_only
 from eforms.stream import stream_notices
 
 from ..services.currency import CurrencyService
+from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .ted_matcher import TedMatcher
 
@@ -85,7 +86,8 @@ def _download_monthly(year: int, month: int, dest: Path) -> Path:
         if out.exists():
             out.unlink()
         logger.info("Downloading %s ...", url)
-        with httpx.stream("GET", url, timeout=600, follow_redirects=True) as r:
+        with httpx.stream("GET", url, timeout=600, follow_redirects=True,
+                          headers=HTTP_HEADERS) as r:
             r.raise_for_status()
             with open(out, "wb") as f:
                 for chunk in r.iter_bytes(chunk_size=256 * 1024):

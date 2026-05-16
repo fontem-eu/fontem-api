@@ -94,8 +94,11 @@ spec:
               cpu: "2"
               memory: "8Gi"
           env:
+            # SEC EDGAR's Fair Access policy requires a deliverable
+            # contact in the User-Agent. edgartools picks this value up
+            # automatically when building requests.
             - name: EDGAR_IDENTITY
-              value: "bemar-edgar@research.com"
+              value: "Fontem team@fontem.eu"
 
             # Local EDGAR bulk data (written by edgar-data-fetcher CronJob).
             - name: GMR_EDGAR_LOCAL_DATA_DIR

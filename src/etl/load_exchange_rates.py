@@ -27,12 +27,15 @@ import json
 import logging
 import os
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
+from email.utils import format_datetime
 from pathlib import Path
 
 import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
+
+from src.etl._http import with_headers
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +79,45 @@ ECB_URL = (
 FRANKFURTER_URL = "https://api.frankfurter.app/{start}..{end}?from=EUR&to={ccy}"
 
 
-def fetch_ecb(ccy: str, start: str, end: str) -> dict[str, str]:
-    """Fetch ECB daily reference rates for a currency."""
-    url = ECB_URL.format(ccy=ccy, start=start, end=end)
+def _local_rates_path(rates_dir: Path, ccy: str) -> Path:
+    return rates_dir / "rates" / f"{ccy}.json"
+
+
+def _if_modified_since(path: Path) -> str | None:
+    """Return an RFC-1123 ``If-Modified-Since`` value pinned to the
+    local rates file's mtime, or ``None`` when no cached file exists."""
     try:
-        resp = httpx.get(url, timeout=60, follow_redirects=True)
+        ts = path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    return format_datetime(datetime.fromtimestamp(ts, tz=timezone.utc),
+                           usegmt=True)
+
+
+def fetch_ecb(ccy: str, start: str, end: str,
+              rates_dir: Path | None = None) -> dict[str, str] | None:
+    """Fetch ECB daily reference rates for a currency.
+
+    When ``rates_dir`` is provided and a cached JSON file already exists
+    for the currency, send an ``If-Modified-Since`` header. ECB returns
+    304 Not Modified when the published series hasn't changed since the
+    cache mtime; in that case we return ``None`` so the caller can skip
+    the save/emit cycle and avoid re-writing identical data. ``{}`` is
+    still reserved for "fetch failed / returned no rows."
+    """
+    url = ECB_URL.format(ccy=ccy, start=start, end=end)
+    headers_extra: dict[str, str] = {}
+    if rates_dir is not None:
+        ims = _if_modified_since(_local_rates_path(rates_dir, ccy))
+        if ims:
+            headers_extra["If-Modified-Since"] = ims
+    try:
+        resp = httpx.get(url, timeout=60, follow_redirects=True,
+                         headers=with_headers(headers_extra))
+        if resp.status_code == 304:
+            logger.info("  %s: ECB returned 304 (unchanged since %s)",
+                        ccy, headers_extra.get("If-Modified-Since"))
+            return None
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         logger.warning("ECB fetch failed for %s: %s", ccy, exc)
@@ -115,7 +152,8 @@ def fetch_frankfurter(ccy: str, start: str, end: str) -> dict[str, str]:
         chunk_end = f"{year}-12-31" if year < end_year else end
         url = FRANKFURTER_URL.format(start=chunk_start, end=chunk_end, ccy=ccy)
         try:
-            resp = httpx.get(url, timeout=60, follow_redirects=True)
+            resp = httpx.get(url, timeout=60, follow_redirects=True,
+                             headers=with_headers())
             if resp.status_code != 200:
                 continue
             data = resp.json()
@@ -213,7 +251,15 @@ def load_all(
     # ECB primary source
     for ccy in ecb_list:
         logger.info("Fetching %s from ECB...", ccy)
-        daily = fetch_ecb(ccy, start, end)
+        daily = fetch_ecb(ccy, start, end, rates_dir=rates_dir)
+        if daily is None:
+            # 304 — keep cached JSON, skip emitting (events already
+            # carry the same dates from prior runs; the projection is
+            # idempotent on UpsertExchangeRate but re-emitting wastes
+            # both a Postgres tx and the sink's pull cycle).
+            summary.setdefault("ccy_unchanged", 0)
+            summary["ccy_unchanged"] += 1
+            continue
         source = "ecb"
         if not daily:
             logger.warning("  %s: ECB returned no data, trying Frankfurter", ccy)

@@ -19,6 +19,13 @@ event; ambiguous and Tier-4 fuzzy results are skipped — there's
 no value in flooding the graph with 50-70%-false-positive edges
 the way the previously-deleted in-cypher matcher did.
 
+GDPR note: the Transparency Register includes named individual
+representatives. Their data is republished here on the same lawful
+basis as the upstream (Art 6(1)(e), public-interest task). Data-subject
+requests reach Fontem at **gdpr@fontem.eu**. When a registrant drops
+off the upstream daily dump the disclosure IRI is tombstoned; the
+sink does not retain "last seen" entries.
+
 Usage:
     python -m src.etl.load_eu_lobbying
 """
@@ -36,6 +43,7 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 
 from src.etl._hooks import resolve_entity
+from src.etl._http import HTTP_HEADERS
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -262,7 +270,8 @@ def emit_represents_relationships(
 def load_eu_lobbying(log: EventLog) -> dict:
     """Download TR XML and emit Lobbyist/REPRESENTS events."""
     logger.info("Downloading EU Transparency Register XML from %s ...", TR_XML_URL)
-    with httpx.Client(timeout=120.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=120.0, follow_redirects=True,
+                      headers=HTTP_HEADERS) as client:
         resp = client.get(TR_XML_URL)
         resp.raise_for_status()
     xml_bytes = resp.content

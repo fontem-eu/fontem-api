@@ -29,6 +29,8 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 from neo4j import GraphDatabase
 
+from src.etl._http import HTTP_HEADERS
+
 logger = logging.getLogger(__name__)
 
 # CDP datasets on data.cdp.net (SODA API)
@@ -67,7 +69,8 @@ def fetch_cdp_data(year, limit):
     }
     logger.info("Querying CDP API for year %s (limit %d)...", year, limit)
     try:
-        resp = httpx.get(url, params=params, timeout=60)
+        resp = httpx.get(url, params=params, timeout=60,
+                         headers=HTTP_HEADERS)
         resp.raise_for_status()
     except httpx.HTTPError:
         logger.exception(

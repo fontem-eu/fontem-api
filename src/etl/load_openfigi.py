@@ -49,12 +49,17 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 from neo4j import GraphDatabase
 
+from src.etl._http import with_headers
+
 logger = logging.getLogger(__name__)
 
 OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
 API_BATCH_SIZE = 100  # OpenFIGI max per request (with API key)
-# Rate limit: 25 requests per 6 seconds (with API key)
-RATE_LIMIT_SLEEP = 0.25  # seconds between requests (conservative)
+# OpenFIGI keyed-tier ceiling is 25 requests per 6 seconds. 0.25s/req
+# is exactly at the ceiling; one retry or clock skew tips us over. 0.30s
+# keeps a safety margin (≈20 req/6s effective) without meaningfully
+# slowing the LEI backfill — 0.3s × 100-ID batches = 30s per 10k IDs.
+RATE_LIMIT_SLEEP = 0.30
 
 # Equity-ish market sectors. OpenFIGI returns ETFs, bonds, options,
 # warrants, etc. against the same LEI; we only want shares so the
@@ -121,9 +126,10 @@ def query_openfigi(payload, api_key=None):
     The caller decides how to map results back to the inputs and what
     to keep — ISIN mode wants one ticker per ISIN; LEI mode wants
     every equity instrument under the LEI."""
-    headers = {"Content-Type": "application/json"}
+    extra = {"Content-Type": "application/json"}
     if api_key:
-        headers["X-OPENFIGI-APIKEY"] = api_key
+        extra["X-OPENFIGI-APIKEY"] = api_key
+    headers = with_headers(extra)
     try:
         resp = httpx.post(
             OPENFIGI_URL, json=payload, headers=headers, timeout=30,

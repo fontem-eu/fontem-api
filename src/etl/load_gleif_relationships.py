@@ -27,6 +27,7 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 
 from . import gmr_id
+from ._http import HTTP_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,8 @@ TAG_REL_STATUS = f"{_t}RelationshipStatus"
 
 def resolve_latest_url() -> str:
     """Query the GLEIF API for the latest Level 2 file URL."""
-    resp = httpx.get(f"{GLEIF_RR_API}?page=0&pageSize=1", timeout=30)
+    resp = httpx.get(f"{GLEIF_RR_API}?page=0&pageSize=1", timeout=30,
+                     headers=HTTP_HEADERS)
     resp.raise_for_status()
     data = resp.json()["data"]
     if not data:
@@ -58,7 +60,8 @@ def download_zip(url: str) -> io.BytesIO:
     """Download a ZIP file into memory."""
     logger.info("Downloading %s ...", url)
     buf = io.BytesIO()
-    with httpx.stream("GET", url, timeout=600, follow_redirects=True) as r:
+    with httpx.stream("GET", url, timeout=600, follow_redirects=True,
+                      headers=HTTP_HEADERS) as r:
         r.raise_for_status()
         total = 0
         for chunk in r.iter_bytes(chunk_size=256 * 1024):

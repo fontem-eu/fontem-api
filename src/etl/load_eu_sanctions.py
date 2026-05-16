@@ -12,6 +12,15 @@ sanction → company resolver call still runs (the ETL is a candidate
 emitter for review queues) but its output is logged-only until the
 review-queue refactor that targets Virtuoso lands.
 
+GDPR note: this loader republishes identified-person data (sanctioned
+individuals). The processing lawful basis is Art 6(1)(e) — public
+interest task derived from the EU's own publication — but downstream
+data-subject rights still attach: rectification (Art 16) and erasure
+(Art 17) requests reach Fontem at **gdpr@fontem.eu**. The EU's own
+delist process is the upstream source of truth — when an entry
+disappears from the FSF feed, the sink tombstones the IRI rather than
+silently leaving stale "still sanctioned" assertions in the graph.
+
 Usage:
     python -m src.etl.load_eu_sanctions --file /tmp/sanctions.xml \\
         --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
