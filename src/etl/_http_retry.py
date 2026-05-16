@@ -27,6 +27,8 @@ from typing import Any
 
 import httpx
 
+from src.etl._http import with_headers
+
 log = logging.getLogger(__name__)
 
 DEFAULT_RETRY_STATUSES: frozenset[int] = frozenset({500, 502, 503, 504})
@@ -59,6 +61,7 @@ def get_with_retry(
     → up to 4x. With base_delay=5 that's max 5s + 10s + 20s = 35s worst
     case between attempts.
     """
+    httpx_kwargs.setdefault("headers", with_headers())
     last_exc: BaseException | None = None
     last_resp: httpx.Response | None = None
     for attempt in range(1, max_attempts + 1):

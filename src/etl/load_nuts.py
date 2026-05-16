@@ -29,6 +29,7 @@ import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
+from src.etl._http import HTTP_HEADERS
 from src.services.location_service import LocationService
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,8 @@ def parse_nuts_csv(csv_text: str):
 def download_nuts_csv() -> str:
     """Download the NUTS CSV from Eurostat."""
     logger.info("Downloading NUTS CSV from %s", NUTS_CSV_URL)
-    resp = httpx.get(NUTS_CSV_URL, timeout=60, follow_redirects=True)
+    resp = httpx.get(NUTS_CSV_URL, timeout=60, follow_redirects=True,
+                     headers=HTTP_HEADERS)
     resp.raise_for_status()
     return resp.text
 

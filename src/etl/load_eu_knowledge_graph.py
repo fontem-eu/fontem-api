@@ -40,6 +40,7 @@ import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
+from src.etl._http import HTTP_HEADERS
 from src.services.location_service import LocationService
 
 from . import gmr_id
@@ -98,7 +99,7 @@ def download_country_csv(country_code: str) -> bytes:
     logger.info("Downloading %s ...", url)
     resp = httpx.get(
         url, timeout=300, follow_redirects=True,
-        headers={"User-Agent": "GMR-KnowledgeGraph/1.0"},
+        headers=HTTP_HEADERS,
     )
     resp.raise_for_status()
     logger.info("  %s: %d KB", country_code, len(resp.content) // 1024)
