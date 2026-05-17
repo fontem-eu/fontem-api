@@ -112,6 +112,7 @@ class EurostatSource:
         self,
         code: str,
         batch_size: int = 5000,
+        start_period: int | None = None,
     ) -> Iterator[list[Observation]]:
         """Pull the bulk TSV and yield observations in batches.
 
@@ -122,9 +123,21 @@ class EurostatSource:
 
         First column is comma-separated dim values; remaining columns are
         per-period numeric+flag tuples ("1234.5 b" or ":" for missing).
+
+        ``start_period`` (when set) appends ``&startPeriod=YYYY`` to the
+        bulk URL — Eurostat returns only observations at that year or
+        later. The TSV bulk endpoint ignores ``sinceTimePeriod`` /
+        ``lastTimePeriod``, but ``startPeriod`` works, and produces a
+        much smaller payload (~6× for the last 2 years on MIGR_IMM8 —
+        17k×35 cells → 15k×3 cells). The PK on observation guarantees
+        that re-fetching overlapping periods is idempotent. Pre-
+        ``startPeriod`` historical revisions are missed; the weekly
+        ``--all --force`` cron is the catch-all reconcile.
         """
         url = f"{BULK_BASE}/{code.upper()}/"
         params = {"format": "TSV", "compressed": "true"}
+        if start_period is not None:
+            params["startPeriod"] = str(start_period)
 
         with self._http.stream("GET", url, params=params) as resp:
             resp.raise_for_status()

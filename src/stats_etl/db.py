@@ -322,6 +322,27 @@ class StatsDatabase:
             return None, None
         return row[0], row[1]
 
+    def max_observed_year(self, dataset_code: str) -> int | None:
+        """Latest year present in `observation` for this dataset.
+
+        Used by the loader to decide an incremental fetch window:
+        `startPeriod = max_observed_year - 1` covers the new period
+        plus a one-year overlap (idempotent re-fetch via the
+        observation PK). Returns None when no observations exist —
+        callers should fall back to a full fetch.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXTRACT(YEAR FROM MAX(time))::int
+                FROM fontem_stats.observation
+                WHERE dataset_code = %s
+                """,
+                (dataset_code,),
+            )
+            row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None
+
     def stale_datasets(self, stale_after_seconds: int) -> list[str]:
         """Datasets whose latest success is older than `stale_after_seconds`,
         or that have never been synced. Used by `sync --stale-after`."""

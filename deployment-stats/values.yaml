@@ -84,8 +84,17 @@ cronjobs:
   daily:
     # Default 03:00 UTC; well after Eurostat's nightly publish window.
     schedule: "0 3 * * *"
-    deadlineSeconds: 3600
+    # 12h. The steady-state cycle runs in seconds (skip-when-upstream-
+    # unchanged + the incremental startPeriod fetch), but a first-load
+    # backfill of every dataset takes hours — `hlth_cd_acdr2` alone is
+    # 37 min for the full 30-year history. concurrencyPolicy:Forbid
+    # prevents overlap; the next daily fires the morning after.
+    deadlineSeconds: 43200
   weekly:
     # Sunday 04:00 UTC, after the daily — staggered so they never race.
+    # Runs `--all --force` so it ignores both the upstream-unchanged
+    # skip and the startPeriod incremental — the reconcile path that
+    # catches Eurostat retroactively revising pre-startPeriod years.
+    # Same 12h ceiling for the same reason as daily.
     schedule: "0 4 * * 0"
-    deadlineSeconds: 7200
+    deadlineSeconds: 43200

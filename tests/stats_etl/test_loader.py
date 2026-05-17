@@ -95,6 +95,55 @@ def test_sync_proceeds_when_force_even_if_unchanged():
     result = loader.sync("demo_test", force=True)
     assert result.status == "success"
     assert result.rows_total == 2
+    # --force must bypass the startPeriod incremental — weekly cron
+    # uses --force as the historical-revision reconcile path.
+    src.iter_observations.assert_called_once()
+    assert src.iter_observations.call_args.kwargs.get("start_period") is None
+
+
+def test_sync_uses_start_period_when_prior_data_exists_and_upstream_newer():
+    """Incremental fetch: when last_successful_run exists and upstream
+    has moved on, pass startPeriod=max_observed_year-1 to the source so
+    Eurostat's bulk TSV returns only the recent window. The PK on
+    observation makes the overlap idempotent.
+    """
+    last = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    newer = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta(updated=newer)
+    src.iter_observations.return_value = iter([_obs(2)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (last, last)
+    db.max_observed_year.return_value = 2024
+    db.bulk_upsert_observations.return_value = (2, 0)
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    src.iter_observations.assert_called_once()
+    assert src.iter_observations.call_args.kwargs.get("start_period") == 2023
+
+
+def test_sync_full_pull_on_first_sync_even_when_max_observed_year_none():
+    """First sync (no prior success row): max_observed_year returns
+    None; the loader must NOT pass startPeriod — first load needs
+    every historical period.
+    """
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(2)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)  # never synced
+    db.max_observed_year.return_value = None
+    db.bulk_upsert_observations.return_value = (2, 0)
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    src.iter_observations.assert_called_once()
+    assert src.iter_observations.call_args.kwargs.get("start_period") is None
 
 
 def test_sync_success_path_writes_rows_and_finishes_success():

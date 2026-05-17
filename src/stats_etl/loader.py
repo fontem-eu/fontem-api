@@ -67,8 +67,31 @@ class EurostatLoader:
                 )
                 return SyncResult(code=code, status="skipped")
 
+            # Incremental fetch: when this dataset has been synced
+            # before AND we're not in --force mode, restrict the bulk
+            # TSV pull to the year before our most-recent observation
+            # via Eurostat's `startPeriod=YYYY` filter. The
+            # observation PK makes the overlap idempotent. First-ever
+            # sync (no prior data → max_observed_year is None) and
+            # --force runs still pull the full history; --force is
+            # the weekly reconcile that catches pre-startPeriod
+            # historical revisions.
+            start_period: int | None = None
+            if not force and last_upstream is not None:
+                last_year = self._db.max_observed_year(code)
+                if last_year is not None:
+                    start_period = last_year - 1
+                    logger.info(
+                        "%s: incremental fetch from %d "
+                        "(upstream changed: last=%s now=%s)",
+                        code, start_period,
+                        last_upstream, meta.upstream_modified,
+                    )
+
             total = 0
-            for batch in self._source.iter_observations(code):
+            for batch in self._source.iter_observations(
+                code, start_period=start_period,
+            ):
                 inserted, _ = self._db.bulk_upsert_observations(code, batch)
                 total += inserted
                 if total % 50_000 == 0:
