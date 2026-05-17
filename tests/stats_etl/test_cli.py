@@ -70,10 +70,15 @@ def test_cli_recompute_availability_runs_for_all_datasets(capsys):
         MagicMock(code="a"), MagicMock(code="b"),
     ]
     fake_db.recompute_year_availability.side_effect = [12, 7]
+    fake_db.recompute_level_universe.return_value = 4
     with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):
         rc = main(["recompute-availability"])
     assert rc == 0
     fake_db.migrate_year_availability.assert_called_once()
+    # level_universe is refreshed once before the per-dataset loop so
+    # `recompute_year_availability` reads from the cache instead of
+    # recomputing the level-wide denominator inline.
+    fake_db.recompute_level_universe.assert_called_once()
     assert fake_db.recompute_year_availability.call_count == 2
     out = capsys.readouterr().out
     assert "summary: 2 dataset(s), 19 availability row(s) written" in out

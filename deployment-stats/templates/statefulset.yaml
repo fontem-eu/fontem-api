@@ -106,10 +106,13 @@ spec:
           # a `.` as a custom variable.
           args:
             - postgres
-            # Extensions loaded at startup. Adding pg_stat_statements
-            # + auto_explain alongside the existing timescaledb.
+            # Extensions loaded at startup. timescaledb + pg_stat_statements
+            # + auto_explain were the original set; pg_qualstats is added
+            # to record predicate stats for the hypopg-driven index-advisor
+            # workflow (see configmap-init-sql.yaml's 00-extensions.sql).
+            # hypopg itself doesn't need preloading.
             - -c
-            - shared_preload_libraries=timescaledb,pg_stat_statements,auto_explain
+            - shared_preload_libraries=timescaledb,pg_stat_statements,auto_explain,pg_qualstats
             # Memory + connections — keep the chart's default values
             # in lockstep with values.yaml's pgConfig.* (omitted here:
             # the timescaledb-ha image already picks reasonable

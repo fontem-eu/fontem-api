@@ -8,11 +8,11 @@ from __future__ import annotations
 # pylint: disable=missing-function-docstring
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.stats_etl.db import Dataset
 from src.stats_etl.eurostat_source import DatasetMetadata, Observation
-from src.stats_etl.loader import EurostatLoader
+from src.stats_etl.loader import EurostatLoader, sync_many
 
 
 def _ds(code: str = "demo_test", enabled: bool = True) -> Dataset:
@@ -210,3 +210,44 @@ def test_sync_success_survives_year_availability_recompute_failure():
     result = loader.sync("demo_test")
     assert result.status == "success"
     assert result.rows_total == 2
+
+
+def test_sync_many_refreshes_level_universe_once_before_loop():
+    """The level-wide denominator cache must be refreshed once per
+    batch, BEFORE the per-dataset loop, so each per-dataset
+    `recompute_year_availability` reads a current-as-of-batch value
+    instead of full-scanning the observation hypertable inline.
+    """
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([])
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (0, 0)
+    db.recompute_level_universe.return_value = 4
+    with patch("src.stats_etl.loader.StatsDatabase", return_value=db), \
+            patch("src.stats_etl.loader.EurostatSource", return_value=src):
+        results = sync_many(["a", "b", "c"])
+    assert len(results) == 3
+    db.recompute_level_universe.assert_called_once()
+
+
+def test_sync_many_swallows_level_universe_refresh_failure():
+    """A perm-error or transient DB hiccup on the level_universe
+    refresh must not abort the per-dataset loop — stale denominators
+    are a graceful-degradation, sync data is too important to skip.
+    """
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([])
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (0, 0)
+    db.recompute_level_universe.side_effect = RuntimeError("perm denied")
+    with patch("src.stats_etl.loader.StatsDatabase", return_value=db), \
+            patch("src.stats_etl.loader.EurostatSource", return_value=src):
+        results = sync_many(["a"])
+    assert len(results) == 1
+    assert results[0].status == "success"

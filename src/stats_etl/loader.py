@@ -145,4 +145,19 @@ def sync_many(codes: list[str], *, force: bool = False) -> list[SyncResult]:
     db = StatsDatabase()
     source = EurostatSource()
     loader = EurostatLoader(source, db)
+    # Per-dataset `recompute_year_availability` reads from
+    # `fontem_stats.level_universe` instead of recomputing the
+    # level-wide region counts inline (a full-hypertable scan per
+    # dataset; was the only non-trivial query in the schema at ~20s
+    # mean). Refresh the cache once before the batch loop runs;
+    # within-batch drift is fine — datasets refresh existing geo_codes
+    # rather than introducing new ones. Failures are non-fatal:
+    # stale denominators degrade availability_pct gracefully.
+    try:
+        db.migrate_year_availability()
+        n = db.recompute_level_universe()
+        logger.info("level_universe refreshed (%d level row(s))", n)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("level_universe refresh failed (%s) — denominators"
+                       " may be stale", exc)
     return [loader.sync(c, force=force) for c in codes]

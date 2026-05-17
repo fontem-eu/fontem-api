@@ -147,6 +147,11 @@ def cmd_recompute_availability(args: argparse.Namespace) -> int:
     if not codes:
         print("error: no datasets registered", file=sys.stderr)
         return 1
+    # Refresh the level_universe cache once before the per-dataset
+    # loop — recompute_year_availability JOINs against it instead of
+    # full-scanning observation per dataset.
+    lu_n = db.recompute_level_universe()
+    print(f"  level_universe refreshed ({lu_n} level row(s))")
     total = 0
     for code in codes:
         n = db.recompute_year_availability(code)

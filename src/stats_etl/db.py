@@ -520,6 +520,13 @@ class StatsDatabase:
         run on fresh DB volumes, so an explicit migration runs from
         the loader + API at boot to forward-port already-deployed
         clusters.
+
+        Also creates the `level_universe` cache — the level-wide
+        denominator that used to be recomputed via a per-dataset
+        CTE that full-table-scanned the observation hypertable on
+        every recompute. The cache is refreshed once per ETL cycle
+        (see `recompute_level_universe`) and read by every
+        `recompute_year_availability` call.
         """
         with self.connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -545,37 +552,39 @@ class StatsDatabase:
                     ON fontem_stats.dataset_year_availability (dataset_code)
                 """,
             )
-
-    def recompute_year_availability(self, dataset_code: str) -> int:
-        """Recompute year availability for a single dataset.
-
-        Aggregates `fontem_stats.observation` grouped by
-        (nuts_level, dimensions, year) and stores the count of
-        distinct regions with a non-null value. The denominator
-        (level universe) is computed level-wide across all
-        datasets — this is robust to `nuts_region` being unpopulated
-        and gives a meaningful "fraction of regions in our system
-        that this dataset/year covers" reading.
-        """
-        with self.connect() as conn, conn.cursor() as cur:
-            # Wipe and rewrite in one transaction — the universe (level
-            # denominator) drifts as new datasets land, so a stale
-            # row could carry an outdated `regions_total`. Cheaper to
-            # recompute everything for the dataset than to compute
-            # diffs.
-            cur.execute(
-                "DELETE FROM fontem_stats.dataset_year_availability "
-                "WHERE dataset_code = %s",
-                (dataset_code,),
-            )
             cur.execute(
                 """
-                WITH level_universe AS (
-                    -- Prefer the NUTS region table when populated;
-                    -- fall back to distinct observed geo_codes at
-                    -- that level across all datasets.
+                CREATE TABLE IF NOT EXISTS fontem_stats.level_universe (
+                    nuts_level  smallint    PRIMARY KEY,
+                    n           int         NOT NULL,
+                    computed_at timestamptz NOT NULL DEFAULT now()
+                )
+                """,
+            )
+
+    def recompute_level_universe(self) -> int:
+        """Refresh the level-wide region count cache.
+
+        The denominator for `dataset_year_availability.availability_pct`
+        is the count of distinct regions observable at each NUTS level —
+        it doesn't depend on the dataset being recomputed and only
+        drifts when new datasets land observations at a new geo_code,
+        or when `nuts_region` gets populated.
+
+        Computing it inline as a CTE per-dataset (the pre-2026-05 path)
+        full-table-scanned the observation hypertable once per dataset;
+        with 40 datasets and ~600 MB of data that was the only
+        non-trivial query in the schema (20s mean per `recompute`).
+
+        Call this once per ETL cycle, before the per-dataset
+        `recompute_year_availability` loop.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH fresh AS (
                     SELECT lvl AS nuts_level,
-                           COALESCE(nuts_n, observed_n) AS n
+                           COALESCE(nuts_n, observed_n, 0) AS n
                     FROM (
                         SELECT generate_series(0, 3) AS lvl
                     ) levels
@@ -591,8 +600,40 @@ class StatsDatabase:
                         WHERE value IS NOT NULL
                         GROUP BY char_length(geo_code) - 2
                     ) obs USING (lvl)
-                ),
-                per_year AS (
+                )
+                INSERT INTO fontem_stats.level_universe (nuts_level, n, computed_at)
+                SELECT nuts_level, n, now() FROM fresh
+                ON CONFLICT (nuts_level) DO UPDATE
+                    SET n = EXCLUDED.n,
+                        computed_at = EXCLUDED.computed_at
+                """,
+            )
+            return cur.rowcount or 0
+
+    def recompute_year_availability(self, dataset_code: str) -> int:
+        """Recompute year availability for a single dataset.
+
+        Aggregates `fontem_stats.observation` grouped by
+        (nuts_level, dimensions, year) and stores the count of
+        distinct regions with a non-null value. The denominator
+        (level universe) is read from `fontem_stats.level_universe`
+        — refresh it once per ETL cycle via
+        `recompute_level_universe()` before calling this in a loop.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            # Wipe and rewrite in one transaction — the universe (level
+            # denominator) drifts as new datasets land, so a stale
+            # row could carry an outdated `regions_total`. Cheaper to
+            # recompute everything for the dataset than to compute
+            # diffs.
+            cur.execute(
+                "DELETE FROM fontem_stats.dataset_year_availability "
+                "WHERE dataset_code = %s",
+                (dataset_code,),
+            )
+            cur.execute(
+                """
+                WITH per_year AS (
                     SELECT
                         dataset_code,
                         (char_length(geo_code) - 2)::smallint AS nuts_level,
@@ -626,7 +667,7 @@ class StatsDatabase:
                     END AS availability_pct,
                     now()
                 FROM per_year p
-                LEFT JOIN level_universe u
+                LEFT JOIN fontem_stats.level_universe u
                     ON u.nuts_level = p.nuts_level
                 """,
                 (dataset_code,),

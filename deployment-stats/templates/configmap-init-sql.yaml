@@ -22,6 +22,20 @@ data:
     CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
     CREATE EXTENSION IF NOT EXISTS pgstattuple;
 
+    -- hypopg + pg_qualstats: hypothetical-index workflow.
+    --   pg_qualstats tracks predicates (column = const, column < const, …)
+    --     hit by real queries; reads via pg_qualstats_index_advisor() or
+    --     direct SELECT FROM pg_qualstats to find what's worth indexing.
+    --     Requires pg_qualstats in shared_preload_libraries (statefulset.yaml).
+    --   hypopg creates virtual indexes that show up in EXPLAIN without
+    --     paying the cost of building them — try a candidate index, see
+    --     if the planner picks it, drop it. Sample workflow:
+    --       SELECT hypopg_create_index('CREATE INDEX ON x (y)');
+    --       EXPLAIN <query>;
+    --       SELECT hypopg_reset();
+    CREATE EXTENSION IF NOT EXISTS hypopg;
+    CREATE EXTENSION IF NOT EXISTS pg_qualstats;
+
   10-schema.sql: |
     CREATE SCHEMA IF NOT EXISTS fontem_stats;
     SET search_path = fontem_stats, public;
@@ -156,6 +170,21 @@ data:
     );
     CREATE INDEX IF NOT EXISTS dataset_year_availability_dataset_idx
         ON fontem_stats.dataset_year_availability (dataset_code);
+
+    -- ── Level-universe cache ───────────────────────────────────
+    --
+    -- Denominator for `dataset_year_availability.availability_pct`:
+    -- count of distinct regions observable at each NUTS level.
+    -- Was previously a CTE inside every per-dataset availability
+    -- recompute, full-scanning the observation hypertable 40× per
+    -- ETL cycle (~20s mean per call). Now cached here; refreshed
+    -- once per cycle by stats_etl.loader.sync_many before the
+    -- per-dataset loop. Reads cheap (4-row indexed lookup).
+    CREATE TABLE IF NOT EXISTS fontem_stats.level_universe (
+        nuts_level  smallint    PRIMARY KEY,
+        n           int         NOT NULL,
+        computed_at timestamptz NOT NULL DEFAULT now()
+    );
 
     -- ── NUTS regions with PostGIS geometry ──────────────────────
     CREATE TABLE IF NOT EXISTS fontem_stats.nuts_region (
