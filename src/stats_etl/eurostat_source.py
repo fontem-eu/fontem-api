@@ -139,9 +139,20 @@ class EurostatSource:
         if start_period is not None:
             params["startPeriod"] = str(start_period)
 
-        with self._http.stream("GET", url, params=params) as resp:
-            resp.raise_for_status()
-            raw = b"".join(resp.iter_bytes())
+        # Plain GET with an explicit total deadline, not stream() — the
+        # streaming variant's timeout applies to inactivity between
+        # chunks, so Eurostat trickling 1 byte every 119s would hang
+        # the loader forever (observed live on MIGR_ACQ: 9+ minutes
+        # with httpx.stream while a direct urllib.urlopen for the same
+        # URL completed in 12s from the same pod). The whole gzip
+        # payload is in the dozens of MB at worst, easily fits in
+        # memory; nothing to gain from streaming.
+        logger.info("%s: GET %s (startPeriod=%s)", code, url,
+                    start_period if start_period is not None else "—")
+        resp = self._http.get(url, params=params, timeout=300.0)
+        resp.raise_for_status()
+        raw = resp.content
+        logger.info("%s: fetched %d bytes (gzip)", code, len(raw))
         text = gzip.decompress(raw).decode("utf-8")
 
         reader = csv.reader(io.StringIO(text), delimiter="\t")

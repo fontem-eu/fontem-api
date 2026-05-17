@@ -104,13 +104,18 @@ def test_parse_period_invalid():
 # ── Bulk-TSV stream parsing ──────────────────────────────────────
 
 def _fake_tsv_response(payload: str) -> MagicMock:
-    """Build a fake httpx streaming response delivering gzipped TSV."""
+    """Build a fake httpx Response delivering gzipped TSV.
+
+    The loader switched from `http.stream(...)` + `iter_bytes()` to a
+    plain `http.get(...)` + `.content` after the streaming variant's
+    per-chunk-inactivity timeout was caught hanging the loader
+    indefinitely on a slow upstream (the .get path has a single hard
+    total-deadline instead).
+    """
     gz = gzip.compress(payload.encode("utf-8"))
     resp = MagicMock()
-    resp.iter_bytes.return_value = iter([gz])
+    resp.content = gz
     resp.raise_for_status.return_value = None
-    resp.__enter__.return_value = resp
-    resp.__exit__.return_value = None
     return resp
 
 
@@ -122,7 +127,7 @@ def test_iter_observations_minimal_tsv():
         "A,NR,BE211\t999.9 \t:\n"  # second cell is missing → skipped
     )
     http = MagicMock()
-    http.stream.return_value = _fake_tsv_response(payload)
+    http.get.return_value = _fake_tsv_response(payload)
     source = EurostatSource(http=http)
 
     batches = list(source.iter_observations("DEMO_TEST"))
@@ -148,7 +153,7 @@ def test_iter_observations_carries_dimensions():
         "A,F,Y15-19,DE111\t100.0 \n"
     )
     http = MagicMock()
-    http.stream.return_value = _fake_tsv_response(payload)
+    http.get.return_value = _fake_tsv_response(payload)
     source = EurostatSource(http=http)
 
     batches = list(source.iter_observations("DEMO_TEST"))
@@ -165,7 +170,7 @@ def test_iter_observations_batches_correctly():
         rows.append(f"A,NR,XX{i:03d}\t10.0 ")
     payload = "freq,unit,geo\\TIME_PERIOD\t2024 \n" + "\n".join(rows) + "\n"
     http = MagicMock()
-    http.stream.return_value = _fake_tsv_response(payload)
+    http.get.return_value = _fake_tsv_response(payload)
     source = EurostatSource(http=http)
 
     batches = list(source.iter_observations("X", batch_size=10))
