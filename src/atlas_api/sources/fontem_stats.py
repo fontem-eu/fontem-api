@@ -195,6 +195,7 @@ class FontemStatsSource:
             FROM fontem_stats.dataset_year_availability
             WHERE dataset_code = d.code
         ) a ON true
+        WHERE d.enabled
         ORDER BY d.theme, d.code
     """
 
