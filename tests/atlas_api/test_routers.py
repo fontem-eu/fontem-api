@@ -89,6 +89,77 @@ def test_datasets_returns_summary():
     assert body[0]["max_availability_pct"] == 0.93
 
 
+def test_datasets_returns_summary_includes_dataset_stats():
+    """Per-dataset aggregate range (value_min/max/p02/p50/p98 +
+    time_min/max + observation_count + value_kind) must round-trip
+    through the catalog response so the Atlas UI can show the
+    dataset-wide range at a glance and pin a stable colour scale
+    for "view this dataset across years".
+    """
+    rows = [
+        {
+            "code": "nama_10r_2gdp", "label": "GDP × NUTS-2", "theme": "economy",
+            "nuts_levels": [2], "time_unit": "year", "update_freq": "1 year",
+            "enabled": True, "notes": None,
+            "last_sync_started_at": None, "last_upstream_modified": None,
+            "last_sync_rows": None,
+            "max_availability_pct": 0.93,
+            "value_min": 0.0, "value_max": 125_000.0,
+            "value_p02": 1_200.0, "value_p50": 18_000.0, "value_p98": 92_000.0,
+            "observation_count": 42_000,
+            "time_min": "2000-01-01T00:00:00+00:00",
+            "time_max": "2024-01-01T00:00:00+00:00",
+            "value_kind": "sequential",
+        },
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.list_datasets",
+        return_value=rows,
+    ):
+        r = _client().get("/datasets")
+    assert r.status_code == 200
+    body = r.json()[0]
+    assert body["value_min"] == 0.0
+    assert body["value_max"] == 125_000.0
+    assert body["value_p50"] == 18_000.0
+    assert body["observation_count"] == 42_000
+    assert body["value_kind"] == "sequential"
+    assert body["time_min"].startswith("2000-01-01")
+    assert body["time_max"].startswith("2024-01-01")
+
+
+def test_datasets_returns_summary_when_dataset_stats_missing():
+    """`dataset_stats` row missing (pre-backfill cluster or zero-obs
+    dataset) → every aggregate field is None. Picker must still
+    render and frontend falls back to per-data bounds.
+    """
+    rows = [
+        {
+            "code": "demo_zero", "label": "Empty", "theme": "economy",
+            "nuts_levels": [2], "time_unit": "year", "update_freq": "1 year",
+            "enabled": True, "notes": None,
+            "last_sync_started_at": None, "last_upstream_modified": None,
+            "last_sync_rows": None,
+            "max_availability_pct": None,
+            "value_min": None, "value_max": None,
+            "value_p02": None, "value_p50": None, "value_p98": None,
+            "observation_count": None,
+            "time_min": None, "time_max": None,
+            "value_kind": None,
+        },
+    ]
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.list_datasets",
+        return_value=rows,
+    ):
+        r = _client().get("/datasets")
+    assert r.status_code == 200
+    body = r.json()[0]
+    assert body["value_min"] is None
+    assert body["observation_count"] is None
+    assert body["value_kind"] is None
+
+
 def test_datasets_returns_summary_when_availability_missing():
     """`max_availability_pct=None` is the pre-backfill state — the
     dataset picker must still render and the toggle simply no-ops.

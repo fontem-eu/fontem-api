@@ -173,6 +173,33 @@ def cmd_recompute_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recompute_dataset_stats(args: argparse.Namespace) -> int:
+    """One-shot backfill of `dataset_stats` from `observation`.
+
+    The loader recomputes this on every successful sync, but the
+    hook only fires after a fresh load — clusters that already
+    have observations but pre-date the table need a manual kick
+    to populate it. Same shape as `recompute-stats` (slice-level)
+    but one row per dataset rather than per-slice.
+    """
+    db = StatsDatabase()
+    db.migrate_dataset_stats()
+    if args.codes:
+        codes = list(args.codes)
+    else:
+        codes = [d.code for d in db.list_datasets(only_enabled=False)]
+    if not codes:
+        print("error: no datasets registered", file=sys.stderr)
+        return 1
+    total = 0
+    for code in codes:
+        n = db.recompute_dataset_stats(code)
+        total += n
+        print(f"  {code:24} {n:5} row(s)")
+    print(f"summary: {len(codes)} dataset(s), {total} aggregate row(s) written")
+    return 0
+
+
 def cmd_recompute_availability(args: argparse.Namespace) -> int:
     """One-shot backfill of `dataset_year_availability` from observations.
 
@@ -252,6 +279,16 @@ def main(argv: list[str] | None = None) -> int:
         help="dataset codes (default: every registered dataset)",
     )
     p_stats.set_defaults(func=cmd_recompute_stats)
+
+    p_ds_stats = sub.add_parser(
+        "recompute-dataset-stats",
+        help="recompute dataset_stats (per-dataset aggregate) from observations",
+    )
+    p_ds_stats.add_argument(
+        "codes", nargs="*",
+        help="dataset codes (default: every registered dataset)",
+    )
+    p_ds_stats.set_defaults(func=cmd_recompute_dataset_stats)
 
     p_avail = sub.add_parser(
         "recompute-availability",

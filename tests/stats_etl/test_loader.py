@@ -221,6 +221,48 @@ def test_sync_success_survives_slice_stats_recompute_failure():
     assert result.rows_total == 2
 
 
+def test_sync_recomputes_dataset_stats_after_success():
+    """After a successful sync the loader must trigger
+    `recompute_dataset_stats` (per-dataset aggregate) so the
+    catalog range + stable colour scale stay in sync with the
+    freshly-loaded observations.
+    """
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(3)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (3, 0)
+    db.recompute_dataset_stats.return_value = 1
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    db.migrate_dataset_stats.assert_called_once()
+    db.recompute_dataset_stats.assert_called_once_with("demo_test")
+
+
+def test_sync_success_survives_dataset_stats_recompute_failure():
+    """Same best-effort contract as slice-stats and year-availability:
+    a perm error or transient DB hiccup recomputing the per-dataset
+    aggregate must not unwind the committed observations.
+    """
+    src = MagicMock()
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(2)])
+    db = MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
+    db.bulk_upsert_observations.return_value = (2, 0)
+    db.recompute_dataset_stats.side_effect = RuntimeError("perm denied")
+
+    loader = EurostatLoader(src, db)
+    result = loader.sync("demo_test")
+    assert result.status == "success"
+    assert result.rows_total == 2
+
+
 def test_sync_recomputes_year_availability_after_success():
     """The Atlas low-coverage filter depends on this sidecar staying
     fresh, so the loader must trigger it on every successful sync.

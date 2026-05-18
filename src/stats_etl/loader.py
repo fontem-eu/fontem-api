@@ -124,6 +124,26 @@ class EurostatLoader:
                     code, stats_exc, code,
                 )
 
+            # Recompute the dataset-level aggregate (one row per
+            # dataset: value_min/max + percentiles + time_min/max
+            # across every slice and every period). Used by the
+            # Atlas catalog view + by "show this dataset over time"
+            # to pin a stable colour scale. Cheap relative to slice
+            # stats — one aggregation over `observation` filtered to
+            # this dataset_code, the existing index on dataset_code
+            # makes it fast. Same best-effort contract.
+            try:
+                self._db.migrate_dataset_stats()
+                self._db.recompute_dataset_stats(code)
+                logger.info("%s: recomputed dataset-level stats", code)
+            except Exception as ds_exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "%s: dataset-stats recompute failed (%s); "
+                    "sync itself succeeded — recompute via "
+                    "`stats-etl recompute-dataset-stats %s`",
+                    code, ds_exc, code,
+                )
+
             # Recompute per-year availability so the Atlas frontend
             # can hide low-coverage years (and low-coverage datasets)
             # without the user having to discover them mid-explore.

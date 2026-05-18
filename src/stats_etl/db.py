@@ -548,6 +548,95 @@ class StatsDatabase:
             )
             return cur.rowcount or 0
 
+    # ── Dataset-level aggregate stats ──────────────────────────
+    #
+    # One row per dataset. value_min/value_max + percentiles are
+    # aggregated across every observation (every slice, every period),
+    # so the Atlas catalog page can show the whole-dataset value
+    # range at a glance, and a "show this dataset across years" view
+    # can pin a stable colour scale to the dataset-wide range.
+    # time_min/time_max give the observed period (cheaper than the
+    # client deriving it from observations).
+
+    def migrate_dataset_stats(self) -> None:
+        """Idempotent CREATE TABLE for the dataset-level stats sidecar.
+
+        Same forward-port pattern as migrate_slice_stats: init scripts
+        only run on a fresh data dir, so the loader + API call this at
+        boot for already-deployed clusters.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fontem_stats.dataset_stats (
+                    dataset_code      text     PRIMARY KEY
+                        REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+                    value_min         double precision,
+                    value_max         double precision,
+                    value_p02         double precision,
+                    value_p50         double precision,
+                    value_p98         double precision,
+                    observation_count bigint   NOT NULL DEFAULT 0,
+                    time_min          timestamptz,
+                    time_max          timestamptz,
+                    value_kind        text     NOT NULL DEFAULT 'sequential'
+                                       CHECK (value_kind IN ('sequential','diverging')),
+                    computed_at       timestamptz NOT NULL DEFAULT now()
+                )
+                """,
+            )
+
+    def recompute_dataset_stats(self, dataset_code: str) -> int:
+        """Recompute the dataset-level aggregate row for one dataset.
+
+        Aggregates `fontem_stats.observation` across every slice and
+        every time period and upserts into `dataset_stats`. Returns
+        the number of rows written (1 if the dataset has observations,
+        0 if not — we still UPSERT a row with NULL stats so callers
+        can distinguish "no data yet" from "missing").
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fontem_stats.dataset_stats (
+                    dataset_code, value_min, value_max,
+                    value_p02, value_p50, value_p98,
+                    observation_count, time_min, time_max,
+                    value_kind, computed_at
+                )
+                SELECT
+                    %s AS dataset_code,
+                    min(value),
+                    max(value),
+                    percentile_cont(0.02) WITHIN GROUP (ORDER BY value) AS p02,
+                    percentile_cont(0.50) WITHIN GROUP (ORDER BY value) AS p50,
+                    percentile_cont(0.98) WITHIN GROUP (ORDER BY value) AS p98,
+                    count(*),
+                    min(time),
+                    max(time),
+                    CASE
+                        WHEN min(value) < 0 AND max(value) > 0 THEN 'diverging'
+                        ELSE 'sequential'
+                    END AS value_kind,
+                    now()
+                FROM fontem_stats.observation
+                WHERE dataset_code = %s
+                ON CONFLICT (dataset_code) DO UPDATE SET
+                    value_min         = EXCLUDED.value_min,
+                    value_max         = EXCLUDED.value_max,
+                    value_p02         = EXCLUDED.value_p02,
+                    value_p50         = EXCLUDED.value_p50,
+                    value_p98         = EXCLUDED.value_p98,
+                    observation_count = EXCLUDED.observation_count,
+                    time_min          = EXCLUDED.time_min,
+                    time_max          = EXCLUDED.time_max,
+                    value_kind        = EXCLUDED.value_kind,
+                    computed_at       = now()
+                """,
+                (dataset_code, dataset_code),
+            )
+            return cur.rowcount or 0
+
     # ── Year availability ──────────────────────────────────────
     #
     # Per-(dataset, nuts_level, slice, year) coverage. A year row's

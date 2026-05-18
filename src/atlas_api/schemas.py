@@ -106,6 +106,21 @@ class DatasetSummary(BaseModel):
     # datasets" toggle. None on pre-backfill clusters or read-only
     # roles where the availability table couldn't be filled.
     max_availability_pct: float | None = None
+    # Per-dataset aggregate value range — min/max + p02/p50/p98 over
+    # every slice and every observed period. Drives the catalog
+    # range line and the stable colour scale when viewing a dataset
+    # over time. All NULL on pre-backfill clusters or datasets with
+    # no observations yet — the frontend falls back to per-data
+    # bounds when missing.
+    value_min: float | None = None
+    value_max: float | None = None
+    value_p02: float | None = None
+    value_p50: float | None = None
+    value_p98: float | None = None
+    observation_count: int | None = None
+    time_min: datetime | None = None
+    time_max: datetime | None = None
+    value_kind: str | None = None
 
 
 # ── Observations ────────────────────────────────────────────────────

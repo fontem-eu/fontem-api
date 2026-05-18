@@ -84,6 +84,39 @@ def test_cli_recompute_availability_runs_for_all_datasets(capsys):
     assert "summary: 2 dataset(s), 19 availability row(s) written" in out
 
 
+def test_cli_recompute_dataset_stats_runs_for_all_datasets(capsys):
+    """`recompute-dataset-stats` with no codes must iterate every
+    registered dataset (enabled OR disabled) — disabled rows still
+    have legacy observations whose aggregate is worth refreshing.
+    """
+    fake_db = MagicMock()
+    fake_db.list_datasets.return_value = [
+        MagicMock(code="a"), MagicMock(code="b"),
+    ]
+    fake_db.recompute_dataset_stats.side_effect = [1, 1]
+    with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):
+        rc = main(["recompute-dataset-stats"])
+    assert rc == 0
+    fake_db.migrate_dataset_stats.assert_called_once()
+    assert fake_db.recompute_dataset_stats.call_count == 2
+    out = capsys.readouterr().out
+    assert "summary: 2 dataset(s), 2 aggregate row(s) written" in out
+
+
+def test_cli_recompute_dataset_stats_with_explicit_codes(capsys):
+    fake_db = MagicMock()
+    fake_db.recompute_dataset_stats.return_value = 1
+    with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):
+        rc = main(["recompute-dataset-stats", "demo_test"])
+    assert rc == 0
+    # Explicit codes must NOT call list_datasets (avoids a needless
+    # round-trip + lets the operator target a single dataset cheaply).
+    fake_db.list_datasets.assert_not_called()
+    fake_db.recompute_dataset_stats.assert_called_once_with("demo_test")
+    assert "summary: 1 dataset(s), 1 aggregate row(s) written" \
+        in capsys.readouterr().out
+
+
 def test_cli_register_seed_upserts_all_seeds(capsys):
     fake_db = MagicMock()
     with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):

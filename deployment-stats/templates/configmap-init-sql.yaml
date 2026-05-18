@@ -149,6 +149,30 @@ data:
     CREATE INDEX IF NOT EXISTS dataset_slice_stats_dataset_idx
         ON fontem_stats.dataset_slice_stats (dataset_code);
 
+    -- ── Per-dataset aggregate value range ──────────────────────
+    -- One row per dataset, aggregating min/max/percentiles + the
+    -- observed time window across every slice and every period.
+    -- Used by the Atlas catalog ("dataset X spans 0–125 across
+    -- 2000–2024") and by "view this dataset across years" to pin
+    -- a stable colour scale to the dataset-wide range rather than
+    -- recomputing per-year. Cheap relative to slice stats (one
+    -- aggregation over `observation` filtered to dataset_code).
+    CREATE TABLE IF NOT EXISTS fontem_stats.dataset_stats (
+        dataset_code      text     PRIMARY KEY
+            REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+        value_min         double precision,
+        value_max         double precision,
+        value_p02         double precision,
+        value_p50         double precision,
+        value_p98         double precision,
+        observation_count bigint   NOT NULL DEFAULT 0,
+        time_min          timestamptz,
+        time_max          timestamptz,
+        value_kind        text     NOT NULL DEFAULT 'sequential'
+                                   CHECK (value_kind IN ('sequential','diverging')),
+        computed_at       timestamptz NOT NULL DEFAULT now()
+    );
+
     -- ── Per-(dataset, nuts_level, slice, year) coverage ────────
     -- Powers the Atlas "hide low-coverage years/datasets" filter.
     -- One row per (dataset, NUTS level, dimension slice, year)

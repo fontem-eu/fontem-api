@@ -92,6 +92,25 @@ class FontemStatsSource:
                 )
                 cur.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS fontem_stats.dataset_stats (
+                        dataset_code      text     PRIMARY KEY
+                            REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
+                        value_min         double precision,
+                        value_max         double precision,
+                        value_p02         double precision,
+                        value_p50         double precision,
+                        value_p98         double precision,
+                        observation_count bigint   NOT NULL DEFAULT 0,
+                        time_min          timestamptz,
+                        time_max          timestamptz,
+                        value_kind        text     NOT NULL DEFAULT 'sequential'
+                                           CHECK (value_kind IN ('sequential','diverging')),
+                        computed_at       timestamptz NOT NULL DEFAULT now()
+                    )
+                    """,
+                )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS fontem_stats.dataset_year_availability (
                         dataset_code        text     NOT NULL
                             REFERENCES fontem_stats.dataset(code) ON DELETE CASCADE,
@@ -182,7 +201,18 @@ class FontemStatsSource:
                -- availability rows have been computed yet (pre-
                -- backfill cluster); the frontend treats NULL as
                -- "show everything" so the toggle no-ops gracefully.
-               a.max_availability_pct
+               a.max_availability_pct,
+               -- Per-dataset aggregate value range + observed time
+               -- window. Drives the catalog "X spans 0–125 across
+               -- 2000–2024" line and the stable colour scale used
+               -- when "view this dataset over time" pins to the
+               -- dataset-wide range. NULLs when no observations or
+               -- pre-backfill cluster; frontend falls back to
+               -- per-data bounds when missing.
+               s.value_min, s.value_max,
+               s.value_p02, s.value_p50, s.value_p98,
+               s.observation_count, s.time_min, s.time_max,
+               s.value_kind
         FROM fontem_stats.dataset d
         LEFT JOIN LATERAL (
             SELECT started_at, upstream_modified, rows_total
@@ -195,6 +225,7 @@ class FontemStatsSource:
             FROM fontem_stats.dataset_year_availability
             WHERE dataset_code = d.code
         ) a ON true
+        LEFT JOIN fontem_stats.dataset_stats s ON s.dataset_code = d.code
         WHERE d.enabled
         ORDER BY d.theme, d.code
     """
