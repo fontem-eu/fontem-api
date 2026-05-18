@@ -322,6 +322,34 @@ class StatsDatabase:
             return None, None
         return row[0], row[1]
 
+    def disable_datasets_not_in(self, keep_codes: set[str]) -> int:
+        """Set enabled=false on catalog rows whose code is not in ``keep_codes``.
+
+        Soft-disable rather than DELETE so historical observation +
+        sync_run rows stay intact (and so flipping a code back to
+        enabled is a one-shot register-seed). Returns the number of
+        rows transitioned from enabled=true to enabled=false.
+        """
+        with self.connect() as conn, conn.cursor() as cur:
+            if keep_codes:
+                cur.execute(
+                    """
+                    UPDATE fontem_stats.dataset
+                    SET enabled = false, updated_at = now()
+                    WHERE enabled = true AND code <> ALL(%s)
+                    """,
+                    (sorted(keep_codes),),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE fontem_stats.dataset
+                    SET enabled = false, updated_at = now()
+                    WHERE enabled = true
+                    """,
+                )
+            return cur.rowcount or 0
+
     def max_observed_year(self, dataset_code: str) -> int | None:
         """Latest year present in `observation` for this dataset.
 

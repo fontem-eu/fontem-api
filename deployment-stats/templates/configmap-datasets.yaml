@@ -1,0 +1,24 @@
+{{- /*
+Newline-separated list of dataset codes the env should sync.
+
+Empty (`datasets: []` in values) means "register every SEED_DATASETS
+entry" — the prod posture. A non-empty list flips register-seed into
+filter mode: codes in the list stay enabled, every other catalog
+entry is soft-disabled (enabled=false). Observation + sync_run rows
+are preserved across enable/disable flips.
+
+Used to keep staging trimmed to a handful of datasets without
+forking the seed catalog.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fontem-stats-datasets
+  namespace: {{ .Release.Namespace }}
+data:
+  datasets.txt: |
+{{- range .Values.datasets }}
+    {{ . }}
+{{- else }}
+    # Empty file → register-seed registers every SEED_DATASETS entry.
+{{- end }}

@@ -80,13 +80,56 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return _print_summary(results)
 
 
-def cmd_register_seed(args: argparse.Namespace) -> int:  # pylint: disable=unused-argument
+def cmd_register_seed(args: argparse.Namespace) -> int:
+    """Upsert the curated SEED_DATASETS into the catalog.
+
+    With no flags, every seed is registered. Pass `--from-file PATH`
+    to register only a subset — one dataset code per line, blank
+    lines and `#`-prefixed comments ignored. Seeds NOT in the file
+    are *disabled* (enabled=false) rather than deleted so historical
+    observations + sync_run rows stay intact; flipping back is just
+    another register-seed run.
+
+    Used to keep staging trimmed to a handful of datasets without
+    forking the seed catalog: same image as prod, env-specific
+    `datasets.txt` ConfigMap supplies the filter.
+    """
     db = StatsDatabase()
-    n = 0
+    codes_filter: set[str] | None = None
+    if args.from_file:
+        codes_filter = set()
+        try:
+            with open(args.from_file, encoding="utf-8") as f:
+                for raw in f:
+                    code = raw.strip()
+                    if code and not code.startswith("#"):
+                        codes_filter.add(code)
+        except FileNotFoundError:
+            # Missing file → treat as "no filter" so a misconfigured
+            # mount doesn't accidentally disable everything.
+            logger.warning("--from-file %s missing; registering all seeds",
+                           args.from_file)
+            codes_filter = None
+
+    registered = 0
+    skipped = 0
     for d in SEED_DATASETS:
+        if codes_filter is not None and d.code not in codes_filter:
+            skipped += 1
+            continue
         db.upsert_dataset(d)
-        n += 1
-    print(f"registered {n} seed datasets")
+        registered += 1
+
+    disabled = 0
+    if codes_filter is not None:
+        disabled = db.disable_datasets_not_in(codes_filter)
+
+    if codes_filter is None:
+        print(f"registered {registered} seed datasets")
+    else:
+        print(f"registered {registered} (filtered to "
+              f"{len(codes_filter)} codes; skipped {skipped} seed entries; "
+              f"disabled {disabled} catalog entries)")
     return 0
 
 
@@ -180,6 +223,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p_seed = sub.add_parser("register-seed",
                             help="upsert the bundled SEED_DATASETS")
+    p_seed.add_argument(
+        "--from-file",
+        help="path to a newline-separated list of dataset codes to "
+             "register; seeds NOT in the list are disabled "
+             "(enabled=false). Comments and blank lines OK. Used to "
+             "keep staging trimmed to a subset without forking the seed.",
+    )
     p_seed.set_defaults(func=cmd_register_seed)
 
     p_list = sub.add_parser("list", help="show registered datasets")

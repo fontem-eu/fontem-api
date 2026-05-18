@@ -53,6 +53,10 @@ spec:
               resources:
                 requests: { cpu: 100m, memory: 1Gi }
                 limits: { cpu: "1", memory: 4Gi }
+              volumeMounts:
+                - name: datasets
+                  mountPath: /etc/fontem-stats
+                  readOnly: true
               command: ["/bin/sh", "-c"]
               args:
                 - |
@@ -63,6 +67,12 @@ spec:
                     curl -fsS -m 10 "$KUMA_PUSH_URL?status=$KUMA_STATUS&msg=$KUMA_SUMMARY&ping=" || true
                   }
                   trap push_kuma EXIT
+                  # Re-register seeds with the env's dataset filter
+                  # before the full reconcile — if the daily has been
+                  # failing for a while, the weekly is the path that
+                  # picks up dataset-list changes from the ConfigMap.
+                  python -m src.stats_etl register-seed \
+                    --from-file /etc/fontem-stats/datasets.txt
                   out=$(python -m src.stats_etl sync --all --force 2>&1); rc=$?
                   echo "$out"
                   KUMA_SUMMARY=$(echo "$out" | grep -oE '[0-9]+ synced|[0-9]+ skipped|[0-9]+ failed' \
@@ -70,3 +80,10 @@ spec:
                   KUMA_SUMMARY=${KUMA_SUMMARY:-unknown}
                   [ "$rc" -eq 0 ] && KUMA_STATUS=up
                   exit $rc
+          volumes:
+            - name: datasets
+              configMap:
+                name: fontem-stats-datasets
+                items:
+                  - key: datasets.txt
+                    path: datasets.txt

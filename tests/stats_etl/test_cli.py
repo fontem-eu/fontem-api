@@ -93,3 +93,44 @@ def test_cli_register_seed_upserts_all_seeds(capsys):
     from src.stats_etl.datasets import SEED_DATASETS
     assert fake_db.upsert_dataset.call_count == len(SEED_DATASETS)
     assert f"registered {len(SEED_DATASETS)} seed datasets" in capsys.readouterr().out
+    # No filter → no disable-pass either.
+    fake_db.disable_datasets_not_in.assert_not_called()
+
+
+def test_cli_register_seed_filters_to_codes_from_file(tmp_path, capsys):
+    """--from-file restricts which seeds get registered and disables
+    the rest of the catalog. Used by the staging cronjob to keep only
+    a handful of medium-sized datasets active."""
+    f = tmp_path / "datasets.txt"
+    f.write_text("# comment\ndemo_r_gind3\n\nlfst_r_lfp2act\n")
+
+    fake_db = MagicMock()
+    fake_db.disable_datasets_not_in.return_value = 38
+    with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):
+        rc = main(["register-seed", "--from-file", str(f)])
+
+    assert rc == 0
+    # Only the 2 codes in the file were upserted, not the full seed list.
+    called_codes = {c.args[0].code for c in fake_db.upsert_dataset.call_args_list}
+    assert called_codes == {"demo_r_gind3", "lfst_r_lfp2act"}
+    fake_db.disable_datasets_not_in.assert_called_once_with(
+        {"demo_r_gind3", "lfst_r_lfp2act"},
+    )
+    out = capsys.readouterr().out
+    assert "registered 2" in out
+    assert "filtered to 2 codes" in out
+    assert "disabled 38" in out
+
+
+def test_cli_register_seed_missing_file_falls_back_to_all(tmp_path):
+    """A missing --from-file path should NOT silently disable every
+    dataset — a misconfigured mount must degrade to the unfiltered
+    path, not to an empty catalog."""
+    fake_db = MagicMock()
+    missing = tmp_path / "nope.txt"
+    with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):
+        rc = main(["register-seed", "--from-file", str(missing)])
+    assert rc == 0
+    from src.stats_etl.datasets import SEED_DATASETS
+    assert fake_db.upsert_dataset.call_count == len(SEED_DATASETS)
+    fake_db.disable_datasets_not_in.assert_not_called()

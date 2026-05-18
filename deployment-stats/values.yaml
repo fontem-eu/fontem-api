@@ -78,6 +78,14 @@ kumaSecretName: fontem-stats-kuma
 # CronJob image. The same fontem-api image carries the src/stats_etl/ code
 # (both ship from edgar-gmr-etl), so we just need its tag. Override
 # `cronjobs.imageTag` per env in gitops/<env>/fontem-stats.yaml.
+# Dataset-code subset for this env (empty = register every
+# SEED_DATASETS entry, the prod posture). Non-empty = staging-style
+# filter: only listed codes stay enabled, others are soft-disabled
+# (enabled=false) so their historical observations + sync_run rows
+# survive. Wired into register-seed via the fontem-stats-datasets
+# ConfigMap mounted at /etc/fontem-stats/datasets.txt.
+datasets: []
+
 cronjobs:
   imageRepository: contribute.void42.internal/fontem/fontem-api
   imageTag: ""   # required — e.g. "ve7da9af"
