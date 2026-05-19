@@ -141,6 +141,29 @@ class Observation(BaseModel):
     flags: list[str] | None = None
 
 
+# ── ETL run log ─────────────────────────────────────────────────────
+
+
+class EtlRun(BaseModel):
+    """One ETL CronJob invocation. Source: events.etl_run.
+
+    `status` is `running` | `success` | `failed`. The dashboard
+    treats a `running` row whose `started_at` is older than the
+    cronjob's deadline as crashed (no need for a column — clients
+    derive it). `summary` is the loader's human-friendly count line
+    (capped 500 chars by the writer); `error_message` is a truncated
+    traceback (capped 2000 chars).
+    """
+    run_id: int
+    cronjob_name: str
+    image_tag: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    status: str
+    summary: str | None = None
+    error_message: str | None = None
+
+
 class SeriesResponse(BaseModel):
     dataset: str
     geo: list[str] | None

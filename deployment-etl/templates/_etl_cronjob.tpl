@@ -79,12 +79,6 @@ spec:
                     secretKeyRef:
                       name: neo4j-credentials
                       key: NEO4J_PASSWORD
-                - name: KUMA_PUSH_URL
-                  valueFrom:
-                    secretKeyRef:
-                      name: etl-kuma-push-urls
-                      key: {{ .name }}
-                      optional: true
                 # Event log target (Phase B onward — see
                 # fontem-ontology/MIGRATION.md). Producers emit
                 # into events.entity_events instead of writing
@@ -94,6 +88,15 @@ spec:
                     secretKeyRef:
                       name: fontem-postgres-credentials
                       key: EVENTS_DATABASE_URL
+                # CRONJOB_NAME + IMAGE_TAG drive the events.etl_run
+                # row that fontem_events.RunLog writes around each
+                # invocation. Replaces the previous Uptime-Kuma push
+                # trap with proper structured data for the data-
+                # quality dashboard.
+                - name: CRONJOB_NAME
+                  value: {{ .name | quote }}
+                - name: IMAGE_TAG
+                  value: {{ .Values.version | quote }}
                 {{- range .extraEnv }}
                 - {{ toYaml . | nindent 18 | trim }}
                 {{- end }}
@@ -121,49 +124,23 @@ spec:
                 limits:
                   cpu: {{ .cpuLimit | default "1" }}
                   memory: {{ .memLimit | default "2Gi" }}
-              command: ["/bin/sh", "-c"]
-              args:
-                - |
-                  # Default-down: if the pod is killed (OOM, deadline,
-                  # node eviction) the trap emits a down ping before
-                  # exit. Status only flips to "up" on rc=0.
-                  #
-                  # We push via python urllib rather than curl — the
-                  # fontem-api Docker image is python:3.12-slim with no
-                  # curl. Python is guaranteed present (it's how we run
-                  # the loader anyway).
-                  KUMA_STATUS=down
-                  KUMA_SUMMARY=running
-                  push_kuma() {
-                    [ -z "$KUMA_PUSH_URL" ] && return 0
-                    python3 -c "
-                  import os, sys, urllib.parse, urllib.request
-                  url = os.environ['KUMA_PUSH_URL']
-                  qs = urllib.parse.urlencode({
-                      'status': os.environ.get('KUMA_STATUS', 'down'),
-                      'msg':    os.environ.get('KUMA_SUMMARY', 'unknown'),
-                      'ping':   '',
-                  })
-                  full = url + ('&' if '?' in url else '?') + qs
-                  try:
-                      urllib.request.urlopen(full, timeout=10).read()
-                  except Exception as e:  # noqa: BLE001
-                      sys.stderr.write(f'kuma push failed: {e}\n')
-                  " || true
-                  }
-                  trap push_kuma EXIT
-                  set +e
-                  out=$(python -m {{ .module }}{{- range .args }} {{ . | quote }}{{- end }} 2>&1); rc=$?
-                  echo "$out"
-                  # Pull the loader's "Done: ..." summary line if present
-                  # so the Kuma history shows what actually happened
-                  # (e.g. "1585 entities, 0 resolver matches, 1585 no_match").
-                  KUMA_SUMMARY=$(echo "$out" | grep -E "^Done:|^\[sweep\] DONE" | tail -1 \
-                    | sed 's/[^A-Za-z0-9 .,=-]/_/g' | tr ' ' '+' | head -c 200)
-                  KUMA_SUMMARY=${KUMA_SUMMARY:-rc=$rc}
-                  [ "$rc" -eq 0 ] && KUMA_STATUS=up
-                  export KUMA_STATUS KUMA_SUMMARY
-                  exit $rc
+              # `_run_wrapper` invokes the loader's `main()` inside a
+              # `fontem_events.RunLog` context, so every run lands a
+              # row in `events.etl_run` (status='running' on entry,
+              # 'success'|'failed' on clean exit). SIGKILL / OOM /
+              # activeDeadlineSeconds leave the row at 'running' so
+              # the data-quality dashboard can flag the crash without
+              # scraping pod logs. Replaces the previous Uptime-Kuma
+              # shell trap — same purpose, structured data instead of
+              # a status ping with a stringly-typed summary.
+              command:
+                - python
+                - -m
+                - src.etl._run_wrapper
+                - {{ .module | quote }}
+                {{- range .args }}
+                - {{ . | quote }}
+                {{- end }}
           {{- if or .needsEdgarData .needsEsefData }}
           volumes:
             {{- if .needsEdgarData }}

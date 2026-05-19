@@ -14,7 +14,8 @@ from __future__ import annotations
 from fastapi import APIRouter, FastAPI
 
 from src.atlas_api import config as atlas_config
-from src.atlas_api.routers import datasets, health, series
+from src.atlas_api.routers import datasets, etl_runs, health, series
+from src.atlas_api.sources.etl_runs import EtlRunsSource
 from src.atlas_api.sources.fontem_stats import FontemStatsSource
 
 
@@ -25,9 +26,13 @@ def _attach_state(app: FastAPI) -> None:
     # deployed clusters). Best-effort: list_datasets falls back to
     # an empty slice_stats array if this no-ops on a read-only role.
     fontem.migrate()
+    # events DB is bootstrapped out-of-chart (gitops/infra/*); the
+    # source is read-only, never runs DDL.
+    etl_src = EtlRunsSource(settings.events_database_url)
     app.state.atlas_settings = settings
     app.state.fontem_stats_source = fontem
-    app.state.atlas_sources = [fontem]
+    app.state.etl_runs_source = etl_src
+    app.state.atlas_sources = [fontem, etl_src]
 
 
 def build_router() -> APIRouter:
@@ -40,6 +45,7 @@ def build_router() -> APIRouter:
     parent.include_router(health.router)
     parent.include_router(datasets.router)
     parent.include_router(series.router)
+    parent.include_router(etl_runs.router)
     return parent
 
 

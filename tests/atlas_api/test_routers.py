@@ -42,16 +42,26 @@ def test_health_unconfigured_when_no_dsn():
 
 
 def test_health_ok_when_source_pingable():
-    fake = SourceHealth(name="fontem-stats-postgres", status="ok", latency_ms=2.1)
+    fake_stats = SourceHealth(
+        name="fontem-stats-postgres", status="ok", latency_ms=2.1,
+    )
+    fake_events = SourceHealth(
+        name="fontem-events-postgres", status="ok", latency_ms=1.5,
+    )
     with patch(
         "src.atlas_api.sources.fontem_stats.FontemStatsSource.health",
-        return_value=fake,
+        return_value=fake_stats,
+    ), patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.health",
+        return_value=fake_events,
     ):
         r = _client().get("/health")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert body["sources"][0]["latency_ms"] == 2.1
+    sources_by_name = {s["name"]: s for s in body["sources"]}
+    assert sources_by_name["fontem-stats-postgres"]["latency_ms"] == 2.1
+    assert sources_by_name["fontem-events-postgres"]["latency_ms"] == 1.5
 
 
 # ── /datasets ────────────────────────────────────────────────────────
