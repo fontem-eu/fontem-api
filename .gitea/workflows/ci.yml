@@ -310,9 +310,28 @@ jobs:
           registry-password: ${{ secrets.REGISTRY_PASSWORD }}
           sbom-path: ${{ steps.sbom.outputs.sbom-path }}
 
-      - uses: ./.fontem-ci/actions/gitops-bump
-        with:
-          service: fontem-api
-          tag: ${{ steps.image.outputs.tag }}
-          env: testing
-          registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+      # Inline gitops-bump. The shared action in void42/ci-actions
+      # was rewritten for the void42-templates layout
+      # (environments/<env>/image-tag.yaml) that doesn't match
+      # fontem/gitops's testing/<svc>.yaml layout. Same shape as
+      # the consolidator + sinks workflows.
+      - name: Bump image tag in gitops/testing
+        env:
+          TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/gitops
+          git clone --depth=1 \
+            "https://${{ secrets.REGISTRY_USER }}:${{ secrets.REGISTRY_PASSWORD }}@contribute.void42.internal/fontem/gitops.git" \
+            /tmp/gitops
+          cd /tmp/gitops
+          sed -i 's/version: ".*"/version: "'"$TAG"'"/' testing/fontem-api.yaml
+          git config user.name "GMR CI"
+          git config user.email "ci@void42.internal"
+          git add testing/fontem-api.yaml
+          if git diff --cached --quiet; then
+            echo "No version change; skipping commit"
+            exit 0
+          fi
+          git commit -m "ci: deploy fontem-api $TAG to testing"
+          git push origin main
