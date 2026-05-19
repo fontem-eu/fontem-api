@@ -8,6 +8,25 @@ version: "v41f487e"
 # false to resume.
 cronjobsSuspended: false
 
+# ─── PVC dependencies ───────────────────────────────────────────────
+# Most ETLs don't touch a PVC — they download to memory or /tmp
+# (ephemeral emptyDir, fine because every loader streams parses then
+# emits to events.entity_events). Only the three SEC-EDGAR-adjacent
+# loaders cache upstream filings on disk:
+#
+#   etl-us-companies     mounts /edgar-data (needsEdgarData=true)
+#   etl-us-financials    mounts /edgar-data (needsEdgarData=true)
+#   etl-eu-listings      mounts /esef-data  (needsEsefData=true)
+#
+# Both `edgar-data` and `esef-data` PVCs are owned by the **fontem-api
+# main chart** (`deployment/templates/edgar-data-{pv,pvc}.yaml` and
+# `esef-data-{pv,pvc}.yaml`); this ETL chart only references them by
+# claim name. If you ever install deployment-etl without the main
+# chart, the three cronjobs above will hang in PodInitializing —
+# install the main chart first, or split the PVCs into a shared
+# subchart.
+# ────────────────────────────────────────────────────────────────────
+
 # Virtuoso target for the sanctions ETL's RDF dual-write. When
 # enabled, the sanctions cronjob picks up VIRTUOSO_SPARQL_ENDPOINT
 # + VIRTUOSO_DBA_PASSWORD from the secret below and pushes Turtle

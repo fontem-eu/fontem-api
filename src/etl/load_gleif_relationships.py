@@ -57,19 +57,18 @@ def resolve_latest_url() -> str:
 
 
 def download_zip(url: str) -> io.BytesIO:
-    """Download a ZIP file into memory."""
+    """Download a ZIP file into memory.
+
+    Plain GET with a bounded total deadline; see `load_gleif.download_zip`
+    for the rationale (avoiding `httpx.stream`'s per-chunk-inactivity
+    timeout trap).
+    """
     logger.info("Downloading %s ...", url)
-    buf = io.BytesIO()
-    with httpx.stream("GET", url, timeout=600, follow_redirects=True,
-                      headers=HTTP_HEADERS) as r:
-        r.raise_for_status()
-        total = 0
-        for chunk in r.iter_bytes(chunk_size=256 * 1024):
-            buf.write(chunk)
-            total += len(chunk)
-    buf.seek(0)
-    logger.info("Downloaded %.0f MB", total / 1e6)
-    return buf
+    resp = httpx.get(url, timeout=300.0, follow_redirects=True,
+                     headers=HTTP_HEADERS)
+    resp.raise_for_status()
+    logger.info("Downloaded %.0f MB", len(resp.content) / 1e6)
+    return io.BytesIO(resp.content)
 
 
 def _text(parent, tag):

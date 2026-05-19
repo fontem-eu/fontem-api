@@ -98,6 +98,10 @@ spec:
                 - {{ toYaml . | nindent 18 | trim }}
                 {{- end }}
               {{- if or .needsEdgarData .needsEsefData }}
+              # The edgar-data / esef-data PVCs are owned by the
+              # **main** fontem-api chart (see deployment-etl/values.yaml
+              # → "PVC dependencies"). This template only mounts them
+              # read-only; the API workers populate the caches.
               volumeMounts:
                 {{- if .needsEdgarData }}
                 - name: edgar-data

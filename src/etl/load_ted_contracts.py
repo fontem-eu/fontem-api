@@ -86,7 +86,18 @@ def _download_monthly(year: int, month: int, dest: Path) -> Path:
         if out.exists():
             out.unlink()
         logger.info("Downloading %s ...", url)
-        with httpx.stream("GET", url, timeout=600, follow_redirects=True,
+        # Per-chunk read timeout = 60s; if the CDN goes silent for a
+        # full minute mid-transfer we abort fast rather than letting
+        # the cronjob deadline (2h) run out. A naive `timeout=600`
+        # applies the 600s to inactivity between chunks, which can
+        # tolerate hours of trickle on a misbehaving upstream — that
+        # was the trap that bit Eurostat (see stats_etl PR #138).
+        # Stream-to-file rather than buffer-in-memory because monthly
+        # TED packages run >1 GB.
+        timeout = httpx.Timeout(connect=10.0, read=60.0,
+                                write=10.0, pool=10.0)
+        with httpx.stream("GET", url, timeout=timeout,
+                          follow_redirects=True,
                           headers=HTTP_HEADERS) as r:
             r.raise_for_status()
             with open(out, "wb") as f:

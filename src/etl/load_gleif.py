@@ -66,21 +66,21 @@ def resolve_latest_url() -> str:
 
 
 def download_zip(url: str) -> io.BytesIO:
-    """Download a ZIP file into memory."""
+    """Download a ZIP file into memory.
+
+    Plain GET with a bounded total deadline rather than `httpx.stream`:
+    the streaming variant's `timeout` is per-chunk inactivity, so a
+    trickling upstream (1 byte every ~119s, observed against Eurostat
+    on a sibling loader) can hang the run forever. GLEIF's full LEI-CDF
+    is a few hundred MB compressed — easily fits in the 4Gi pod limit,
+    nothing to gain from streaming.
+    """
     logger.info("Downloading %s ...", url)
-    buf = io.BytesIO()
-    with httpx.stream("GET", url, timeout=600, follow_redirects=True,
-                      headers=HTTP_HEADERS) as r:
-        r.raise_for_status()
-        total = 0
-        for chunk in r.iter_bytes(chunk_size=1024 * 256):
-            buf.write(chunk)
-            total += len(chunk)
-            if total % (50 * 1024 * 1024) < 1024 * 256:
-                logger.info("  downloaded %d MB", total // (1024 * 1024))
-    buf.seek(0)
-    logger.info("Download complete: %d MB", total // (1024 * 1024))
-    return buf
+    resp = httpx.get(url, timeout=300.0, follow_redirects=True,
+                     headers=HTTP_HEADERS)
+    resp.raise_for_status()
+    logger.info("Download complete: %d MB", len(resp.content) // (1024 * 1024))
+    return io.BytesIO(resp.content)
 
 
 def parse_gleif_xml(xml_stream):
