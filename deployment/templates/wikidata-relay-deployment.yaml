@@ -1,0 +1,65 @@
+{{/*
+Long-lived consumer of Wikimedia's SSE recentchange stream. Buffers
+every wikidatawiki edit into Postgres so we own retention and decouple
+the Virtuoso-load worker's pace from the upstream's 7-day Kafka window.
+
+Single replica — the relay is the system-of-record for the resume
+cursor (wikidata.relay_state.id=1). A second replica would race on
+that row and double-insert events. If we ever need horizontal scale,
+shard by entity-id-prefix at the consumer side, not the relay side.
+
+Image source: shares the fontem-api image because the relay code lives
+under src/relay/ alongside the ETL loaders. ENTRYPOINT is overridden
+because the image's default CMD runs the FastAPI server.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fontem-wikidata-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fontem-wikidata-relay
+    component: relay
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # singleton cursor — never run two pods in parallel
+  selector:
+    matchLabels:
+      app: fontem-wikidata-relay
+  template:
+    metadata:
+      labels:
+        app: fontem-wikidata-relay
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: relay
+          image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.relay.wikidata_recentchange"]
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          env:
+            - name: EVENTS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fontem-postgres-credentials
+                  key: EVENTS_DATABASE_URL
+            # Commit cursor every N events. 100 ≈ 10 s of stream time
+            # at the average rate — bounds duplicate work on restart.
+            - name: WIKIDATA_RELAY_CHECKPOINT_BATCH
+              value: "100"
+            # Fallback resume cursor used only on a fresh install where
+            # wikidata.relay_state.id=1 doesn't yet exist. Production
+            # has it seeded with the truthy-dump snapshot timestamp.
+            - name: WIKIDATA_RELAY_SINCE
+              value: "2026-05-15T23:17:36Z"
