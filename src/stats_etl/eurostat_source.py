@@ -108,7 +108,10 @@ class EurostatSource:
             dim_labels=dim_labels,
         )
 
-    def iter_observations(
+    # iter_observations() owns the bulk-TSV stream parse: header row,
+    # dim-index lookup, per-row value-and-flag normalisation, NUTS-code
+    # filter, batch buffer. All loop-locals of a single streaming parser.
+    def iter_observations(  # pylint: disable=too-many-locals
         self,
         code: str,
         batch_size: int = 5000,
@@ -226,7 +229,10 @@ def _parse_cell(raw: str) -> tuple[float | None, list[str]]:
     return value, flags
 
 
-def _parse_period(period: str) -> datetime | None:
+# Each early-return is a distinct Eurostat time-format branch (YYYY, YYYY-MM,
+# YYYY-MM-DD, YYYYMxx, YYYY-Qx, YYYY-Sx, YYYY-Wxx, fallback). Eight returns
+# matches the eight formats — collapsing them into one regex eats the comments.
+def _parse_period(period: str) -> datetime | None:  # pylint: disable=too-many-return-statements
     """Map Eurostat time strings to UTC datetime aligned at start.
 
     Eurostat is inconsistent about the monthly form across endpoints

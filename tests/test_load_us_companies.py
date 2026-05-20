@@ -79,7 +79,7 @@ def test_emits_within_single_batch_transaction():
     """All upserts happen inside one log.batch() context — sinks see
     them as a single transactional group, even though no Begin/End
     bracket is used (this is incremental upsert, not bulk replace)."""
-    log, emit = _mock_log()
+    log, _emit = _mock_log()
     data = {
         str(i): {"cik_str": i + 1, "ticker": f"T{i}", "title": f"Co {i}"}
         for i in range(3)

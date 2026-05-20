@@ -31,7 +31,6 @@ import argparse
 import csv
 import io
 import logging
-import os
 import sys
 import time
 import uuid
@@ -106,7 +105,10 @@ def download_country_csv(country_code: str) -> bytes:
     return resp.content
 
 
-def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):
+# parse_kohesio_csv is one streaming CSV → dict pipeline; each local is a
+# typed column extracted from a single row (start_date, end_date, amounts,
+# beneficiary fields, NUTS code, project category). Locals == columns.
+def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):  # pylint: disable=too-many-locals
     """Parse a Kohesio CSV and yield project dicts."""
     text = io.StringIO(data_bytes.decode("utf-8", errors="replace"))
     reader = csv.DictReader(text)

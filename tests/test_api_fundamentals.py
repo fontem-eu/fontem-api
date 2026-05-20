@@ -22,13 +22,10 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
-from starlette.testclient import TestClient
-
 import pandas as pd
+import pytest
 
 from src.analysis.gmr_data_source import GMRDataSource, MarketSnapshot
-from src.api.app import app
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 # ---------------------------------------------------------------------------

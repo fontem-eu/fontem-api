@@ -19,7 +19,11 @@ def _make_source(session_data=None, edgar=None):
             session_data[0] if session_data else None
         )
 
-    with patch(
+    # Conditional context-manager: pylint W0124 reads the inline `if/else`
+    # over a `with ... as X, ...` as a tuple-confusion; in practice the parens
+    # bind the conditional to the second patch() only. Keeping the expression
+    # inline keeps the patching block flat.
+    with patch(  # pylint: disable=confusing-with-statement
         "src.data.graph.graph_data_source.LocalPriceFetcher"
     ) as mock_price_cls, patch(
         "src.data.graph.graph_data_source.LocalEdgarFetcher",
@@ -59,7 +63,7 @@ def test_fundamentals_fallback_to_edgar():
     """When graph has no financials, falls back to LocalEdgarFetcher."""
     edgar = MagicMock()
     edgar.fetch_fundamentals.return_value = {"revenue": pd.Series({2024: 100.0})}
-    ds, session, _ = _make_source(session_data=[], edgar=edgar)
+    ds, _session, _ = _make_source(session_data=[], edgar=edgar)
     result = ds.get_annual_fundamentals("AAPL")
     edgar.fetch_fundamentals.assert_called_once_with("AAPL", years=10)
     assert result["revenue"].iloc[0] == 100.0

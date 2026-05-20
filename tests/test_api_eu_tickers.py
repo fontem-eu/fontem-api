@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import pytest
 import pandas as pd
+from starlette.testclient import TestClient
 
 from src.analysis.gmr_data_source import FinancialDataSource, MarketSnapshot
-from src.api.app import app
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
-from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # EU mock data source

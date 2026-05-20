@@ -5,6 +5,7 @@ Post-event-log: the loader emits ``BeginGraphReplace`` →
 log against the EDGAR financials graph. The Virtuoso + Neo4j
 sinks own the projection.
 """
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -43,7 +44,6 @@ def _seed_edgar_dir(tmp_path: Path, *, cik: int, years: list[int]) -> Path:
             },
         },
     }
-    import json
     (facts / f"CIK{cik_padded}.json").write_text(json.dumps(facts_doc))
     return tmp_path
 

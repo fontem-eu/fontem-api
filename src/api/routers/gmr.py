@@ -21,12 +21,12 @@ from __future__ import annotations
 import logging
 import math
 
+from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.gmr_long import GMRLong
 from src.analysis.gmr_short import GMRShort
-from dishka.integrations.fastapi import FromDishka, inject
 from src.api.di import resolve_company_id
 from src.data.graph.neo4j_client import Neo4jClient
 from src.api.schemas.gmr_long import (

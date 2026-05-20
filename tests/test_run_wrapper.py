@@ -43,9 +43,13 @@ def _patched_runlog(events_dsn: str = "postgresql://x"):
     fake_run = MagicMock(name="RunLog_instance")
     fake_run.__enter__ = lambda self: self
     fake_run.__exit__ = lambda self, *exc: None
+    # `runlog_cls` is the patched RunLog *class* (not an instance);
+    # the suffix `_cls` keeps the read intuitive without tripping
+    # pylint's snake_case rule on what would otherwise want to be
+    # upper-cased.
     with patch.dict("os.environ", {"EVENTS_DATABASE_URL": events_dsn}), \
-         patch("src.etl._run_wrapper.RunLog") as RL:
-        RL.from_env.return_value = fake_run
+         patch("src.etl._run_wrapper.RunLog") as runlog_cls:
+        runlog_cls.from_env.return_value = fake_run
         yield fake_run
 
 
@@ -63,7 +67,7 @@ def test_loader_non_zero_rc_is_promoted_to_failed_run():
     silently shows up as 'success' in the dashboard.
     """
     fake = _fake_loader(rc=2)
-    with _patched_runlog() as run, \
+    with _patched_runlog() as _run, \
          patch("importlib.import_module", return_value=fake):
         rc = _run_wrapper.main(["src.etl.load_x"])
     assert rc == 2
@@ -84,7 +88,7 @@ def test_loader_exception_propagates_to_runlog():
             _run_wrapper.main(["src.etl.load_x"])
 
 
-def test_loader_LAST_SUMMARY_is_passed_to_run_log():
+def test_loader_last_summary_is_passed_to_run_log():
     fake = _fake_loader(rc=0, last_summary="loaded 1234 entities")
     with _patched_runlog() as run, \
          patch("importlib.import_module", return_value=fake):
@@ -101,11 +105,13 @@ def test_no_events_database_url_runs_loader_without_runlog(monkeypatch):
     # Order matters: patch RunLog first so the import resolution
     # for the patch target happens against the real module, THEN
     # patch importlib so the loader-import comes back as our fake.
-    with patch("src.etl._run_wrapper.RunLog") as RL, \
+    # `runlog_cls` is the patched RunLog *class* (matches the helper
+    # above).
+    with patch("src.etl._run_wrapper.RunLog") as runlog_cls, \
          patch("importlib.import_module", return_value=fake):
         rc = _run_wrapper.main(["src.etl.load_x"])
     assert rc == 0
-    RL.from_env.assert_not_called()
+    runlog_cls.from_env.assert_not_called()
 
 
 def test_no_argv_returns_usage_error():

@@ -4,6 +4,24 @@ Uses psycopg3 (sync) — bulk inserts via execute_values-style
 batching. Async would buy us nothing here: the bottleneck is upstream
 HTTP fetching the bulk TSV, not the Postgres write.
 """
+# Each @dataclass below mirrors a stats schema row — code/label/theme/source/
+# nuts_levels/etc. The attribute count *is* the schema; collapsing into a
+# nested dict erases the type hints. Hence too-many-instance-attributes (R0902)
+# is structural here.
+#
+# StatsDatabase exposes one method per repo verb on the stats schema (six
+# upsert_X + four select_X + bookkeeping); each one is a thin Cypher-or-SQL
+# wrapper, so consolidating doesn't reduce surface area — too-many-public-
+# methods (R0904) is again structural.
+#
+# `upsert_value_year_availability` takes one positional per coverage column
+# the snapshot row carries; too-many-arguments (R0913) is intrinsic to the
+# table shape.
+#
+# Inside `connect()`, pylint infers the @contextmanager generator return as a
+# `Class 'value'` instead of a psycopg.Connection, hence the spurious no-member
+# (E1101) on commit/rollback/close.
+# pylint: disable=too-many-instance-attributes,too-many-public-methods,too-many-arguments,no-member
 from __future__ import annotations
 
 import json
@@ -12,10 +30,9 @@ import os
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 import psycopg
-from psycopg import sql
 from psycopg.rows import dict_row
 
 from .eurostat_source import Observation

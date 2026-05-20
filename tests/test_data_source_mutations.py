@@ -2,7 +2,15 @@
 Tests for FinancialDataSource and GMRDataSource — verify abstract contract
 enforcement and default parameter behavior through the public interface.
 """
-# pylint: disable=missing-function-docstring,missing-class-docstring,abstract-class-instantiated,too-few-public-methods
+# Each test method in this file constructs an inline `class Partial(FinancialDataSource)`
+# that re-declares the protocol's stub methods on one line: `def m(self, t, y): return ...`.
+# That's the *point* — we're asserting the abstract surface, not implementing it. Hence:
+#   arguments-renamed (W0237) — params shortened to t/y/p/q for terseness; the override
+#       relationship is the contract being tested.
+#   multiple-statements (C0321) — `def m(...): return ...` keeps each stub on one line.
+#   unused-argument (W0613) — every parameter is by definition unused; the stub just
+#       returns the empty value the test expects.
+# pylint: disable=missing-function-docstring,missing-class-docstring,abstract-class-instantiated,too-few-public-methods,arguments-renamed,multiple-statements,unused-argument
 import pytest
 import pandas as pd
 

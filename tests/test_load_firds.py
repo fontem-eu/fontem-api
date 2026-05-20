@@ -1,4 +1,9 @@
 """Tests for the event-log FIRDS loader."""
+# `_extract_instrument` is the module-internal record-shape parser. The
+# leading underscore is the loader saying "don't depend on me from outside";
+# this test pins that very shape (so any rewrite of the loader has to keep
+# the same record contract), which is the textbook case for protected-access.
+# pylint: disable=protected-access
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -38,7 +43,7 @@ def test_emit_uses_isin_as_ticker():
 
 
 def test_skip_records_without_resolvable_lei():
-    log, emit = _mock_log()
+    log, _emit = _mock_log()
     records = [
         {"isin": "X1", "lei": "GOOD", "trading_venue_mic": "M",
          "currency": "EUR", "instrument_name": "n",

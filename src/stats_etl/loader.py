@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from .db import Dataset, StatsDatabase
+from .db import StatsDatabase
 from .eurostat_source import EurostatSource
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,12 @@ class EurostatLoader:
         self._source = source
         self._db = db
 
-    def sync(self, code: str, *, force: bool = False) -> SyncResult:
+    # sync() carries the full Eurostat → Postgres pipeline state inline
+    # (run row, observation iterator, batch counters, freshness probes,
+    # error capture). Splitting it into 3 sub-methods would force shared
+    # state into instance attributes, which is worse — the locals here
+    # are the actual loop variables of one sequential pipeline.
+    def sync(self, code: str, *, force: bool = False) -> SyncResult:  # pylint: disable=too-many-locals
         ds = self._db.get_dataset(code)
         if ds is None:
             return SyncResult(

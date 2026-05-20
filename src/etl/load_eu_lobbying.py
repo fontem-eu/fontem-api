@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -74,7 +73,10 @@ def _text(elem: ET.Element | None, path: str) -> str:
     return (child.text or "").strip() if child is not None else ""
 
 
-def _parse_entity(elem: ET.Element) -> dict[str, Any]:
+# One local per XML field extracted from the lobbying record. The fields
+# are documented inline next to where each one is read — collapsing them
+# into a kwargs dict would erase the column headers.
+def _parse_entity(elem: ET.Element) -> dict[str, Any]:  # pylint: disable=too-many-locals
     """Parse an interestRepresentative XML element into a flat dict."""
     tr_id = _text(elem, "identificationCode")
     name_el = elem.find("name")
@@ -318,13 +320,17 @@ def load_eu_lobbying(log: EventLog) -> dict:
     return {"emitted": emitted, "represents": rep_summary}
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Emit EU Transparency Register events into the event log",
     )
-    args = parser.parse_args()
+    parser.parse_args()
     log = EventLog.from_env()
     try:
         load_eu_lobbying(log)
     finally:
         log.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,6 @@ Uses real sample data from tests/fixtures/kohesio/ (20 rows per country).
 # pylint: disable=missing-function-docstring,missing-class-docstring
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -58,8 +57,13 @@ class TestNormalizeDate:
 # ── parse_kohesio_csv — per-country fixture tests ────────────
 
 
-class TestParseKohesioCsv:
-    """Parse real Kohesio CSV samples and validate field extraction."""
+class TestParseKohesioCsv:  # pylint: disable=too-many-public-methods
+    """Parse real Kohesio CSV samples and validate field extraction.
+
+    One test method per country fixture × per field — Kohesio's column
+    semantics shift slightly per ESI Fund variant, so each (country, field)
+    pair pins the parser's behaviour for that combination.
+    """
 
     def _load(self, country: str, since: str | None = None) -> list[dict]:
         path = FIXTURES / f"{country}-sample.csv"

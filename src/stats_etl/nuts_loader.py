@@ -10,7 +10,6 @@ display-quality without stratospheric file size (the 1:1M variant is
 """
 from __future__ import annotations
 
-import json
 import logging
 
 import httpx

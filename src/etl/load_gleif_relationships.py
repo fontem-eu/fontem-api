@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 GLEIF_RR_API = "https://leidata.gleif.org/api/v1/concatenated-files/rr"
 NS = "http://www.gleif.org/data/schema/rr/2016"
 
-_t = f"{{{NS}}}"
+# `_t` matches load_gleif.py — a private string-formatting helper, not a
+# constant. Keeping it lower-case keeps the TAG_* expansion lines compact.
+_t = f"{{{NS}}}"  # pylint: disable=invalid-name
 TAG_RECORD = f"{_t}RelationshipRecord"
 TAG_RELATIONSHIP = f"{_t}Relationship"
 TAG_START_NODE = f"{_t}StartNode"
@@ -169,27 +171,27 @@ def main(argv=None):
 
     if args.file:
         logger.info("Reading local file: %s", args.file)
-        zf = zipfile.ZipFile(args.file)
+        zf_src = args.file
     else:
         url = resolve_latest_url()
-        buf = download_zip(url)
-        zf = zipfile.ZipFile(buf)
+        zf_src = download_zip(url)
 
-    xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
-    if not xml_names:
-        logger.error("No XML file found in ZIP")
-        sys.exit(1)
+    with zipfile.ZipFile(zf_src) as zf:
+        xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
+        if not xml_names:
+            logger.error("No XML file found in ZIP")
+            sys.exit(1)
 
-    xml_name = xml_names[0]
-    logger.info("Parsing %s ...", xml_name)
+        xml_name = xml_names[0]
+        logger.info("Parsing %s ...", xml_name)
 
-    log = EventLog.from_env()
-    try:
-        with zf.open(xml_name) as xml_stream:
-            records = parse_relationships(xml_stream)
-            emit_relationships(log, records)
-    finally:
-        log.close()
+        log = EventLog.from_env()
+        try:
+            with zf.open(xml_name) as xml_stream:
+                records = parse_relationships(xml_stream)
+                emit_relationships(log, records)
+        finally:
+            log.close()
 
 
 if __name__ == "__main__":

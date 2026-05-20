@@ -6,9 +6,9 @@ Endpoints for company directors and officers.
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from src.analysis.person_data_source import PersonDataSource
+from fastapi import APIRouter, Query
 
-from fastapi import APIRouter, Depends, Query
+from src.analysis.person_data_source import PersonDataSource
 
 
 router = APIRouter(prefix="/persons", tags=["persons"])

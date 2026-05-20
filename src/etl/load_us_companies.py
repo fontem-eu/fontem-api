@@ -32,7 +32,11 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 2000
 
 
-def load_us_companies(log: EventLog, tickers_data: dict) -> int:
+# load_us_companies() runs one EDGAR ticker map → (company, listing) event
+# pipeline inline: batch buffer, dedup set, gmr_id cache, market-cap counters,
+# UpsertCompany/UpsertListing event factories. All are loop-locals of a
+# single sequential pipeline — splitting would force shared state.
+def load_us_companies(log: EventLog, tickers_data: dict) -> int:  # pylint: disable=too-many-locals
     """Emit UpsertCompany + UpsertListing events for each EDGAR ticker.
 
     Returns the number of (company, listing) pairs emitted.

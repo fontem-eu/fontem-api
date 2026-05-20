@@ -10,10 +10,16 @@ Covers:
 - Decimal precision
 - Edge cases (None inputs, unknown currencies, far-future dates)
 """
+# `svc` and `temp_rates_dir` are pytest fixtures — every test function
+# legitimately re-binds their name as a local parameter. That's how pytest's
+# DI works; flagging it as `redefined-outer-name` is noise. The JSON rate
+# files are written with the platform-default encoding on purpose (the test
+# never reads non-ASCII so an explicit encoding= adds no value).
+# pylint: disable=redefined-outer-name,unspecified-encoding
 from __future__ import annotations
 
 import json
-import os
+import shutil
 import tempfile
 from datetime import date
 from decimal import Decimal
@@ -21,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from src.services.currency import CurrencyService, ConversionResult
+from src.services.currency import CurrencyService
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +71,6 @@ def temp_rates_dir():
 
     yield tmp
 
-    import shutil
     shutil.rmtree(tmp)
 
 

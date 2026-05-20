@@ -1,3 +1,8 @@
+# `broad-exception-caught` mirrors the test's own retry/skip flow against
+# the ephemeral Virtuoso started by `_virtuoso_container()`. The `tmp_path`
+# fixture parameter is required by pytest's contract even when the test
+# only uses the container, not the temp dir.
+# pylint: disable=broad-exception-caught,unused-argument
 """Integration tests for the sanctions → Virtuoso writer.
 
 Phase 2 acceptance contract: the writer takes the same dicts the
@@ -21,7 +26,6 @@ connectivity required.
 """
 from __future__ import annotations
 
-import os
 import socket
 import subprocess
 import time

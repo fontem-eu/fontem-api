@@ -83,8 +83,13 @@ class TestIntegrationContract:
     def test_end_to_end_never_produces_dangerous_fragment(self, user_input):
         lang = safe_lang(user_input)
         expr = authority_name_expr("a", lang)
-        # Either 'a.name' (safe constant) or 'coalesce(a.name_<2-letter-ISO>, a.name)'
-        assert expr == "a.name" or expr.startswith("coalesce(a.name_") and " " not in expr.split("coalesce(")[1].split(",")[0][len("a.name_"):]
+        # Either 'a.name' (safe constant) or 'coalesce(a.name_<ISO-2>, a.name)'
+        suffix = expr.split("coalesce(")[1].split(",")[0][len("a.name_"):] \
+            if expr.startswith("coalesce(a.name_") else ""
+        assert (
+            expr == "a.name"
+            or (expr.startswith("coalesce(a.name_") and " " not in suffix)
+        )
         # And should never contain SQL/Cypher injection characters
         assert ";" not in expr
         assert "'" not in expr

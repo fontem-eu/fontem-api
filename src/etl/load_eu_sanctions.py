@@ -29,12 +29,10 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 import time
-import xml.etree.ElementTree as ET
-
 import uuid
+import xml.etree.ElementTree as ET
 
 import httpx
 from fontem_event_schemas import builders
@@ -48,7 +46,8 @@ logger = logging.getLogger(__name__)
 
 SANCTIONS_URL = (
     "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
-    "xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"  # gitleaks:allow — public EU sanctions portal param, not a credential
+    # gitleaks:allow — public EU sanctions portal param, not a credential
+    "xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
 )
 
 BATCH_SIZE = 500
@@ -288,7 +287,10 @@ def resolve_company_links(entities):
     }
 
 
-def main(argv=None):
+# main() owns the EU-sanctions ETL state inline: argparse, XML stream open,
+# event-log handle, batch counters, error capture, run summary. All loop-
+# locals of one sequential pass.
+def main(argv=None):  # pylint: disable=too-many-locals
     """CLI entry point.
 
     The loader emits events into events.entity_events; the

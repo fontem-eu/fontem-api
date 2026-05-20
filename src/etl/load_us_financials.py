@@ -77,7 +77,12 @@ _CONCEPT_MAP = {
 }
 
 
-def _extract_annual(facts_json: dict) -> list[dict]:
+# Each `if` branch handles a distinct US-GAAP concept (revenue, op_income,
+# net_income, eps, equity, debt, dividends, inventory, ...) with its own
+# unit-conversion + fiscal-year-alignment quirk. Splitting would scatter the
+# concept-by-concept table across files. Locals are loop variables of the
+# single annual-fact aggregation pass.
+def _extract_annual(facts_json: dict) -> list[dict]:  # pylint: disable=too-many-locals,too-many-branches
     """Extract annual financial data from a companyfacts JSON."""
     usgaap = facts_json.get("facts", {}).get("us-gaap", {})
     if not usgaap:

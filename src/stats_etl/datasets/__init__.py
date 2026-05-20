@@ -16,7 +16,10 @@ EUROSTAT_BULK = (
 )
 
 
-def _ds(
+# Convenience factory used once per Eurostat dataset row in the catalog.
+# One positional per Dataset schema field — collapsing into a kwargs dict
+# erases the documented order the catalog rows below read with.
+def _ds(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     code: str,
     label: str,
     theme: str,

@@ -51,7 +51,10 @@ def notify_consolidator(entity_type: str, ids: Iterable[str]) -> None:
             log.info(
                 "consolidator: notified %s ids=%d → %s", entity_type, len(ids), r.status_code
             )
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # pragma: no cover
+        # Notify is best-effort: a 5xx from the consolidator or a network
+        # blip must never fail the ETL — the consolidator periodically
+        # re-scans, so the worst case is a delayed merge.
         log.warning("consolidator: notify failed for %s: %s", entity_type, exc)
 
 
@@ -81,7 +84,9 @@ class ResolveResult:
     normalised_country: str | None
 
 
-def resolve_entity(
+# Each kwarg here is a distinct identifier the resolver accepts (lei/vat/cik/
+# name+country). Bundling into a single dict erases the static type hints.
+def resolve_entity(  # pylint: disable=too-many-arguments
     *,
     entity_type: Literal["Company", "Authority"],
     name: str | None = None,
@@ -110,7 +115,10 @@ def resolve_entity(
             client.close()
         r.raise_for_status()
         data = r.json()
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # pragma: no cover
+        # /resolve is best-effort; the ETL has its own deterministic fallback
+        # path (LEI-only, then name+country). A consolidator outage must not
+        # break a sync.
         log.warning("consolidator: /resolve failed: %s", exc)
         return None
     return _parse_resolve_response(data)

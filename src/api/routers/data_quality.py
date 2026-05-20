@@ -6,9 +6,9 @@ Endpoints for the platform health and data quality dashboard.
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from src.analysis.data_quality_source import DataQualitySource
+from fastapi import APIRouter
 
-from fastapi import APIRouter, Depends
+from src.analysis.data_quality_source import DataQualitySource
 
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
@@ -227,14 +227,18 @@ def eurostat_freshness():
     database than everything else and the wiring is intentionally simple.
     Returns 503 if STATS_DATABASE_URL is unset (e.g., in dev/dast env).
     """
-    import os
+    # Local imports: keep `from src.stats_etl.db import StatsDatabase` out
+    # of the module init path — the stats layer is a separately-deployable
+    # add-on (different Postgres), so loading it eagerly would force every
+    # API instance to carry the stats client even when it's unused.
+    import os  # pylint: disable=import-outside-toplevel
     if "STATS_DATABASE_URL" not in os.environ:
-        from fastapi import HTTPException
+        from fastapi import HTTPException  # pylint: disable=import-outside-toplevel
         raise HTTPException(
             status_code=503,
             detail="stats store unavailable (STATS_DATABASE_URL unset)",
         )
-    from src.stats_etl.db import StatsDatabase
+    from src.stats_etl.db import StatsDatabase  # pylint: disable=import-outside-toplevel
     db = StatsDatabase()
     with db.connect() as conn, conn.cursor() as cur:
         cur.execute(

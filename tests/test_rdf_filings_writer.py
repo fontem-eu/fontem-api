@@ -5,6 +5,12 @@ Virtuoso, exercise SHACL pass/fail, confirm round-trip. The
 two domains are intentionally tested with the same scaffold so
 adding the next ETL stays a copy-and-tweak.
 """
+# rdflib and pyshacl are imported inside the round-trip helper so the test
+# module can be collected on lint-only environments where they're absent.
+# `broad-exception-caught` mirrors the writer's own catch: the ephemeral
+# Virtuoso may go away mid-test (the test starts it itself) and we want a
+# skip, not an obscure traceback.
+# pylint: disable=import-outside-toplevel,import-error,broad-exception-caught
 from __future__ import annotations
 
 import socket
@@ -19,7 +25,6 @@ import httpx
 import pytest
 
 from src.etl.rdf_filings_writer import (
-    FilingsValidationError,
     GRAPH_FOR_SOURCE,
     RdfFilingsWriter,
 )

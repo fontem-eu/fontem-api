@@ -137,7 +137,8 @@ class RdfFilingsWriter:
     to do accidentally.
     """
 
-    def __init__(
+    # One kwarg per Virtuoso/SPARQL knob — same pattern as RdfSanctionsWriter.
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
         source: str,
@@ -228,8 +229,9 @@ class RdfFilingsWriter:
 
     def _validate(self, g: Graph) -> None:
         # Lazy import — graph-only callers (tests, dry-runs)
-        # don't need pyshacl on the import path.
-        from pyshacl import validate as _validate
+        # don't need pyshacl on the import path. pyshacl is an optional
+        # dep and isn't on the lint runner's sys.path.
+        from pyshacl import validate as _validate  # pylint: disable=import-outside-toplevel,import-error
 
         shapes_g = Graph().parse(str(self._shapes_path), format="turtle")
         conforms, _, report = _validate(

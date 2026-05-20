@@ -6,11 +6,11 @@ Endpoints for reviewing and resolving SAME_AS merge candidates.
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
+
 from src.analysis.contract_data_source import ContractDataSource
 from src.data.graph.neo4j_client import Neo4jClient
-
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 
 
 router = APIRouter(prefix="/entity-resolution", tags=["entity-resolution"])
@@ -35,7 +35,10 @@ class MergeDecision(BaseModel):
 
 @router.get("/candidates")
 @inject
-def list_candidates(
+# `source` is injected to keep the dishka container wired the same as the
+# other handlers in this router, even though /candidates reads SAME_AS rows
+# directly via Cypher — drop it and the dishka graph breaks for nearby handlers.
+def list_candidates(  # pylint: disable=unused-argument
     limit: int = Query(50, ge=1, le=200),
     lang: str | None = Query(None),
     *,
@@ -74,7 +77,8 @@ def list_candidates(
 
 @router.get("/similar")
 @inject
-def find_similar(
+# `source` injected for container wiring (see list_candidates).
+def find_similar(  # pylint: disable=unused-argument,too-many-arguments,too-many-positional-arguments
     name: str = Query(..., min_length=1),
     entity_type: str = Query("company"),
     country: str | None = Query(None),
@@ -116,7 +120,10 @@ def find_similar(
     return {"results": rows}
 
 
-def _validate_merged_properties(props: MergedProperties) -> list[str]:
+# Each branch validates a distinct field (name length, country code, LEI format,
+# VAT length) — collapsing them would hide the per-field error messages the UI
+# uses to flag the specific input box. The branch count is intrinsic.
+def _validate_merged_properties(props: MergedProperties) -> list[str]:  # pylint: disable=too-many-branches
     """Validate operator-edited properties. Returns list of error messages."""
     import pycountry  # pylint: disable=import-outside-toplevel
     errors = []

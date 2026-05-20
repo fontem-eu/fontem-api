@@ -98,7 +98,7 @@ def test_emit_drops_null_detail_fields():
 
 
 def test_emit_no_records_skips_batch():
-    log, emit = _mock_log()
+    log, _emit = _mock_log()
     summary = emit_disclosure_events(log, [], {})
     assert summary == {"total": 0, "emitted": 0, "skipped": 0}
     log.batch.assert_not_called()

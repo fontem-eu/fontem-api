@@ -11,10 +11,18 @@ Uses a real TED daily package (20 notices from Oct 2025) to validate:
 These tests read from tests/fixtures/ted/sample-2025-10.tar.gz
 and validate against the live Neo4j database.
 """
+# Currency fixture writes JSON rate files (ASCII keys/values) — explicit
+# encoding adds nothing. `currency_svc` is a pytest fixture re-bound as a
+# parameter on every test, the protected-access on _coalesce_date pins
+# the load-bearing private TED date heuristic, and the smoke tests do
+# `import neo4j.GraphDatabase` inside the test so the import is skipped
+# when running without a real Neo4j connection.
+# pylint: disable=redefined-outer-name,unspecified-encoding,import-outside-toplevel,broad-exception-caught
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from datetime import date
 from decimal import Decimal
@@ -76,7 +84,6 @@ def currency_svc():
             json.dump({k: str(v) for k, v in daily.items()}, f)
     svc = CurrencyService.load(tmp)
     yield svc
-    import shutil
     shutil.rmtree(tmp)
 
 
@@ -155,7 +162,7 @@ class TestDateCoalescing:
         for notice in _parse_all_notices():
             for award in notice.awards:
                 total += 1
-                effective, source = _coalesce_date(award, notice)
+                effective, _source = _coalesce_date(award, notice)
                 if effective is None:
                     unfilled += 1
 

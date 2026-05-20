@@ -179,7 +179,7 @@ def test_entity_falls_back_to_authority_query_when_company_empty():
 
 def test_entity_returns_normalized_rows():
     """Company path: alpha-3 country rows mapped to normalized NUTS output."""
-    client, session = _fake_neo4j_multi([
+    client, _session = _fake_neo4j_multi([
         [{"country_a3": "DEU", "value": 42}],               # country agg query
         [{"code": "DE", "name": "Deutschland", "level": 0}],  # region name lookup
     ])
@@ -194,7 +194,7 @@ def test_entity_returns_normalized_rows():
 
 def test_entity_grc_mapped_to_el():
     """GRC (Greece) authority country must be mapped to NUTS code 'EL'."""
-    client, session = _fake_neo4j_multi([
+    client, _session = _fake_neo4j_multi([
         [{"country_a3": "GRC", "value": 3}],
         [{"code": "EL", "name": "Ellada", "level": 0}],
     ])
@@ -207,7 +207,7 @@ def test_entity_grc_mapped_to_el():
 
 def test_entity_gbr_mapped_to_uk():
     """GBR (UK) authority country must be mapped to NUTS code 'UK', not 'GB'."""
-    client, session = _fake_neo4j_multi([
+    client, _session = _fake_neo4j_multi([
         [{"country_a3": "GBR", "value": 7}],
         [{"code": "UK", "name": "United Kingdom", "level": 0}],
     ])
@@ -220,7 +220,7 @@ def test_entity_gbr_mapped_to_uk():
 
 def test_entity_level_gt_0_returns_empty_for_company_entity():
     """For level > 0, company path returns empty (no sub-national authority data)."""
-    client, session = _fake_neo4j_multi([
+    client, _session = _fake_neo4j_multi([
         [{"country_a3": "DEU", "value": 10}],  # has country data but level=1
     ])
     source = GraphGeoSource(neo4j_client=client)

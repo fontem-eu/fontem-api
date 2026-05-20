@@ -203,7 +203,7 @@ def test_empty_nationality_yields_no_match():
 
 
 def test_parse_extracts_aliases():
-    xml = _wrap(f"""
+    xml = _wrap("""
       <sanctionEntity euReferenceNumber="EU.2518.30">
         <subjectType code="enterprise"/>
         <nameAlias wholeName="AMD"/>

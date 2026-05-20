@@ -8,7 +8,10 @@ GE-API-01 through GE-API-10 from the test plan.
 """
 from __future__ import annotations
 
-# pylint: disable=missing-function-docstring,redefined-outer-name
+# Per-test `def handler(query, **kwargs)` stubs mirror Neo4j's session.run
+# signature exactly; **kwargs is the protocol shape, not always read by the
+# stub. Disabling unused-argument file-wide keeps the stub signatures honest.
+# pylint: disable=missing-function-docstring,redefined-outer-name,unused-argument
 
 from datetime import datetime, timezone
 from unittest.mock import MagicMock

@@ -1,5 +1,5 @@
 """Tests for the NUTS reference-hierarchy loader (post-event-log)."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import httpx
@@ -123,7 +123,7 @@ def test_emit_payload_carries_parent_and_level():
 
 
 def test_emit_summary_breaks_down_by_level():
-    log, emit = _mock_log()
+    log, _emit = _mock_log()
     regions = list(parse_nuts_csv(SAMPLE_CSV))
     summary = emit_nuts(log, regions)
     assert summary["by_level"] == {0: 2, 1: 2, 2: 2, 3: 2}

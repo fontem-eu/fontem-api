@@ -4,6 +4,13 @@ All data sources are APP-scoped singletons sharing a single Neo4jClient.
 No per-request scoping is needed — the Neo4j driver manages its own
 connection pool internally.
 """
+# Each @provide here imports the concrete GraphXSource *inside* the factory:
+# this keeps `from src.api.di import resolve_company_id` cheap (a number of
+# tests do this) and avoids loading the heavy Neo4j adapters during the
+# pre-fork import phase of uvicorn. The recommendations_source and
+# ip_to_country forward-ref-then-import dance is the standard dishka pattern
+# for breaking a circular import.
+# pylint: disable=import-outside-toplevel,redefined-outer-name,reimported
 from __future__ import annotations
 
 import os

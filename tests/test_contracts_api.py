@@ -1,4 +1,10 @@
 """Tests for the contracts API router."""
+# The two `_run_side(*args, **kwargs)` factories pin the router's call-shape
+# (it invokes `session.run(query, **params)`) without binding the values —
+# the test asserts which scripted result comes back, not the query text.
+# `_neo4j` is the canonical attribute the contracts source mounts; reaching
+# into it to swap the session is how the existing mocks pin the wire shape.
+# pylint: disable=protected-access,unused-argument
 from unittest.mock import MagicMock
 
 

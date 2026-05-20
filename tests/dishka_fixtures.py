@@ -24,7 +24,9 @@ from src.services.ip_to_country import IpToCountryService
 class _FakeNeo4jSession:
     """Stub session that returns empty results."""
 
-    def run(self, query, **kwargs):
+    def run(self, query, **kwargs):  # pylint: disable=unused-argument
+        # Stub that mirrors `Session.run(query, **params)` — ignores both since
+        # the matching `_FakeResult` just returns empty rows/None.
         return _FakeResult()
 
     def __enter__(self):

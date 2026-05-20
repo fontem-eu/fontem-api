@@ -44,5 +44,3 @@ class TestCPVDivisions:
     def test_division_count(self):
         # Should have ~45 top-level divisions
         assert len(CPV_DIVISIONS) >= 40
-
-

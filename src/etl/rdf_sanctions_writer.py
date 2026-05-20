@@ -95,7 +95,11 @@ class RdfSanctionsWriter:
     SanctionedEntity class only models organisations.
     """
 
-    def __init__(
+    # One kwarg per Virtuoso/SPARQL knob the caller may need to override
+    # (endpoint, named graph, auth user/password, timeout, SHACL shapes path).
+    # All keyword-only with defaults; bundling into a config object adds a
+    # layer with no readers.
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
         sparql_endpoint: str,
@@ -188,8 +192,10 @@ class RdfSanctionsWriter:
     def _validate(self, g: Graph) -> None:
         # Imported lazily so the Turtle-only path doesn't require
         # pyshacl in environments that just want to construct
-        # graphs (tests, dry-run mode).
-        from pyshacl import validate as _validate
+        # graphs (tests, dry-run mode). pyshacl is an optional dep —
+        # the lint runner doesn't have it on its import path, so
+        # import-error is structural here.
+        from pyshacl import validate as _validate  # pylint: disable=import-outside-toplevel,import-error
 
         shapes_g = Graph().parse(str(self._shapes_path), format="turtle")
         conforms, _, report = _validate(

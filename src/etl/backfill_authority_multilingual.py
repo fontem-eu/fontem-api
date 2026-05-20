@@ -87,7 +87,10 @@ def _enrich_batch(client: httpx.Client, base_url: str, ids: list[str]) -> dict:
     return r.json()
 
 
-def run(batch: int, limit: int) -> dict:
+# run() is one sequential backfill pipeline: candidate IDs, batch slicing,
+# consolidator POST, response merge, write back via session.run(). All the
+# locals are loop variables of a single pass — splitting forces shared state.
+def run(batch: int, limit: int) -> dict:  # pylint: disable=too-many-locals
     driver = _driver()
     url = _consolidator_url()
     timeout = float(os.environ.get("BACKFILL_TIMEOUT", "600"))
@@ -132,10 +135,21 @@ def run(batch: int, limit: int) -> dict:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="Multilingual backfill for :Authority nodes.")
-    parser.add_argument("--batch", type=int, default=25, help="authority ids per /consolidate/batch call")
-    parser.add_argument("--limit", type=int, default=0, help="cap total authorities processed (0 = no cap)")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    parser = argparse.ArgumentParser(
+        description="Multilingual backfill for :Authority nodes.",
+    )
+    parser.add_argument(
+        "--batch", type=int, default=25,
+        help="authority ids per /consolidate/batch call",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=0,
+        help="cap total authorities processed (0 = no cap)",
+    )
     args = parser.parse_args()
     run(batch=args.batch, limit=args.limit)
 

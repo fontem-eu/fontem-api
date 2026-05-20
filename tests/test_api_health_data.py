@@ -47,8 +47,16 @@ def data_dirs(tmp_path):
     prices = tmp_path / "prices"
     daily = prices / "daily"
     daily.mkdir(parents=True)
-    aapl_rows = "Date,Open,High,Low,Close,Volume\n2025-01-10,220,225,219,222,50000000\n2025-01-13,222,230,221,228,48000000\n"
-    msft_rows = "Date,Open,High,Low,Close,Volume\n2025-01-10,410,415,409,413,20000000\n2025-01-13,413,420,412,418,18000000\n"
+    aapl_rows = (
+        "Date,Open,High,Low,Close,Volume\n"
+        "2025-01-10,220,225,219,222,50000000\n"
+        "2025-01-13,222,230,221,228,48000000\n"
+    )
+    msft_rows = (
+        "Date,Open,High,Low,Close,Volume\n"
+        "2025-01-10,410,415,409,413,20000000\n"
+        "2025-01-13,413,420,412,418,18000000\n"
+    )
     (daily / "AAPL.csv").write_text(aapl_rows)
     (daily / "MSFT.csv").write_text(msft_rows)
 

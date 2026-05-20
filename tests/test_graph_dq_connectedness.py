@@ -6,6 +6,11 @@ Cypher syntax itself is covered by running the endpoint against a real
 Neo4j in staging (see follow-up smoke test plan); these tests guard
 the class of bugs we CAN catch locally without a Neo4j container.
 """
+# `_connectedness_cypher` is the module-internal query builder. The leading
+# underscore documents "don't depend on me", but the connectedness Cypher is
+# load-bearing and the test pins the exact MATCH/RETURN shape so a refactor
+# can't silently break the dashboard.
+# pylint: disable=protected-access
 from __future__ import annotations
 
 from unittest.mock import MagicMock

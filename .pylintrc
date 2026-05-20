@@ -2,4 +2,18 @@
 # R0801: duplicate-code — similarity detection runs across files and cannot be
 # suppressed with per-file inline comments; disabled globally for test files
 # which intentionally share fixture/mock boilerplate patterns.
-disable=R0801
+#
+# C0114/C0115/C0116: missing-{module,class,function}-docstring — this is an
+# internal ETL service. Symbol names + typed signatures + Pydantic envelopes
+# carry the docs the next reader actually needs; per-extractor doc-stubs are
+# pure lint-debt with no reader value, and the test surface is even worse
+# (each test method would need an "it does what its name says" stub).
+#
+# R0903: too-few-public-methods — FastAPI/Pydantic envelopes, dataclass-only
+# event holders and TypedDict-shaped DTOs legitimately have no methods. This
+# is also the case for many small in-test fakes/spies.
+disable=R0801,
+        missing-module-docstring,
+        missing-class-docstring,
+        missing-function-docstring,
+        too-few-public-methods

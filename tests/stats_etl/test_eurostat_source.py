@@ -244,4 +244,4 @@ def test_fetch_metadata_handles_missing_labels():
     source = EurostatSource(http=http)
     meta = source.fetch_metadata("sparse_test")
 
-    assert meta.dim_labels == {}
+    assert meta.dim_labels == {}  # pylint: disable=use-implicit-booleaness-not-comparison

@@ -68,7 +68,10 @@ def _parse_iri(iri: str) -> tuple[str, str]:
     return cls, m.group("uid")
 
 
-def _node_to_panel(cls: str, node: dict[str, Any]) -> dict[str, Any]:
+# Each branch handles a distinct mention class (Company, Person, Authority,
+# Contract, Country, Sanction, Listing, etc.). Splitting per class would
+# scatter a single projection that the side panel reads top-to-bottom.
+def _node_to_panel(cls: str, node: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=too-many-branches
     """Project a Neo4j node onto the side-panel response.
 
     The shape stays small on purpose: the side panel is a hover/aside

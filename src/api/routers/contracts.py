@@ -7,13 +7,12 @@ contract detail, sector summary, and unified search.
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from src.analysis.person_data_source import PersonDataSource
-from src.analysis.gmr_data_source import FinancialDataSource
+from fastapi import APIRouter, HTTPException, Query
+
 from src.analysis.contract_data_source import ContractDataSource
+from src.analysis.person_data_source import PersonDataSource
 from src.api.lang import authority_name_expr, safe_lang
 from src.data.graph.neo4j_client import Neo4jClient
-
-from fastapi import APIRouter, Depends, HTTPException, Query
 
 
 router = APIRouter(tags=["contracts"])
@@ -169,7 +168,10 @@ def contract_detail(
 
 @router.get("/search")
 @inject
-def unified_search(  # pylint: disable=too-many-locals
+# contract_source is injected to pin the dependency in the OpenAPI surface
+# and keep the dishka container wired the same as the other contract endpoints,
+# even though this handler reads directly from Neo4j.
+def unified_search(  # pylint: disable=too-many-locals,unused-argument
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=50),
     lang: str | None = Query(None),

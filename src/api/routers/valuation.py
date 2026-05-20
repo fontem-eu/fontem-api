@@ -30,14 +30,14 @@ from __future__ import annotations
 
 import logging
 
+from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
 from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.valuation import Valuation
-from dishka.integrations.fastapi import FromDishka, inject
 from src.api.di import resolve_company_id
-from src.data.graph.neo4j_client import Neo4jClient
 from src.api.helpers import nan_to_none
+from src.data.graph.neo4j_client import Neo4jClient
 from src.api.schemas.valuation import (
     ValuationPerYearRow,
     ValuationResponse,

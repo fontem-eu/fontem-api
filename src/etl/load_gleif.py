@@ -38,8 +38,11 @@ logger = logging.getLogger(__name__)
 GLEIF_API = "https://leidata.gleif.org/api/v1/concatenated-files/lei2"
 NS = "http://www.gleif.org/data/schema/leidata/2016"
 
-# XPath-style tag helpers using the GLEIF namespace
-_t = f"{{{NS}}}"
+# XPath-style tag helpers using the GLEIF namespace. `_t` is a tiny
+# string-formatting helper read on every TAG_* line below; the underscore
+# marks it module-private. Pylint reads it as a constant and asks for
+# UPPER_CASE, which would just shout in every TAG_* expansion.
+_t = f"{{{NS}}}"  # pylint: disable=invalid-name
 TAG_RECORD = f"{_t}LEIRecord"
 TAG_LEI = f"{_t}LEI"
 TAG_ENTITY = f"{_t}Entity"
@@ -189,27 +192,27 @@ def main(argv=None):
 
     if args.file:
         logger.info("Reading local file: %s", args.file)
-        zf = zipfile.ZipFile(args.file)
+        zf_src = args.file
     else:
         url = resolve_latest_url()
-        buf = download_zip(url)
-        zf = zipfile.ZipFile(buf)
+        zf_src = download_zip(url)
 
-    xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
-    if not xml_names:
-        logger.error("No XML file found in ZIP")
-        sys.exit(1)
+    with zipfile.ZipFile(zf_src) as zf:
+        xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
+        if not xml_names:
+            logger.error("No XML file found in ZIP")
+            sys.exit(1)
 
-    xml_name = xml_names[0]
-    logger.info("Parsing %s ...", xml_name)
+        xml_name = xml_names[0]
+        logger.info("Parsing %s ...", xml_name)
 
-    log = EventLog.from_env()
-    try:
-        with zf.open(xml_name) as xml_stream:
-            records = parse_gleif_xml(xml_stream)
-            emit_gleif(log, records)
-    finally:
-        log.close()
+        log = EventLog.from_env()
+        try:
+            with zf.open(xml_name) as xml_stream:
+                records = parse_gleif_xml(xml_stream)
+                emit_gleif(log, records)
+        finally:
+            log.close()
 
 
 if __name__ == "__main__":

@@ -135,7 +135,6 @@ class TestFlagBoundaries:
     def test_price_range_flag_at_min(self):
         hist = _make_history(base_price=0.40)
         s = GMRSettings(min_price=0.40, max_price=2.50)
-        price = float(hist["Close"].iloc[-1])
         ds = MockDS(hist, _snapshot(price=0.40, volume=2e6))
         r = GMRShort(ds, settings=s).compute("X")
         assert r.flags["price_range"] is True  # <= (inclusive)

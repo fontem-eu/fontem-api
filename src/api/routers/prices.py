@@ -20,10 +20,9 @@ A 404 is returned when no local price data exists for the ticker.
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
-from dishka.integrations.fastapi import FromDishka, inject
-
 import logging
 
+from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
 from src.analysis.gmr_data_source import FinancialDataSource

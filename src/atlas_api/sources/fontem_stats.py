@@ -5,6 +5,10 @@ call these methods; they don't write SQL themselves. That keeps the
 schema-coupling concentrated here for the day we extract the service
 (and want to vendor only the read DAL).
 """
+# `_connect()` is @contextmanager-wrapped; pylint mis-infers the generator
+# return as `Class 'value'` and flags `.close()` as a missing member. The
+# call is valid against the real psycopg.Connection at runtime.
+# pylint: disable=no-member,line-too-long
 from __future__ import annotations
 
 import json

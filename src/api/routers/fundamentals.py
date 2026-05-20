@@ -23,17 +23,16 @@ A 404 is returned when:
 # pylint: disable=duplicate-code
 from __future__ import annotations
 
-from dishka.integrations.fastapi import FromDishka, inject
-from src.data.graph.neo4j_client import Neo4jClient
-from src.api.di import resolve_company_id
-
 import logging
 
+from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
 from src.analysis.fundamentals import Fundamentals
 from src.analysis.gmr_data_source import FinancialDataSource
+from src.api.di import resolve_company_id
 from src.api.helpers import nan_to_none
+from src.data.graph.neo4j_client import Neo4jClient
 from src.api.schemas.fundamentals import (
     FundamentalsMarketSnapshot,
     FundamentalsPerYearRow,

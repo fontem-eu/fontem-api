@@ -1,4 +1,11 @@
 """Graph Data Quality Source — Neo4j-backed data quality metrics."""
+# The implementation mirrors the wide DataQualitySource protocol — one method
+# per dashboard panel. That gives one large module with one method per panel
+# (R0904 too-many-public-methods, C0302 too-many-lines). The override of
+# `get_triples_stats` keyword-onlies the limits the base method advertises as
+# variadic kwargs (W0221 arguments-differ) — that's an explicit narrowing,
+# safe to do once we know the concrete impl never accepts more kwargs.
+# pylint: disable=too-many-lines,too-many-public-methods,arguments-differ
 from __future__ import annotations
 
 import logging

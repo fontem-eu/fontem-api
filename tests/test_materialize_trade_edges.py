@@ -160,6 +160,9 @@ def test_aggregate_query_traverses_full_chain():
     materialize.materialize(_capturing_driver(session))
 
     aggregate = next(c for c in captured if "RETURN a.authority_id" in c["cypher"])
-    assert "(a:Authority)-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company)" in aggregate["cypher"]
+    assert (
+        "(a:Authority)-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company)"
+        in aggregate["cypher"]
+    )
     assert "count(ct) AS contracts" in aggregate["cypher"]
     assert "sum(COALESCE(ct.value_eur, 0)) AS total_eur" in aggregate["cypher"]

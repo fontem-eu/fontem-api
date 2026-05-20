@@ -9,6 +9,9 @@ reason: every SQL string touching the events store is concentrated
 here so the API can be moved into its own service later by vendoring
 this directory only.
 """
+# `_connect()` is @contextmanager-wrapped; pylint mis-infers the generator
+# return type as `Class 'value'` and flags `.close()` as a missing member.
+# pylint: disable=no-member
 from __future__ import annotations
 
 import time

@@ -7,9 +7,9 @@ between entities. Used by the Cytoscape.js graph explorer UI.
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from src.data.graph.neo4j_client import Neo4jClient
+from fastapi import APIRouter, HTTPException, Query
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from src.data.graph.neo4j_client import Neo4jClient
 
 from ..schemas.graph import (
     GraphEdge,
@@ -324,7 +324,10 @@ def graph_paths(
     summary="Traverse the entity graph from any starting node",
 )
 @inject
-def graph_traverse(
+# One Query() parameter per public knob the UI exposes (depth, types, since,
+# summary mode). They're orthogonal — bundling them into a Pydantic model would
+# break FastAPI's auto-generated /docs surface.
+def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     entity_id: str,
     depth: int = Query(1, ge=0, le=3, description="Traversal depth (0-3)"),
     types: str | None = Query(

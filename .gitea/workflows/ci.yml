@@ -32,7 +32,10 @@ jobs:
       - name: Test
         run: python3 -m pytest tests/ -q
       - name: Lint
-        run: python3 -m pylint src tests --output-format=parseable --reports=no 2>&1 | tail -1 || true
+        # Pylint is a hard gate now that the tree is rated 10.00/10 (see
+        # the chore/lint-clean cleanup). Regressions fail CI loudly rather
+        # than being hidden behind `|| true`.
+        run: python3 -m pylint src tests --output-format=parseable --reports=no
 
   # Helm chart sanity gate — runs on every push, doesn't need cluster
   # access. Catches the class of mistake that only surfaces on Argo

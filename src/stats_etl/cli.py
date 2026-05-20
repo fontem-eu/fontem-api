@@ -143,7 +143,9 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_nuts_polygons(args: argparse.Namespace) -> int:
     """Stub. Real implementation in nuts_loader; called via this CLI."""
-    from . import nuts_loader   # local import — heavy deps (shapely)
+    # Local import: nuts_loader pulls shapely + GISCO HTTP client, only needed
+    # for this one subcommand. Keeping it lazy keeps `stats-etl --help` fast.
+    from . import nuts_loader  # pylint: disable=import-outside-toplevel
     return nuts_loader.run(version=args.version)
 
 

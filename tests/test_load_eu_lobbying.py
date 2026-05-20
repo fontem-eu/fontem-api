@@ -47,7 +47,8 @@ def test_no_inline_match_company_cypher():
     risk we got bitten by in production. Re-introducing it would
     have to add a NEW symbol — fail loudly if any of the old shapes
     sneak back."""
-    src = open(load_eu_lobbying.__file__, encoding="utf-8").read()
+    with open(load_eu_lobbying.__file__, encoding="utf-8") as _f:
+        src = _f.read()
     assert "FULLTEXT" not in src.upper()
     assert "MERGE_LOBBYIST" not in src
     assert "MERGE_REPRESENTS" not in src

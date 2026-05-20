@@ -4,7 +4,16 @@ Boundary tests for GMRLong — kills mutmut mutations on comparison operators.
 Tests values exactly at each threshold to distinguish <= from < and >= from >.
 Also verifies _empty_result structure and years_for_avg default usage.
 """
-# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,unused-argument
+# MockDS below stubs the GMRDataSource protocol on one line per method — same
+# pattern as test_data_source_mutations. _make_ds takes one positional per
+# ratio because each ratio is tested at its threshold independently — a kwargs
+# dict would erase the column header that makes the test table readable. Both
+# shapes are intentional, so:
+#   multiple-statements (C0321) — one-line `def m(...): return ...` stubs
+#   line-too-long (C0301) — parametrize tables read wider than 100 chars
+#   too-many-arguments / too-many-positional-arguments (R0913/R0917) — one arg
+#       per ratio is the boundary-test design
+# pylint: disable=missing-function-docstring,redefined-outer-name,missing-class-docstring,unused-argument,multiple-statements,line-too-long,too-many-arguments,too-many-positional-arguments
 from __future__ import annotations
 
 import math

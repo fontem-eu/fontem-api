@@ -21,13 +21,13 @@ def test_emit_skips_when_log_is_none():
 
 
 def test_emit_skips_when_daily_empty():
-    log, emit = _mock_log()
+    log, _emit = _mock_log()
     assert emit_currency_events(log, "USD", "ecb", {}) == 0
     log.batch.assert_not_called()
 
 
 def test_emit_drops_unparseable_rates():
-    log, emit = _mock_log()
+    log, _emit = _mock_log()
     daily = {"2025-01-01": "1.05", "2025-01-02": "not-a-number"}
     n = emit_currency_events(log, "USD", "ecb", daily)
     assert n == 1

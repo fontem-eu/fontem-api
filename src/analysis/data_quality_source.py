@@ -1,4 +1,12 @@
 """Data Quality Source — Abstract interface for platform health metrics."""
+# The protocol below has one method per dashboard panel — the dashboard
+# surface is wide, so the class itself is wide. The default implementations
+# are intentionally one-line `def m(self) -> dict: return {}` stubs that
+# keep the protocol vertically compact and let mocks/tests opt into only
+# the pieces they exercise. Both shapes are the design, not lint debt:
+#   multiple-statements (C0321) — one-line `def ... : return {}` defaults
+#   too-many-public-methods (R0904) — every dashboard panel needs an entry
+# pylint: disable=multiple-statements,too-many-public-methods
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

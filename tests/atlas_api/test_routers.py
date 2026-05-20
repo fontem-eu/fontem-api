@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.atlas_api.app import build_app
@@ -373,7 +374,6 @@ def test_observation_rejects_legacy_string_flags():
     """We changed the schema from `str | None` to `list[str] | None` —
     pin the new contract so a regression to the old shape fails loudly
     in pytest instead of in prod."""
-    import pytest
     with pytest.raises(Exception):
         Observation(
             geo_code="DE21", year=2023,

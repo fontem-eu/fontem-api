@@ -12,8 +12,14 @@ def _mock_recs(companies=None, authorities=None):
 
 
 def test_recommendations_returns_company_and_authority_lists():
-    companies = [{"id": "c1", "name": "Foo Lda", "total_value_eur": 1.0e6, "contract_count": 5}]
-    authorities = [{"id": "a1", "name": "Município X", "total_value_eur": 5.0e6, "contract_count": 12}]
+    companies = [
+        {"id": "c1", "name": "Foo Lda", "total_value_eur": 1.0e6,
+         "contract_count": 5},
+    ]
+    authorities = [
+        {"id": "a1", "name": "Município X", "total_value_eur": 5.0e6,
+         "contract_count": 12},
+    ]
     rec = _mock_recs(companies=companies, authorities=authorities)
     client = make_test_client(recommendations_source=rec)
     try:
