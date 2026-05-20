@@ -46,8 +46,9 @@ logger = logging.getLogger(__name__)
 
 SANCTIONS_URL = (
     "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
-    # gitleaks:allow — public EU sanctions portal param, not a credential
-    "xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
+    # gitleaks only honours `gitleaks:allow` on the same line as the
+    # match, and pylint's C0301 fires at 100 chars; keep both happy.
+    "xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"  # gitleaks:allow — public EU sanctions portal param, not a credential  # pylint: disable=line-too-long
 )
 
 BATCH_SIZE = 500
