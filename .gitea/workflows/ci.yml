@@ -37,6 +37,43 @@ jobs:
         # than being hidden behind `|| true`.
         run: python3 -m pylint src tests --output-format=parseable --reports=no
 
+  # SonarQube static analysis. Runs on both PR and main so the scanner sees
+  # branch coverage deltas before merge. Mirrors the install incantation from
+  # `test` (vendored wheels + clone fontem-event-schemas/fontem-events with
+  # GMR_CI_READ_TOKEN) so the scanner can resolve imports. Coverage runs with
+  # `|| true` — Sonar consumes whatever XML was produced even on partial test
+  # failure; pytest's pass/fail gate already lives in the `test` job.
+  analyze:
+    needs: test
+    runs-on: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: void42/fontem-ci
+          path: .fontem-ci
+          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+      - name: Install deps and generate coverage
+        env:
+          PIP_INDEX_URL: https://nexus.void42.internal/repository/pypi-proxy/simple/
+          PIP_TRUSTED_HOST: nexus.void42.internal
+          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+        run: |
+          pip install --no-cache-dir vendor/*.whl
+          pip install --no-cache-dir -r requirements.txt pytest pytest-cov tzdata
+          tmpdir=$(mktemp -d)
+          git clone --depth 1 \
+              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-event-schemas.git" \
+              "$tmpdir/gmr-event-schemas"
+          git clone --depth 1 \
+              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-events.git" \
+              "$tmpdir/gmr-events"
+          pip install --no-cache-dir "$tmpdir/gmr-event-schemas" "$tmpdir/gmr-events"
+          python3 -m pytest tests/ -q --cov=src --cov-report=xml:coverage.xml || true
+      - uses: ./.fontem-ci/actions/sonar-scan
+        with:
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+
   # Helm chart sanity gate — runs on every push, doesn't need cluster
   # access. Catches the class of mistake that only surfaces on Argo
   # sync today: image references that don't match the cluster's Kyverno
