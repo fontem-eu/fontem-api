@@ -38,6 +38,7 @@ from eforms.filters import awards_only
 from eforms.stream import stream_notices
 
 from ..services.currency import CurrencyService
+from ..services.location_service import LocationService
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .ted_matcher import TedMatcher
@@ -154,7 +155,7 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                     payload=builders.upsert_authority(
                         authority_id=authority_id,
                         name=buyer.name,
-                        country=(buyer.country or "").upper() or None,
+                        country=LocationService.to_alpha3(buyer.country),
                         authority_type="contracting",
                         national_id=buyer_legal_value,
                     ),
@@ -240,7 +241,7 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                         payload=builders.upsert_company(
                             gmr_id=str(match.gmr_id),
                             name=contractor.name or None,
-                            country=(contractor.country or "").upper() or None,
+                            country=LocationService.to_alpha3(contractor.country),
                             vat=raw_vat,
                             active=True,
                         ),

@@ -73,7 +73,9 @@ def test_parse_single_record():
     r = results[0]
     assert r["lei"] == "724500973ODKK3IFQ447"
     assert r["name"] == "Adyen N.V."
-    assert r["country"] == "NL"
+    # GLEIF XML stores alpha-2 ("NL"); loader normalises to alpha-3 ("NLD")
+    # so downstream joins use the internal convention.
+    assert r["country"] == "NLD"
     assert r["postal_code"] == "1077 ZX"
     assert r["legal_form"] == "N.V."
     assert r["active"] is True
