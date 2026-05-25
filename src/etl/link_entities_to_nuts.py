@@ -2,13 +2,16 @@
 Link entities to NUTS regions
 =============================
 Creates LOCATED_IN edges from Company, Authority, and Lobbyist nodes to the
-matching NUTSRegion. Best-effort: matches at NUTS 0 (country) today because
-none of those entity types carry a postal_code property yet. Finer-grained
-linking will come once GLEIF/TED ETLs are extended to extract postal codes.
+matching NUTSRegion. Two-pass:
 
-The match joins on ``country_alpha3``: entity ``country`` is stored as
-alpha-3 (platform convention), and load_nuts populates ``country_alpha3``
-on every NUTSRegion via LocationService.
+1. **Postcode → NUTS-3** for entities that carry a ``postal_code``. The
+   Eurostat PCODE → NUTS-3 lookup is loaded from the vendored
+   ``data/nuts/PCODE_2025_NUTS-2024_v2.0.zip`` and joined in Python.
+2. **Country → NUTS-0** fallback for entities with no postal_code or whose
+   normalised postcode isn't in the PCODE table. The match joins on
+   ``country_alpha3``: entity ``country`` is stored as alpha-3 (platform
+   convention), and load_nuts populates ``country_alpha3`` on every
+   NUTSRegion via LocationService.
 
 Usage:
     python -m src.etl.link_entities_to_nuts
@@ -22,17 +25,53 @@ import time
 
 from neo4j import GraphDatabase
 
+from src.etl._pcode import load_lookup, normalise
+from src.services.location_service import LocationService
+
 logger = logging.getLogger(__name__)
 
 # Labels linked by this ETL. CohesionProject already has its own linking in
 # load_eu_knowledge_graph (via explicit nuts_code field).
 ENTITY_LABELS = ("Company", "Authority", "Lobbyist")
 
+# Batch size for the postcode pass — small enough that one UNWIND doesn't
+# overflow the per-tx memory cap, large enough that we don't pay round-trip
+# latency on every Company.
+POSTCODE_BATCH_SIZE = 10_000
+
+# Page size for streaming candidate rows out of Neo4j. Same logic as the
+# write batch — the bolt protocol streams cursor results so we don't keep
+# the full result set resident.
+POSTCODE_FETCH_PAGE = 50_000
+
+# Pulls candidates that have a postcode + country and aren't already pinned
+# to a NUTS-3 region. The not-already-linked check uses a non-existence
+# pattern instead of LIMIT/SKIP so a partial previous run resumes cleanly.
+_FETCH_POSTCODE_CANDIDATES = """
+MATCH (e:{label})
+WHERE e.postal_code IS NOT NULL
+  AND e.country IS NOT NULL
+  AND NOT (e)-[:LOCATED_IN]->(:NUTSRegion {{level: 3}})
+RETURN elementId(e) AS eid, e.country AS a3, e.postal_code AS pc
+"""
+
+# UNWIND batch write: pre-resolved (entity_eid, nuts3_code) pairs MERGE
+# LOCATED_IN edges into the matching :NUTSRegion. The MATCH on the NUTSRegion
+# uses the new ``code`` lookup (level + code uniqueness is guaranteed by the
+# nuts-region UNIQUE constraint in stats_etl).
+_MERGE_POSTCODE_EDGES = """
+UNWIND $rows AS row
+MATCH (e) WHERE elementId(e) = row.eid
+MATCH (n:NUTSRegion {code: row.nuts3})
+MERGE (e)-[:LOCATED_IN]->(n)
+"""
+
 # Use CALL { ... } IN TRANSACTIONS OF N ROWS so Neo4j auto-commits every
 # batch. Without this, linking 3.6M Company nodes blows past the 256 MB
 # per-transaction memory cap and the whole ETL crashes with
-# MemoryPoolOutOfMemoryError.
-LINK_LABEL_TEMPLATE = """
+# MemoryPoolOutOfMemoryError. The NOT (...) clause skips entities that
+# already got a NUTS-3 pin from the postcode pass.
+_LINK_LABEL_COUNTRY = """
 MATCH (e:{label})
 WHERE e.country IS NOT NULL AND NOT (e)-[:LOCATED_IN]->(:NUTSRegion)
 CALL (e) {{
@@ -42,13 +81,87 @@ CALL (e) {{
 }} IN TRANSACTIONS OF 10000 ROWS
 """
 
+# Public alias kept for backwards compatibility with existing tests / call
+# sites that import the country-link template.
+LINK_LABEL_TEMPLATE = _LINK_LABEL_COUNTRY
+
 _COUNT_LABEL_TEMPLATE = (
     "MATCH (:{label})-[r:LOCATED_IN]->(:NUTSRegion) RETURN count(r) AS n"
 )
 
 
+def _resolve_postcode_rows(
+    candidates,
+    pcode_lookup: dict[tuple[str, str], str],
+) -> list[dict]:
+    """In-memory join of Neo4j candidate rows against the PCODE lookup.
+
+    Returns a list of ``{"eid": <neo4j elementId>, "nuts3": <code>}`` dicts
+    ready for UNWIND. Candidates whose alpha-3 country can't be mapped to
+    alpha-2 (sanctioned-out, unknown) or whose normalised postcode isn't in
+    the table are simply skipped — the country-level fallback will catch
+    them in the second pass.
+    """
+    out: list[dict] = []
+    for rec in candidates:
+        a2 = LocationService.alpha3_to_alpha2(rec["a3"])
+        if not a2:
+            continue
+        nuts3 = pcode_lookup.get((a2, normalise(rec["pc"])))
+        if not nuts3:
+            continue
+        out.append({"eid": rec["eid"], "nuts3": nuts3})
+    return out
+
+
+def link_label_postcode(
+    session,
+    label: str,
+    pcode_lookup: dict[tuple[str, str], str],
+) -> int:
+    """Postcode → NUTS-3 pass for one label.
+
+    Streams candidates in pages, resolves the lookup in Python, sends
+    UNWIND batches back. Returns the number of MERGEd edges (after − before
+    diff, since UNWIND-MERGE summaries don't separate ``created`` from
+    ``matched`` reliably across driver versions).
+    """
+    count_query = _COUNT_LABEL_TEMPLATE.format(label=label)
+    before = session.run(count_query).single()["n"]
+
+    fetch_query = _FETCH_POSTCODE_CANDIDATES.format(label=label)
+    candidates_iter = iter(session.run(fetch_query))
+
+    batch: list[dict] = []
+    written = 0
+    while True:
+        page = []
+        for _ in range(POSTCODE_FETCH_PAGE):
+            rec = next(candidates_iter, None)
+            if rec is None:
+                break
+            page.append(rec)
+        if not page:
+            break
+        resolved = _resolve_postcode_rows(page, pcode_lookup)
+        for row in resolved:
+            batch.append(row)
+            if len(batch) >= POSTCODE_BATCH_SIZE:
+                session.run(_MERGE_POSTCODE_EDGES, rows=batch).consume()
+                written += len(batch)
+                batch = []
+    if batch:
+        session.run(_MERGE_POSTCODE_EDGES, rows=batch).consume()
+        written += len(batch)
+
+    after = session.run(count_query).single()["n"]
+    logger.info("  %s postcode pass: matched %d candidates, edges Δ=%d",
+                label, written, after - before)
+    return after - before
+
+
 def link_label(session, label: str) -> int:
-    """Link all unlinked entities of a given label to their NUTS 0 region.
+    """Country-level (NUTS-0) fallback for entities the postcode pass missed.
 
     Uses ``CALL ... IN TRANSACTIONS`` so the driver auto-commits every 10k
     rows; a single giant transaction blows past Neo4j's per-tx memory cap
@@ -58,7 +171,7 @@ def link_label(session, label: str) -> int:
     result summary, so we diff the LOCATED_IN edge count per label before /
     after the run to compute how many edges were created.
     """
-    query = LINK_LABEL_TEMPLATE.format(label=label)
+    query = _LINK_LABEL_COUNTRY.format(label=label)
     count_query = _COUNT_LABEL_TEMPLATE.format(label=label)
     before = session.run(count_query).single()["n"]
     session.run(query).consume()
@@ -66,18 +179,34 @@ def link_label(session, label: str) -> int:
     return after - before
 
 
-def run(driver) -> dict:
-    """Link Company, Authority, and Lobbyist nodes to NUTS 0 regions."""
+def run(driver, pcode_lookup: dict[tuple[str, str], str] | None = None) -> dict:
+    """Two-pass link of Company, Authority, and Lobbyist nodes.
+
+    ``pcode_lookup`` is loaded lazily from the vendored zip if not provided
+    (tests inject a small fixture dict to avoid the disk read).
+    """
+    if pcode_lookup is None:
+        pcode_lookup = load_lookup()
+
     t0 = time.time()
-    counts = {}
+    postcode_counts: dict[str, int] = {}
+    country_counts: dict[str, int] = {}
     with driver.session() as session:
         for label in ENTITY_LABELS:
-            logger.info("Linking %s nodes to NUTS 0 ...", label)
+            logger.info("Linking %s nodes via postcode (NUTS-3) ...", label)
+            postcode_counts[label] = link_label_postcode(
+                session, label, pcode_lookup,
+            )
+        for label in ENTITY_LABELS:
+            logger.info("Linking %s nodes via country (NUTS-0 fallback) ...",
+                        label)
             created = link_label(session, label)
-            counts[label] = created
-            logger.info("  %s: %d LOCATED_IN edges created", label, created)
+            country_counts[label] = created
+            logger.info("  %s country pass: %d LOCATED_IN edges created",
+                        label, created)
     return {
-        "counts": counts,
+        "postcode_counts": postcode_counts,
+        "country_counts": country_counts,
         "elapsed_s": round(time.time() - t0, 1),
     }
 
@@ -115,8 +244,9 @@ def main(argv=None):
         driver.close()
 
     logger.info(
-        "Done: %s in %.1fs",
-        summary["counts"],
+        "Done: postcode=%s, country=%s in %.1fs",
+        summary["postcode_counts"],
+        summary["country_counts"],
         summary["elapsed_s"],
     )
 
