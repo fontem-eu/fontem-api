@@ -11,6 +11,11 @@ Entity → region linking is a separate concern (see
 ``link_entities_to_nuts``); this script only populates the
 reference hierarchy.
 
+The source CSV is vendored at ``data/nuts/NUTS_AT_2024.csv``;
+NUTS revisions are roughly triennial and the cluster has no
+egress to ``ec.europa.eu``, so we ship the file with the image
+and bump it by hand when GISCO publishes a new vintage.
+
 Usage:
     python -m src.etl.load_nuts
     python -m src.etl.load_nuts --file /tmp/NUTS2024.csv
@@ -21,22 +26,21 @@ import argparse
 import csv
 import io
 import logging
+import pathlib
 import sys
 import time
 import uuid
 
-import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
-from src.etl._http import HTTP_HEADERS
 from src.services.location_service import LocationService
 
 logger = logging.getLogger(__name__)
 
-NUTS_CSV_URL = (
-    "https://ec.europa.eu/eurostat/cache/GISCO/distribution/"
-    "v2/nuts/csv/NUTS_AT_2024.csv"
+VENDORED_CSV = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "data" / "nuts" / "NUTS_AT_2024.csv"
 )
 SYSTEM = "nuts"
 
@@ -87,22 +91,8 @@ def parse_nuts_csv(csv_text: str):
         }
 
 
-def download_nuts_csv() -> str:
-    """Download the NUTS CSV from Eurostat."""
-    logger.info("Downloading NUTS CSV from %s", NUTS_CSV_URL)
-    resp = httpx.get(NUTS_CSV_URL, timeout=60, follow_redirects=True,
-                     headers=HTTP_HEADERS)
-    resp.raise_for_status()
-    return resp.text
-
-
 def emit_nuts(log: EventLog, regions) -> dict:
-    """Emit one UpsertTaxonomyCode event per region.
-
-    ``country_alpha3`` rides along under the schema's open
-    ``description`` field is a misuse — instead we drop it; the
-    sink can recover it from the country prefix when needed.
-    """
+    """Emit one UpsertTaxonomyCode event per region."""
     batch_id = uuid.uuid4()
     total = 0
     by_level: dict[int, int] = {}
@@ -139,7 +129,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--file",
-        help="Path to a local CSV with NUTS_ID and NUTS_NAME columns",
+        default=str(VENDORED_CSV),
+        help="Path to a NUTS hierarchy CSV (default: vendored data/nuts/NUTS_AT_2024.csv)",
     )
     args = parser.parse_args(argv)
 
@@ -148,16 +139,13 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    if args.file:
-        logger.info("Reading local file: %s", args.file)
-        try:
-            with open(args.file, encoding="utf-8") as fh:
-                csv_text = fh.read()
-        except OSError:
-            logger.exception("Failed to read file %s", args.file)
-            sys.exit(1)
-    else:
-        csv_text = download_nuts_csv()
+    logger.info("Reading NUTS CSV: %s", args.file)
+    try:
+        with open(args.file, encoding="utf-8") as fh:
+            csv_text = fh.read()
+    except OSError:
+        logger.exception("Failed to read file %s", args.file)
+        sys.exit(1)
 
     regions = list(parse_nuts_csv(csv_text))
     if not regions:
