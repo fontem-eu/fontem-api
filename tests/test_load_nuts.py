@@ -2,10 +2,10 @@
 from unittest.mock import MagicMock
 
 import pytest
-import httpx
 
 from src.etl import load_nuts
 from src.etl.load_nuts import (
+    VENDORED_CSV,
     _parent_code,
     emit_nuts,
     main,
@@ -132,15 +132,21 @@ def test_emit_summary_breaks_down_by_level():
 # ── CLI ────────────────────────────────────────────────────────────
 
 
-def test_main_aborts_when_download_fails(monkeypatch):
-    def fake_download():
-        raise httpx.HTTPError("network down")
+def test_vendored_csv_ships_with_repo():
+    """The vendored CSV is the loader's default source — it must exist."""
+    assert VENDORED_CSV.is_file(), (
+        f"expected vendored NUTS CSV at {VENDORED_CSV}; if you removed it, "
+        "either restore it or change the default `--file` in load_nuts.py"
+    )
 
-    monkeypatch.setattr(load_nuts, "download_nuts_csv", fake_download)
+
+def test_main_aborts_when_file_missing(tmp_path, monkeypatch):
+    """A missing --file path is a hard failure, not a silent skip."""
     monkeypatch.setattr(load_nuts.EventLog, "from_env",
                         classmethod(lambda cls: MagicMock()))
-    with pytest.raises(httpx.HTTPError):
-        main(argv=[])
+    with pytest.raises(SystemExit) as exc:
+        main(argv=["--file", str(tmp_path / "does-not-exist.csv")])
+    assert exc.value.code == 1
 
 
 def test_main_aborts_when_parsed_zero_regions(tmp_path, monkeypatch):

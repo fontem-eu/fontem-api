@@ -1,37 +1,37 @@
 """One-off loader for NUTS region polygons → PostGIS.
 
-Pulls the GISCO NUTS GeoJSON for all four levels at the given revision,
-upserts into `fontem_stats.nuts_region`. Idempotent: re-runs replace
-geometry without disturbing FK references.
+Reads the GISCO NUTS GeoJSON for all four levels from a vendored
+directory, upserts into ``fontem_stats.nuts_region``. Idempotent:
+re-runs replace geometry without disturbing FK references.
 
-GISCO publishes GeoJSON at multiple resolutions; we use 1:60M for
-display-quality without stratospheric file size (the 1:1M variant is
-~120 MB; 1:60M is ~2 MB).
+GISCO publishes GeoJSON at multiple resolutions; we ship 1:10M
+(see ``data/nuts/polygons/``). The cluster has no egress to
+``gisco-services.ec.europa.eu`` so we vendor the files and bump
+them by hand when GISCO publishes a new NUTS vintage (roughly
+every three years).
 """
 from __future__ import annotations
 
+import json
 import logging
-
-import httpx
+import pathlib
 
 from .db import StatsDatabase
 from .geo_levels import country_of, parent_code
 
 logger = logging.getLogger(__name__)
 
-GISCO_URL = (
-    "https://gisco-services.ec.europa.eu/distribution/v2/nuts/geojson/"
-    "NUTS_RG_60M_{version}_4326_LEVL_{level}.geojson"
+VENDORED_DIR = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "data" / "nuts" / "polygons"
 )
 
 
-def _fetch_level(version: str, level: int) -> dict:
-    url = GISCO_URL.format(version=version, level=level)
-    logger.info("fetching NUTS-%d polygons (%s)", level, url)
-    r = httpx.get(url, timeout=120.0,
-                  headers={"User-Agent": "fontem-stats/0.1"})
-    r.raise_for_status()
-    return r.json()
+def _load_level(version: str, level: int, src_dir: pathlib.Path) -> dict:
+    path = src_dir / f"NUTS_RG_10M_{version}_4326_LEVL_{level}.geojson"
+    logger.info("reading NUTS-%d polygons (%s)", level, path)
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _to_multipolygon_wkt(geometry: dict) -> str | None:
@@ -56,14 +56,15 @@ def _to_multipolygon_wkt(geometry: dict) -> str | None:
     return "MULTIPOLYGON(" + ", ".join(_poly(p) for p in polys) + ")"
 
 
-def run(version: str = "2024") -> int:
+def run(version: str = "2024", src_dir: pathlib.Path | None = None) -> int:
+    src = src_dir or VENDORED_DIR
     db = StatsDatabase()
     total = 0
     with db.connect() as conn, conn.cursor() as cur:
         # Upsert in two passes: parents first, then children — the FK
         # on parent_code requires the parent row to already exist.
         for level in (0, 1, 2, 3):
-            geo = _fetch_level(version, level)
+            geo = _load_level(version, level, src)
             for feat in geo.get("features", []):
                 props = feat.get("properties", {})
                 code = props.get("NUTS_ID")
