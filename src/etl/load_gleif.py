@@ -30,6 +30,8 @@ import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
+from src.services.location_service import LocationService
+
 from . import gmr_id
 from ._http import HTTP_HEADERS
 
@@ -104,7 +106,12 @@ def parse_gleif_xml(xml_stream):
 
         name = _text(entity, TAG_LEGAL_NAME)
         addr = entity.find(TAG_LEGAL_ADDRESS)
-        country = _text(addr, TAG_COUNTRY) if addr is not None else None
+        # GLEIF XML <Country> uses ISO 3166-1 alpha-2. Fontem's internal
+        # convention is alpha-3, so normalise at write time — otherwise
+        # downstream joins against alpha-3-keyed datasets (NUTSRegion,
+        # location services, statistics) all miss.
+        country_raw = _text(addr, TAG_COUNTRY) if addr is not None else None
+        country = LocationService.to_alpha3(country_raw)
         postal_code = _text(addr, TAG_POSTAL_CODE) if addr is not None else None
         status = _text(entity, TAG_ENTITY_STATUS)
 

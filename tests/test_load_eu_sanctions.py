@@ -218,4 +218,6 @@ def test_parse_extracts_aliases():
     record = out[0]
     assert record["name"] == "AMD"
     assert "Aran Modern Devices" in record["aliases"]
-    assert record["nationality"] == "IR"
+    # Portal exposes alpha-2 ("IR"); loader normalises to alpha-3 ("IRN")
+    # for fontem's internal convention.
+    assert record["nationality"] == "IRN"

@@ -38,6 +38,8 @@ import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
+from src.services.location_service import LocationService
+
 from . import gmr_id
 from ._hooks import resolve_entity
 from ._http_retry import get_with_retry
@@ -137,12 +139,15 @@ def _find_nationality(entity_el):
     """Extract nationality from citizenship child elements.
 
     The ``citizenship`` element has ``countryIso2Code`` and
-    ``countryDescription`` attributes.
+    ``countryDescription`` attributes. The portal stores ISO 3166-1
+    alpha-2 but fontem's internal convention is alpha-3, so normalise
+    on extraction; descriptions that aren't a code pass through as-is
+    (e.g. legacy "UNKNOWN-ish" strings).
     """
     for cit_el in entity_el.findall(_tag("citizenship")):
         country = (cit_el.attrib.get("countryIso2Code") or "").strip()
         if country and country != "00":
-            return country
+            return LocationService.to_alpha3(country) or country
         desc = (cit_el.attrib.get("countryDescription") or "").strip()
         if desc and desc != "UNKNOWN":
             return desc

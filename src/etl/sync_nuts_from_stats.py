@@ -24,6 +24,8 @@ import sys
 import psycopg
 from neo4j import GraphDatabase
 
+from src.services.location_service import LocationService
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)-7s %(message)s")
@@ -36,12 +38,13 @@ FOR (n:NUTSRegion) REQUIRE n.code IS UNIQUE
 UPSERT_CYPHER = """
 UNWIND $rows AS row
 MERGE (n:NUTSRegion {code: row.code})
-SET n.level        = row.level,
-    n.name         = row.name,
-    n.name_native  = row.name_native,
-    n.country_code = row.country_code,
-    n.area_km2     = row.area_km2,
-    n.nuts_version = row.nuts_version
+SET n.level         = row.level,
+    n.name          = row.name,
+    n.name_native   = row.name_native,
+    n.country_code  = row.country_code,
+    n.country_alpha3 = row.country_alpha3,
+    n.area_km2      = row.area_km2,
+    n.nuts_version  = row.nuts_version
 WITH n, row
 WHERE row.parent_code IS NOT NULL
 MATCH (p:NUTSRegion {code: row.parent_code})
@@ -64,7 +67,17 @@ def _fetch_nuts_rows(pg_dsn: str) -> list[dict]:
             """,
         )
         cols = [d.name for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        # PostGIS holds country as ISO alpha-2 (NUTS-style "FR", "EL",
+        # "UK"). Fontem's internal convention is alpha-3, so populate
+        # country_alpha3 alongside country_code — the entity-linker
+        # joins on alpha-3 (its inputs are alpha-3 too), so NUTSRegion
+        # has to expose both forms or every country-level link misses.
+        for row in rows:
+            row["country_alpha3"] = LocationService.alpha2_to_alpha3(
+                row.get("country_code") or "",
+            )
+        return rows
 
 
 def main(argv: list[str] | None = None) -> int:
