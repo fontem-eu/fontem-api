@@ -3,11 +3,11 @@
       "schedule"        "30 2 1 * *"
       "module"          "src.etl.link_entities_to_nuts"
       "args"            (list)
-      "deadlineSeconds" 1800
+      "deadlineSeconds" 3600
       "cpuRequest"      "250m"
       "cpuLimit"        "1"
-      "memRequest"      "512Mi"
-      "memLimit"        "2Gi"
+      "memRequest"      "1Gi"
+      "memLimit"        "4Gi"
       "extraEnv"        (list)
       "Values"          .Values
       "Release"         .Release) -}}
