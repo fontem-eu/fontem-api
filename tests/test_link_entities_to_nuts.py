@@ -146,10 +146,10 @@ def test_link_label_postcode_returns_edge_delta():
     """link_label_postcode merges resolved rows and returns count delta."""
     pcode = {("NL", "3204XD"): "NL366"}
     fetch_page = [{"eid": "n1", "a3": "NLD", "pc": "3204 XD"}]
-    _driver, session, _ = _mock_driver(
+    driver, session, _ = _mock_driver(
         edges_per_pass=[1], fetch_pages=[fetch_page],
     )
-    delta = link_label_postcode(session, "Company", pcode)
+    delta = link_label_postcode(driver, "Company", pcode)
     assert delta == 1
     # The MERGE UNWIND must have been issued once with the resolved row.
     merge_calls = [c for c in session.run.call_args_list
@@ -160,15 +160,30 @@ def test_link_label_postcode_returns_edge_delta():
 
 def test_link_label_postcode_skips_merge_when_no_resolved_rows():
     """If no candidate resolves, no UNWIND write is sent."""
-    _driver, session, _ = _mock_driver(
+    driver, session, _ = _mock_driver(
         edges_per_pass=[0],
         fetch_pages=[[{"eid": "x", "a3": "DEU", "pc": "unknown"}]],
     )
-    delta = link_label_postcode(session, "Company", {})
+    delta = link_label_postcode(driver, "Company", {})
     assert delta == 0
     merge_calls = [c for c in session.run.call_args_list
                    if "UNWIND" in c.args[0]]
     assert merge_calls == []
+
+
+def test_link_label_postcode_uses_separate_read_and_write_sessions():
+    """Driver.session() must be called multiple times so the read cursor
+    streams instead of materialising when writes interleave (avoids
+    the 3M-row OOMKilled the single-session shape would cause).
+    """
+    pcode = {("NL", "3204XD"): "NL366"}
+    page = [{"eid": "n1", "a3": "NLD", "pc": "3204 XD"}]
+    driver, _session, _ = _mock_driver(
+        edges_per_pass=[1], fetch_pages=[page],
+    )
+    link_label_postcode(driver, "Company", pcode)
+    # count-before, read+write block, count-after → at least 3 sessions.
+    assert driver.session.call_count >= 3
 
 
 # ── run() two-pass orchestration ──────────────────────────────────────

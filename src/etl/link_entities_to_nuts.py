@@ -114,47 +114,56 @@ def _resolve_postcode_rows(
     return out
 
 
-def link_label_postcode(
-    session,
+def link_label_postcode(  # pylint: disable=too-many-locals
+    driver,
     label: str,
     pcode_lookup: dict[tuple[str, str], str],
 ) -> int:
     """Postcode → NUTS-3 pass for one label.
 
-    Streams candidates in pages, resolves the lookup in Python, sends
-    UNWIND batches back. Returns the number of MERGEd edges (after − before
-    diff, since UNWIND-MERGE summaries don't separate ``created`` from
-    ``matched`` reliably across driver versions).
+    Uses TWO sessions: one for the read cursor that streams candidates,
+    one for the UNWIND writes. Running a write on the same session that
+    has an open read result forces the driver to fully materialise the
+    read into memory before the write begins — fatal at 3M+ rows
+    (~1.5 GB Python heap, OOMKilled with a 2 GiB cronjob limit). Two
+    sessions keep the read cursor genuinely streaming.
+
+    Returns the number of MERGEd edges (after − before diff, since
+    UNWIND-MERGE summaries don't separate ``created`` from ``matched``
+    reliably across driver versions).
     """
     count_query = _COUNT_LABEL_TEMPLATE.format(label=label)
-    before = session.run(count_query).single()["n"]
-
     fetch_query = _FETCH_POSTCODE_CANDIDATES.format(label=label)
-    candidates_iter = iter(session.run(fetch_query))
+
+    with driver.session() as count_sess:
+        before = count_sess.run(count_query).single()["n"]
 
     batch: list[dict] = []
     written = 0
-    while True:
-        page = []
-        for _ in range(POSTCODE_FETCH_PAGE):
-            rec = next(candidates_iter, None)
-            if rec is None:
+    with driver.session() as read_sess, driver.session() as write_sess:
+        candidates_iter = iter(read_sess.run(fetch_query))
+        while True:
+            page = []
+            for _ in range(POSTCODE_FETCH_PAGE):
+                rec = next(candidates_iter, None)
+                if rec is None:
+                    break
+                page.append(rec)
+            if not page:
                 break
-            page.append(rec)
-        if not page:
-            break
-        resolved = _resolve_postcode_rows(page, pcode_lookup)
-        for row in resolved:
-            batch.append(row)
-            if len(batch) >= POSTCODE_BATCH_SIZE:
-                session.run(_MERGE_POSTCODE_EDGES, rows=batch).consume()
-                written += len(batch)
-                batch = []
-    if batch:
-        session.run(_MERGE_POSTCODE_EDGES, rows=batch).consume()
-        written += len(batch)
+            resolved = _resolve_postcode_rows(page, pcode_lookup)
+            for row in resolved:
+                batch.append(row)
+                if len(batch) >= POSTCODE_BATCH_SIZE:
+                    write_sess.run(_MERGE_POSTCODE_EDGES, rows=batch).consume()
+                    written += len(batch)
+                    batch = []
+        if batch:
+            write_sess.run(_MERGE_POSTCODE_EDGES, rows=batch).consume()
+            written += len(batch)
 
-    after = session.run(count_query).single()["n"]
+    with driver.session() as count_sess:
+        after = count_sess.run(count_query).single()["n"]
     logger.info("  %s postcode pass: matched %d candidates, edges Δ=%d",
                 label, written, after - before)
     return after - before
@@ -191,12 +200,15 @@ def run(driver, pcode_lookup: dict[tuple[str, str], str] | None = None) -> dict:
     t0 = time.time()
     postcode_counts: dict[str, int] = {}
     country_counts: dict[str, int] = {}
+    # Postcode pass takes its own sessions per call (read + write) to
+    # keep the bolt cursor genuinely streaming. Country pass is one
+    # CALL IN TRANSACTIONS so a single short-lived session is fine.
+    for label in ENTITY_LABELS:
+        logger.info("Linking %s nodes via postcode (NUTS-3) ...", label)
+        postcode_counts[label] = link_label_postcode(
+            driver, label, pcode_lookup,
+        )
     with driver.session() as session:
-        for label in ENTITY_LABELS:
-            logger.info("Linking %s nodes via postcode (NUTS-3) ...", label)
-            postcode_counts[label] = link_label_postcode(
-                session, label, pcode_lookup,
-            )
         for label in ENTITY_LABELS:
             logger.info("Linking %s nodes via country (NUTS-0 fallback) ...",
                         label)
