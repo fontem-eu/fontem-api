@@ -52,7 +52,7 @@ def test_emits_begin_filings_end_bracket(tmp_path: Path):
     edgar_dir = _seed_edgar_dir(tmp_path, cik=320193, years=[2022, 2023])
     log, emit = _mock_log()
     res = load_us_financials(log, edgar_dir)
-    assert res == {"total": 2, "companies": 1}
+    assert res == {"total": 2, "companies": 1, "skipped_validation": 0}
     # First call is BeginGraphReplace; last is EndGraphReplace.
     assert emit.control.call_count == 2
     begin = emit.control.call_args_list[0]
@@ -92,8 +92,41 @@ def test_skips_companies_without_known_cik(tmp_path: Path):
     (edgar_dir / "reference" / "company_tickers.json").write_text("{}")
     log, emit = _mock_log()
     res = load_us_financials(log, edgar_dir)
-    assert res == {"total": 0, "companies": 0}
+    assert res == {"total": 0, "companies": 0, "skipped_validation": 0}
     # Bracket markers still emit (PUT-replace semantics): the
     # graph gets wiped to empty rather than left with stale data.
     assert emit.control.call_count == 2
     assert emit.upsert.call_count == 0
+
+
+def test_skips_record_with_invalid_year_and_keeps_going(tmp_path: Path):
+    """Bad EDGAR records (e.g. year=2113 from a corrupted 10-K) must
+    not abort the whole sweep — the loader catches the schema-level
+    EventValidationError, logs it, increments skipped_validation, and
+    continues with the next record.
+
+    Without this, one bad CIK kills the run for the entire 19k-company
+    EDGAR mirror because the bracketed event log is still open.
+    """
+    from fontem_event_schemas.validate import EventValidationError  # pylint: disable=import-outside-toplevel
+
+    edgar_dir = _seed_edgar_dir(tmp_path, cik=320193, years=[2022, 2023])
+    log, emit = _mock_log()
+
+    # First UpsertFiling raises (simulates the year=2113 case), the
+    # second one succeeds.
+    emit.upsert.side_effect = [
+        EventValidationError(
+            "UpsertFiling", 1,
+            ["year: 2113 is greater than the maximum of 2100"],
+        ),
+        None,
+    ]
+
+    res = load_us_financials(log, edgar_dir)
+    assert res == {"total": 1, "companies": 1, "skipped_validation": 1}
+    # Both attempts were made; only the second one counted as emitted.
+    assert emit.upsert.call_count == 2
+    # Bracket markers still close — the bad record did NOT abort the
+    # whole run.
+    assert emit.control.call_count == 2
