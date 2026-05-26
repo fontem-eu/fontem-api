@@ -8,8 +8,25 @@ the event log; the gmr-events EventLog handles transaction
 grouping internally and the sinks own the projection.
 """
 # pylint: disable=missing-function-docstring,missing-class-docstring
+from src.etl._hooks import CONSOLIDATOR_URL
 from src.etl.load_eu_lobbying import EMIT_CHUNK as LOBBY_CHUNK, TR_XML_URL
 from src.etl.load_cpv import CPV_DIVISIONS
+
+
+class TestConsolidatorURL:
+    def test_default_uses_namespace_relative_dns(self):
+        # Relative DNS so the same default works in fontem-shared and
+        # fontem-prod without per-env overrides (the resolver expands
+        # the bare host to <name>.<pod-ns>.svc.cluster.local). The
+        # previous default `gmr-consolidator.gmr.svc.cluster.local`
+        # doesn't resolve in the current cluster, so /resolve calls
+        # silently degraded to "no_match" in every ETL.
+        assert CONSOLIDATOR_URL == "http://fontem-consolidator:8000"
+
+    def test_no_legacy_gmr_namespace(self):
+        # Catches a future accidental revert to the old gmr-* shape.
+        assert "gmr-consolidator" not in CONSOLIDATOR_URL
+        assert ".gmr." not in CONSOLIDATOR_URL
 
 
 class TestLobbyingConstants:

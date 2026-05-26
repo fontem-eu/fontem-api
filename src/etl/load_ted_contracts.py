@@ -341,13 +341,20 @@ def main(argv=None):
     try:
         if args.file:
             archive = Path(args.file)
-        elif args.year and args.month:
-            archive = _download_monthly(
-                args.year, args.month, Path("/tmp"),
-            )
         else:
-            parser.error("Provide --file or --year + --month")
-            return
+            # Default to the current calendar month when --year/--month
+            # are omitted. The cronjob used to bake `--year $(date +%Y)
+            # --month $(date +%m)` into argv expecting shell expansion,
+            # but the container entrypoint runs `python` directly (no
+            # /bin/sh wrap) so the literal string `$(date +%Y)` reached
+            # argparse and aborted with `invalid int value`. Defaulting
+            # in code makes the cronjob args empty + the daily run
+            # always picks the current month, which is exactly what
+            # the previous shape was trying to achieve.
+            today = datetime.now().astimezone()
+            year = args.year or today.year
+            month = args.month or today.month
+            archive = _download_monthly(year, month, Path("/tmp"))
 
         # CPV bootstrap: emits UpsertTaxonomyCode events. Idempotent;
         # re-runs are MERGE on (system='cpv', code) at the sink.

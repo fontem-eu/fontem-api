@@ -1,6 +1,7 @@
 """Tests for the TED contract loader (post-event-log)."""
 from unittest.mock import MagicMock, patch
 
+from src.etl import load_ted_contracts
 from src.etl.load_ted_contracts import load_contracts
 
 
@@ -203,3 +204,72 @@ def test_skips_award_with_unknown_contractor(
         if c.args[0] == "UpsertContract"
     ]
     assert contract_emits == []
+
+
+# ── --year/--month default to current calendar month ────────────────
+
+
+def test_main_defaults_year_month_to_current_calendar_month(monkeypatch):
+    """Regression: the cronjob args used to be `--year $(date +%Y)
+    --month $(date +%m)` baked into argv. The container entrypoint
+    runs `python` directly (no /bin/sh wrap) so those tokens reached
+    argparse as literal strings and aborted with `invalid int value`.
+    The fix is to default the loader to the current calendar month
+    when neither flag is set, and drop the literal args from the
+    cronjob template — this test pins that contract.
+    """
+    captured: dict = {}
+
+    def _fake_download(year, month, dest):
+        captured["year"] = year
+        captured["month"] = month
+        captured["dest"] = dest
+        # Stop right after — we just want to assert what _download was
+        # called with; everything past it does Neo4j+events writes.
+        raise SystemExit(0)
+
+    monkeypatch.setattr(load_ted_contracts, "_download_monthly", _fake_download)
+    # Skip the driver+event-log setup; the SystemExit raises before
+    # load_contracts is reached.
+    monkeypatch.setattr(load_ted_contracts.GraphDatabase, "driver",
+                        lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(load_ted_contracts.EventLog, "from_env",
+                        classmethod(lambda cls: MagicMock()))
+
+    try:
+        load_ted_contracts.main([])
+    except SystemExit:
+        pass
+
+    from datetime import datetime  # pylint: disable=import-outside-toplevel
+    today = datetime.now().astimezone()
+    assert captured["year"] == today.year
+    assert captured["month"] == today.month
+
+
+def test_main_overrides_year_month_when_explicit(monkeypatch):
+    """When --year/--month are passed explicitly, they take precedence
+    over the current-date default. (Lets backfill jobs pin an older
+    month: `python -m src.etl.load_ted_contracts --year 2026 --month 4`.)
+    """
+    captured: dict = {}
+
+    def _fake_download(year, month, dest):
+        captured["year"] = year
+        captured["month"] = month
+        captured["dest"] = dest
+        raise SystemExit(0)
+
+    monkeypatch.setattr(load_ted_contracts, "_download_monthly", _fake_download)
+    monkeypatch.setattr(load_ted_contracts.GraphDatabase, "driver",
+                        lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(load_ted_contracts.EventLog, "from_env",
+                        classmethod(lambda cls: MagicMock()))
+
+    try:
+        load_ted_contracts.main(["--year", "2024", "--month", "6"])
+    except SystemExit:
+        pass
+
+    assert captured["year"] == 2024
+    assert captured["month"] == 6
