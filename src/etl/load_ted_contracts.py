@@ -37,19 +37,13 @@ from neo4j import GraphDatabase
 from eforms.filters import awards_only
 from eforms.stream import stream_notices
 
-from ..services.currency import CurrencyService
+from ..services.currency.client import CurrencyClient
 from ..services.location_service import LocationService
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .ted_matcher import TedMatcher
 
 logger = logging.getLogger(__name__)
-
-# Path to currency data directory (per-currency JSON files)
-_DEFAULT_CURRENCY_DIR = os.environ.get(
-    "CURRENCY_DATA_DIR",
-    "/srv/nfs/currency-data",
-)
 
 
 def _coalesce_date(award, notice) -> tuple[str | None, str]:
@@ -114,7 +108,7 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
     driver,
     log: EventLog,
     archive_path: Path,
-    currency_svc: CurrencyService | None = None,
+    currency_svc: CurrencyClient | None = None,
 ):
     """Parse a TED archive and emit Authority/Contract/Company events.
 
@@ -312,9 +306,12 @@ def main(argv=None):
         default=os.environ.get("NEO4J_PASSWORD", ""),
     )
     parser.add_argument(
-        "--currency-dir",
-        default=os.environ.get("CURRENCY_DATA_DIR", _DEFAULT_CURRENCY_DIR),
-        help="Path to currency data directory (per-currency rate files)",
+        "--currency-service-url",
+        default=os.environ.get(
+            "CURRENCY_SERVICE_URL",
+            "http://fontem-currency.currency-service.svc.cluster.local",
+        ),
+        help="Base URL of the fontem-currency HTTP service",
     )
     args = parser.parse_args(argv)
 
@@ -323,15 +320,15 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    currency_svc = None
-    currency_dir = Path(args.currency_dir)
-    if currency_dir.exists():
-        currency_svc = CurrencyService.load(currency_dir)
-        logger.info("CurrencyService loaded from %s", currency_dir)
-    else:
-        logger.warning(
-            "No currency data at %s — EUR conversion skipped", currency_dir,
-        )
+    # Currency conversion is now a remote HTTP call to the singleton
+    # fontem-currency service (currency-service ns), not a local PVC
+    # read. Construct unconditionally — the client degrades to "value
+    # unknown" on network failure rather than crashing, so the loader
+    # still produces Authority/Contract events even when the service
+    # is briefly unavailable. Only EUR conversion is skipped in that
+    # window; the contracts re-process cleanly on the next run.
+    currency_svc = CurrencyClient(base_url=args.currency_service_url)
+    logger.info("CurrencyClient → %s", args.currency_service_url)
 
     driver = GraphDatabase.driver(
         args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password),
@@ -365,6 +362,7 @@ def main(argv=None):
             driver, log, archive, currency_svc=currency_svc,
         )
     finally:
+        currency_svc.close()
         log.close()
         driver.close()
 
