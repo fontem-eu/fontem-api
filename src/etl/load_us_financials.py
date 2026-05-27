@@ -30,6 +30,7 @@ import uuid
 from pathlib import Path
 
 from fontem_event_schemas import builders
+from fontem_event_schemas.validate import EventValidationError
 from fontem_events import EventLog
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,13 @@ def load_us_financials(  # pylint: disable=too-many-locals
     """Iterate companyfacts/*.json and emit UpsertFiling events
     bracketed by Begin/EndGraphReplace against the EDGAR graph.
 
-    Returns ``{"total": <filings>, "companies": <distinct CIKs>}``."""
+    Bad rows (year out of schema range, missing mandatory fields, junk
+    XBRL values) are logged and skipped per-record — see the comment on
+    EventValidationError below. We don't want one corrupt CIK to abort
+    the whole 19k-company sweep.
+
+    Returns ``{"total": <filings>, "companies": <distinct CIKs>,
+                "skipped_validation": <bad records>}``."""
     facts_dir = edgar_dir / "companyfacts"
     tickers_path = edgar_dir / "reference" / "company_tickers.json"
 
@@ -154,6 +161,7 @@ def load_us_financials(  # pylint: disable=too-many-locals
     batch_id = uuid.uuid4()
     companies_loaded = 0
     filings_emitted = 0
+    skipped_validation = 0
     t0 = time.time()
 
     with log.batch(batch_id, producer="load_us_financials") as emit:
@@ -181,21 +189,35 @@ def load_us_financials(  # pylint: disable=too-many-locals
                 continue
             for rec in records:
                 year = rec.pop("year")
-                emit.upsert(
-                    "UpsertFiling",
-                    iri=(
-                        f"http://data.fontem.eu/id/Filing/"
-                        f"{_filing_uuid(company_gmr, year, SOURCE)}"
-                    ),
-                    domain="financials/edgar",
-                    payload=builders.upsert_filing(
-                        gmr_id=company_gmr,
-                        year=year,
-                        source=SOURCE,
-                        **rec,
-                    ),
-                )
-                filings_emitted += 1
+                try:
+                    emit.upsert(
+                        "UpsertFiling",
+                        iri=(
+                            f"http://data.fontem.eu/id/Filing/"
+                            f"{_filing_uuid(company_gmr, year, SOURCE)}"
+                        ),
+                        domain="financials/edgar",
+                        payload=builders.upsert_filing(
+                            gmr_id=company_gmr,
+                            year=year,
+                            source=SOURCE,
+                            **rec,
+                        ),
+                    )
+                    filings_emitted += 1
+                except EventValidationError as exc:
+                    # EDGAR companyfacts contains the occasional junk
+                    # record (year out of range, NaN values, etc — we
+                    # saw 2113 in the wild from a botched 10-K). The
+                    # schema rejects them at emit time; without this
+                    # try/except a single bad CIK aborts the entire
+                    # 19k-company sweep with the bracketed event log
+                    # already open.
+                    skipped_validation += 1
+                    logger.warning(
+                        "skipping bad filing CIK=%s year=%s: %s",
+                        cik_str, year, exc,
+                    )
             companies_loaded += 1
             if companies_loaded % 500 == 0:
                 elapsed = time.time() - t0
@@ -215,10 +237,14 @@ def load_us_financials(  # pylint: disable=too-many-locals
 
     elapsed = time.time() - t0
     logger.info(
-        "Done: %d filings for %d companies in %.1fs",
-        filings_emitted, companies_loaded, elapsed,
+        "Done: %d filings for %d companies in %.1fs (%d skipped on validation)",
+        filings_emitted, companies_loaded, elapsed, skipped_validation,
     )
-    return {"total": filings_emitted, "companies": companies_loaded}
+    return {
+        "total": filings_emitted,
+        "companies": companies_loaded,
+        "skipped_validation": skipped_validation,
+    }
 
 
 def _filing_uuid(gmr_id: str, year: int, source: str) -> uuid.UUID:
