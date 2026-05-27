@@ -108,3 +108,63 @@ def _rd_xml(gnl: _Elem) -> _Elem:
         _Elem("TradgVnRltdAttrbts", children=[_Elem("Id", "XETR")]),
         _Elem("Issr", "529900N0AYWGEKMC0739"),
     ])
+
+
+# ── ESMA throttling wiring ─────────────────────────────────────────
+
+
+def test_module_imports_rate_limiter_and_constants():
+    """ESMA Solr + the FIRDS delta-zip CDN are behind an Azure App
+    Gateway that drops TLS handshakes after bursts. The loader must
+    use a RateLimiter + the longer retry budget so transient WAF
+    blocks don't fail the whole run.
+
+    This is structural — every change to FIRDS upstream-call sites
+    must keep the rate limiter wired in.
+    """
+    from src.etl._http_retry import RateLimiter  # pylint: disable=import-outside-toplevel
+    assert isinstance(load_firds._firds_limiter, RateLimiter)
+    # Default 6 req/min → 10 s between requests.
+    assert load_firds._firds_limiter.min_interval_s == 10.0
+    # Longer than the loader-default 3 attempts.
+    assert load_firds._FIRDS_MAX_ATTEMPTS >= 5
+    # Longer than the loader-default 5 s base.
+    assert load_firds._FIRDS_BASE_DELAY_S >= 10.0
+
+
+def test_query_firds_files_passes_rate_limiter_to_get_with_retry(monkeypatch):
+    """Both FIRDS upstream calls go through get_with_retry; they MUST
+    pass the module-level _firds_limiter so retries are governed."""
+    captured: dict = {}
+
+    def fake_get_with_retry(url, **kwargs):  # pylint: disable=unused-argument
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"response": {"docs": []}}
+        return resp
+
+    monkeypatch.setattr(load_firds, "get_with_retry", fake_get_with_retry)
+    load_firds.query_firds_files("2026-05-01")
+    assert captured["kwargs"]["rate_limiter"] is load_firds._firds_limiter
+    assert captured["kwargs"]["max_attempts"] == load_firds._FIRDS_MAX_ATTEMPTS
+    assert captured["kwargs"]["base_delay"] == load_firds._FIRDS_BASE_DELAY_S
+
+
+def test_download_zip_passes_rate_limiter_to_get_with_retry(monkeypatch):
+    captured: dict = {}
+
+    def fake_get_with_retry(url, **kwargs):  # pylint: disable=unused-argument
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.content = b"PK\x03\x04fake"
+        return resp
+
+    monkeypatch.setattr(load_firds, "get_with_retry", fake_get_with_retry)
+    load_firds.download_zip("https://firds.esma.europa.eu/firds/x.zip")
+    assert captured["kwargs"]["rate_limiter"] is load_firds._firds_limiter
+    assert captured["kwargs"]["max_attempts"] == load_firds._FIRDS_MAX_ATTEMPTS
+    assert captured["kwargs"]["base_delay"] == load_firds._FIRDS_BASE_DELAY_S

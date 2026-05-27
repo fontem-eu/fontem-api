@@ -40,7 +40,7 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 from neo4j import GraphDatabase
 
-from src.etl._http_retry import get_with_retry
+from src.etl._http_retry import RateLimiter, get_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,35 @@ FIRDS_SOLR = (
     "esma_registers_firds_files/select"
 )
 EMIT_BATCH = 1000
+
+# ESMA Solr + the FIRDS delta-zip CDN both sit behind an Azure
+# Application Gateway that silently drops TLS handshakes after a
+# small burst — we've watched it succeed at minute T+0 and fail
+# repeatedly with "TLS handshake timed out" at T+1 from the same
+# egress IP. The WAF's window seems to be 60 s. 6 requests/minute
+# stays well clear of whatever triggers the block, and the per-zip
+# downloads are 1-2 MB each so the throughput hit is marginal
+# (300-500 zips of an 8-month delta ≈ 60 min vs ~5 min unthrottled).
+# Adjustable via FIRDS_RATE_LIMIT_RPM if a future run needs to be
+# even more conservative.
+_FIRDS_RATE_LIMIT_RPM = float(os.environ.get("FIRDS_RATE_LIMIT_RPM", "6"))
+
+# Longer retry budget than the loader default (3 attempts / 5 s base)
+# because ESMA's WAF can stay angry for tens of seconds at a time. A
+# single ConnectTimeout is almost always followed by another one if
+# you retry within 30 s; we want 5+ attempts spread across several
+# minutes before declaring the upstream genuinely down.
+#   attempt 1: instant (rate limiter)
+#   attempt 2: up to 15 s extra
+#   attempt 3: up to 30 s
+#   attempt 4: up to 60 s
+#   attempt 5: up to 120 s
+#   attempt 6: up to 240 s
+# Worst-case wall clock between attempt 1 and attempt 6 ≈ 8 min.
+_FIRDS_MAX_ATTEMPTS = 6
+_FIRDS_BASE_DELAY_S = 15.0
+
+_firds_limiter = RateLimiter.per_minute(_FIRDS_RATE_LIMIT_RPM)
 
 # Resolve LEI → gmr_id from the derived Neo4j store. Companies must
 # have been projected by load_gleif (or another LEI-aware loader)
@@ -74,7 +103,12 @@ def query_firds_files(since):
     }
     logger.info("Querying FIRDS Solr for deltas since %s ...", since)
     try:
-        resp = get_with_retry(FIRDS_SOLR, params=params, timeout=60)
+        resp = get_with_retry(
+            FIRDS_SOLR, params=params, timeout=60,
+            max_attempts=_FIRDS_MAX_ATTEMPTS,
+            base_delay=_FIRDS_BASE_DELAY_S,
+            rate_limiter=_firds_limiter,
+        )
         resp.raise_for_status()
     except httpx.HTTPError:
         logger.exception("Failed to query FIRDS Solr")
@@ -90,7 +124,12 @@ def download_zip(url):
     """Download a ZIP file into an in-memory buffer."""
     logger.info("Downloading %s ...", url)
     try:
-        resp = get_with_retry(url, timeout=300, follow_redirects=True)
+        resp = get_with_retry(
+            url, timeout=300, follow_redirects=True,
+            max_attempts=_FIRDS_MAX_ATTEMPTS,
+            base_delay=_FIRDS_BASE_DELAY_S,
+            rate_limiter=_firds_limiter,
+        )
         resp.raise_for_status()
     except httpx.HTTPError:
         logger.exception("Failed to download %s", url)
