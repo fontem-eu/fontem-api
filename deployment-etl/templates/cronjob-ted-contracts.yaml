@@ -1,5 +1,5 @@
 {{/*
-TED contract awards — the main procurement-data feed. Daily run picks
+TED contract awards — the main procurement-data feed. Daily run picks 
 up the current month's archive; the loader defaults --year + --month
 to the current calendar month when neither flag is given (see the
 comment in load_ted_contracts.main). The previous `--year $(date +%Y)`
