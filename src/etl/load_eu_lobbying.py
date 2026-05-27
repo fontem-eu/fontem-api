@@ -320,11 +320,15 @@ def load_eu_lobbying(log: EventLog) -> dict:
     return {"emitted": emitted, "represents": rep_summary}
 
 
-def main() -> None:
+def main(argv=None) -> None:
+    # _run_wrapper always passes argv as a positional, so a bare main()
+    # signature blew up the cronjob path with "TypeError: main() takes
+    # 0 positional arguments but 1 was given". Every other loader in
+    # src/etl/load_*.py uses the same `main(argv=None)` shape.
     parser = argparse.ArgumentParser(
         description="Emit EU Transparency Register events into the event log",
     )
-    parser.parse_args()
+    parser.parse_args(argv)
     log = EventLog.from_env()
     try:
         load_eu_lobbying(log)

@@ -209,3 +209,21 @@ def test_no_represents_when_resolver_unavailable():
         summary = emit_represents_relationships(log, entities)
     assert summary == {"confident": 0, "ambiguous": 0, "no_match": 0}
     emit.upsert.assert_not_called()
+
+
+def test_main_accepts_argv(monkeypatch):
+    """Regression: previously `def main()` rejected the argv positional
+    that `_run_wrapper` always passes, so the cronjob path failed with
+    `TypeError: main() takes 0 positional arguments but 1 was given`.
+    Passing the empty argv list (the wrapper's normal contract) must
+    not raise.
+    """
+    monkeypatch.setattr(
+        load_eu_lobbying.EventLog, "from_env",
+        classmethod(lambda cls: MagicMock()),
+    )
+    monkeypatch.setattr(
+        load_eu_lobbying, "load_eu_lobbying",
+        lambda _log: {"emitted": 0, "represents": {"confident": 0}},
+    )
+    load_eu_lobbying.main([])

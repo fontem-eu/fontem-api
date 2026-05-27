@@ -20,9 +20,19 @@ from typing import Iterable, Literal
 
 import httpx
 
+# Namespace-relative DNS: the bare `fontem-consolidator` name is
+# completed by the in-cluster resolver to
+# `fontem-consolidator.<pod-namespace>.svc.cluster.local`. That gives
+# us one default that works for every env (fontem-shared / fontem-prod
+# / fontem-staging) without per-env overrides. The old default was
+# `gmr-consolidator.gmr.svc.cluster.local` from the pre-rename layout;
+# in the current cluster that name doesn't resolve, so /resolve calls
+# silently degraded to "no_match" and entity de-duplication stopped
+# working in every ETL that uses the resolver (sanctions, TED,
+# lobbying, FIRDS).
 CONSOLIDATOR_URL = os.environ.get(
     "CONSOLIDATOR_URL",
-    "http://gmr-consolidator.gmr.svc.cluster.local:8000",
+    "http://fontem-consolidator:8000",
 )
 # 30s default — the consolidator pod runs both the rule engine and the
 # resolver, and the rule engine is sometimes saturated by long sweeps.

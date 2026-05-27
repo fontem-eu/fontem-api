@@ -1,15 +1,18 @@
 {{/*
 TED contract awards — the main procurement-data feed. Daily run picks
-up the current month's archive (the loader is idempotent, so re-loads
-of the same month MERGE on ted_notice_id without duplicating).
-Year/month come from `date` at runtime so the cronjob always loads
-the current calendar month.
+up the current month's archive; the loader defaults --year + --month
+to the current calendar month when neither flag is given (see the
+comment in load_ted_contracts.main). The previous `--year $(date +%Y)`
+shape required a /bin/sh wrapper around the container command, which
+the shared `_etl_cronjob.tpl` does not provide — argparse received the
+literal token `$(date +%Y)` and aborted every run with
+`invalid int value`.
 */}}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-ted-contracts"
       "schedule"        "0 5 * * *"
       "module"          "src.etl.load_ted_contracts"
-      "args"            (list "--year" "$(date +%Y)" "--month" "$(date +%m)")
+      "args"            (list)
       "deadlineSeconds" 7200
       "cpuRequest"      "500m"
       "cpuLimit"        "2"
