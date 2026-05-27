@@ -145,3 +145,60 @@ def test_lei_results_skips_entries_without_data():
     assert len(out) == 1
     assert out[0]["lei"] == "L3"
     assert out[0]["ticker"] == "VOW3"
+
+
+# ── per-tier batch sizing ─────────────────────────────────────────
+
+
+def test_api_limits_keyed_tier():
+    """With an API key OpenFIGI accepts up to 100 IDs per request and
+    25 req per 6 s. Our defaults: batch=100, sleep=0.30 s."""
+    batch, sleep_s = load_openfigi._api_limits("X-OPENFIGI-FAKE-KEY")
+    assert batch == 100
+    assert sleep_s == 0.30
+
+
+def test_api_limits_anonymous_tier():
+    """Keyless tier caps at 10 IDs per request and 25 req per minute.
+    Sending 100 in one request (the previous hard-coded value) returned
+    HTTP 413 from every batch in the staging run. We now cap at 10 +
+    sleep 3 s when no key is set so the loader still makes progress
+    instead of producing zero enriched listings.
+    """
+    batch, sleep_s = load_openfigi._api_limits(None)
+    assert batch == 10
+    assert sleep_s == 3.0
+    # Empty string is also "no key" (env var unset → "").
+    assert load_openfigi._api_limits("") == (10, 3.0)
+
+
+def test_run_mode_uses_anonymous_batch_size_when_no_key(monkeypatch):
+    """Regression: the loader used to always pass batches of 100,
+    which OpenFIGI rejects without an API key (HTTP 413). _run_mode
+    must now consult _api_limits and chunk to 10 when key is absent.
+    """
+    sent_batch_sizes: list[int] = []
+
+    def fake_process_batch(_cfg, batch, _id_to_company, _api_key):
+        sent_batch_sizes.append(len(batch))
+        return []  # treat as "no matches"
+
+    monkeypatch.setattr(load_openfigi, "_process_batch", fake_process_batch)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+
+    driver = MagicMock()
+    driver.session.return_value.__enter__ = MagicMock(
+        return_value=MagicMock(
+            run=lambda *a, **kw: [
+                {"lei": f"LEI{i:08d}", "company_gmr_id": f"g{i}"}
+                for i in range(25)
+            ],
+        ),
+    )
+    driver.session.return_value.__exit__ = MagicMock(return_value=False)
+    log, _emit = _mock_log()
+
+    summary = load_openfigi._run_mode("lei", driver, log, limit=25, api_key=None)
+    # 25 IDs / 10 per batch → 3 batches of 10, 10, 5
+    assert sent_batch_sizes == [10, 10, 5]
+    assert summary["queried"] == 25

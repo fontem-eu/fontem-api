@@ -54,12 +54,33 @@ from src.etl._http import with_headers
 logger = logging.getLogger(__name__)
 
 OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
-API_BATCH_SIZE = 100  # OpenFIGI max per request (with API key)
-# OpenFIGI keyed-tier ceiling is 25 requests per 6 seconds. 0.25s/req
-# is exactly at the ceiling; one retry or clock skew tips us over. 0.30s
-# keeps a safety margin (≈20 req/6s effective) without meaningfully
-# slowing the LEI backfill — 0.3s × 100-ID batches = 30s per 10k IDs.
-RATE_LIMIT_SLEEP = 0.30
+
+# OpenFIGI enforces different per-request and per-window limits depending
+# on whether the request carries an API key:
+#                       per-request   per-minute   per-25-requests
+#   keyless (anonymous):     10          25            -
+#   with API key:           100         600           25 req/6 s
+# Our keyless calls were sending 100 IDs and getting back HTTP 413 from
+# every batch — see the failing staging run on 2026-05-26. We now pick
+# the right pair at runtime based on whether the API key is set, so a
+# fresh deploy without OPENFIGI_API_KEY still makes useful progress
+# (just slower) instead of producing zero enriched listings.
+API_BATCH_SIZE_KEYED = 100
+API_BATCH_SIZE_ANON = 10
+# Keyed: ~20 req / 6 s effective with 0.30 s sleep — well under the
+# 25-req ceiling even with one retry. Anonymous: the ceiling is 25
+# requests per minute, so each request needs ≥2.4 s of breathing
+# room. Pick 3 s to leave headroom.
+RATE_LIMIT_SLEEP_KEYED = 0.30
+RATE_LIMIT_SLEEP_ANON = 3.0
+
+
+def _api_limits(api_key: str | None) -> tuple[int, float]:
+    """Return (batch_size, sleep_between_requests) for the current
+    tier. Centralised so test asserts pin both pairs."""
+    if api_key:
+        return API_BATCH_SIZE_KEYED, RATE_LIMIT_SLEEP_KEYED
+    return API_BATCH_SIZE_ANON, RATE_LIMIT_SLEEP_ANON
 
 # Equity-ish market sectors. OpenFIGI returns ETFs, bonds, options,
 # warrants, etc. against the same LEI; we only want shares so the
@@ -259,7 +280,7 @@ def _process_batch(cfg, batch, id_to_company, api_key):
     return results
 
 
-def _run_mode(mode, driver, log, limit, api_key):
+def _run_mode(mode, driver, log, limit, api_key):  # pylint: disable=too-many-locals
     """Run one OpenFIGI mode end-to-end. Mode-specific wiring lives in
     ``_MODES`` so this body can stay generic."""
     cfg = _MODES[mode]
@@ -269,26 +290,30 @@ def _run_mode(mode, driver, log, limit, api_key):
     if not rows:
         return {"queried": 0, "enriched": 0, "errors": 0, "emitted": 0}
 
+    batch_size, sleep_s = _api_limits(api_key)
+    logger.info("OpenFIGI tier: %s (batch=%d, sleep=%.2fs)",
+                "keyed" if api_key else "anonymous", batch_size, sleep_s)
+
     id_to_company = {r[cfg["id_field"]]: r["company_gmr_id"] for r in rows}
     ids = list(id_to_company.keys())
 
     all_enriched: list[dict] = []
     errors = 0
-    for i in range(0, len(ids), API_BATCH_SIZE):
-        batch = ids[i:i + API_BATCH_SIZE]
+    for i in range(0, len(ids), batch_size):
+        batch = ids[i:i + batch_size]
         results = _process_batch(cfg, batch, id_to_company, api_key)
         if results is None:
             errors += 1
         else:
             all_enriched.extend(results)
-            if (i + API_BATCH_SIZE) % 1000 < API_BATCH_SIZE:
+            if (i + batch_size) % 1000 < batch_size:
                 logger.info(
                     "  %s: %d / %d queried, %d %s",
                     cfg["log_label"],
-                    min(i + API_BATCH_SIZE, len(ids)), len(ids),
+                    min(i + batch_size, len(ids)), len(ids),
                     len(all_enriched), cfg["progress_phrase"],
                 )
-        time.sleep(RATE_LIMIT_SLEEP)
+        time.sleep(sleep_s)
 
     emitted = emit_listing_events(log, all_enriched)
     return {
