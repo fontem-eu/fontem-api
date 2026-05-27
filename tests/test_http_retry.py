@@ -1,12 +1,14 @@
 """Tests for the ETL HTTP retry helper."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-from src.etl._http_retry import call_with_retry, get_with_retry
+from src.etl._http_retry import (
+    RateLimiter, call_with_retry, get_with_retry,
+)
 
 
 def _resp(status: int) -> httpx.Response:
@@ -96,3 +98,87 @@ def test_call_with_retry_raises_after_exhausting():
     with patch("src.etl._http_retry.time.sleep"):
         with pytest.raises(httpx.ConnectTimeout):
             call_with_retry(always_fail, max_attempts=2, base_delay=1.0)
+
+
+# ── RateLimiter ────────────────────────────────────────────────────
+
+
+def test_rate_limiter_first_wait_is_immediate():
+    """First call has no prior call → no sleep."""
+    limiter = RateLimiter(min_interval_s=10.0)
+    with patch("src.etl._http_retry.time.sleep") as sleep:
+        limiter.wait()
+    sleep.assert_not_called()
+
+
+def test_rate_limiter_second_wait_sleeps_remaining_interval(monkeypatch):
+    """Two back-to-back waits → sleep for ~min_interval seconds."""
+    limiter = RateLimiter(min_interval_s=10.0)
+    # Drive monotonic clock manually: first call at t=100, second at t=102.
+    times = iter([100.0, 102.0, 102.0])
+    monkeypatch.setattr(
+        "src.etl._http_retry.time.monotonic", lambda: next(times),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "src.etl._http_retry.time.sleep", sleeps.append,
+    )
+    limiter.wait()  # t=100, no sleep
+    limiter.wait()  # t=102, elapsed=2, must sleep 8
+    assert sleeps == pytest.approx([8.0])
+
+
+def test_rate_limiter_per_minute_factory():
+    limiter = RateLimiter.per_minute(6)   # 1 every 10s
+    assert limiter.min_interval_s == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize("bad", [-1, -0.001])
+def test_rate_limiter_rejects_negative_interval(bad):
+    with pytest.raises(ValueError):
+        RateLimiter(min_interval_s=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_rate_limiter_per_minute_rejects_non_positive(bad):
+    with pytest.raises(ValueError):
+        RateLimiter.per_minute(bad)
+
+
+# ── rate_limiter wiring in retry helpers ──────────────────────────
+
+
+def test_get_with_retry_calls_limiter_before_each_attempt():
+    """The limiter must fire before EVERY attempt — retries included —
+    so the actual upstream-request rate is governed, not just the
+    first-shot rate.
+    """
+    limiter = MagicMock(spec=RateLimiter)
+    side_effects = [httpx.ConnectTimeout("t1"), _resp(200)]
+    with patch("src.etl._http_retry.httpx.get", side_effect=side_effects), \
+            patch("src.etl._http_retry.time.sleep"):
+        resp = get_with_retry(
+            "https://example.test/x", max_attempts=3, base_delay=1.0,
+            rate_limiter=limiter,
+        )
+    assert resp.status_code == 200
+    # One wait() per attempt — 2 attempts total.
+    assert limiter.wait.call_count == 2
+
+
+def test_call_with_retry_calls_limiter_before_each_attempt():
+    limiter = MagicMock(spec=RateLimiter)
+    calls = {"n": 0}
+
+    def flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.ConnectTimeout("nope")
+        return "ok"
+
+    with patch("src.etl._http_retry.time.sleep"):
+        out = call_with_retry(
+            flaky, max_attempts=5, base_delay=1.0, rate_limiter=limiter,
+        )
+    assert out == "ok"
+    assert limiter.wait.call_count == 3
