@@ -66,24 +66,30 @@ MATCH (n:NUTSRegion {code: row.nuts3})
 MERGE (e)-[:LOCATED_IN]->(n)
 """
 
-# Use CALL { ... } IN TRANSACTIONS OF N ROWS so Neo4j auto-commits every
-# batch. Without this, linking 3.6M Company nodes blows past the 256 MB
-# per-transaction memory cap and the whole ETL crashes with
-# MemoryPoolOutOfMemoryError. The NOT (...) clause skips entities that
-# already got a NUTS-3 pin from the postcode pass.
-_LINK_LABEL_COUNTRY = """
+# Country pass: candidate fetch + UNWIND-merge, same shape as the
+# postcode pass. The earlier version used a single CALL { ... } IN
+# TRANSACTIONS OF 10000 ROWS statement, which let Neo4j run multiple
+# batches concurrently — the per-batch transactions contended on the
+# same handful of NUTS-0 nodes (only ~38 exist, but ~3M Companies all
+# MERGE LOCATED_IN edges into them) and the run died with a Forseti
+# deadlock partway through. Driving the batches sequentially from
+# Python gives identical throughput on a single-writer Neo4j without
+# the lock contention.
+_FETCH_COUNTRY_CANDIDATES = """
 MATCH (e:{label})
-WHERE e.country IS NOT NULL AND NOT (e)-[:LOCATED_IN]->(:NUTSRegion)
-CALL (e) {{
-  WITH e, e.country AS a3
-  MATCH (n:NUTSRegion {{level: 0, country_alpha3: a3}})
-  MERGE (e)-[:LOCATED_IN]->(n)
-}} IN TRANSACTIONS OF 10000 ROWS
+WHERE e.country IS NOT NULL
+  AND NOT (e)-[:LOCATED_IN]->(:NUTSRegion)
+RETURN elementId(e) AS eid, e.country AS a3
 """
 
-# Public alias kept for backwards compatibility with existing tests / call
-# sites that import the country-link template.
-LINK_LABEL_TEMPLATE = _LINK_LABEL_COUNTRY
+_MERGE_COUNTRY_EDGES = """
+UNWIND $rows AS row
+MATCH (e) WHERE elementId(e) = row.eid
+MATCH (n:NUTSRegion {level: 0, country_alpha3: row.a3})
+MERGE (e)-[:LOCATED_IN]->(n)
+"""
+
+COUNTRY_BATCH_SIZE = 10_000
 
 _COUNT_LABEL_TEMPLATE = (
     "MATCH (:{label})-[r:LOCATED_IN]->(:NUTSRegion) RETURN count(r) AS n"
@@ -169,22 +175,41 @@ def link_label_postcode(  # pylint: disable=too-many-locals
     return after - before
 
 
-def link_label(session, label: str) -> int:
+def link_label_country(driver, label: str) -> int:  # pylint: disable=too-many-locals
     """Country-level (NUTS-0) fallback for entities the postcode pass missed.
 
-    Uses ``CALL ... IN TRANSACTIONS`` so the driver auto-commits every 10k
-    rows; a single giant transaction blows past Neo4j's per-tx memory cap
-    (256 MB default) when there are millions of Company nodes.
-
-    Implicit-transaction queries don't report relationship counters on the
-    result summary, so we diff the LOCATED_IN edge count per label before /
-    after the run to compute how many edges were created.
+    Mirrors ``link_label_postcode``'s two-session UNWIND-batch shape:
+    stream candidates on a read session, send sequential UNWIND
+    batches on a write session. Sequential batching is intentional —
+    only ~38 NUTS-0 nodes exist; running batches in parallel (the old
+    CALL IN TRANSACTIONS shape) caused Forseti deadlocks where two
+    batches MERGE'd the same LOCATED_IN edge target concurrently.
+    Single-writer Neo4j can't really exploit batch parallelism here
+    anyway, so we trade nothing for crash-free behaviour.
     """
-    query = _LINK_LABEL_COUNTRY.format(label=label)
     count_query = _COUNT_LABEL_TEMPLATE.format(label=label)
-    before = session.run(count_query).single()["n"]
-    session.run(query).consume()
-    after = session.run(count_query).single()["n"]
+    fetch_query = _FETCH_COUNTRY_CANDIDATES.format(label=label)
+
+    with driver.session() as count_sess:
+        before = count_sess.run(count_query).single()["n"]
+
+    batch: list[dict] = []
+    written = 0
+    with driver.session() as read_sess, driver.session() as write_sess:
+        for rec in read_sess.run(fetch_query):
+            batch.append({"eid": rec["eid"], "a3": rec["a3"]})
+            if len(batch) >= COUNTRY_BATCH_SIZE:
+                write_sess.run(_MERGE_COUNTRY_EDGES, rows=batch).consume()
+                written += len(batch)
+                batch = []
+        if batch:
+            write_sess.run(_MERGE_COUNTRY_EDGES, rows=batch).consume()
+            written += len(batch)
+
+    with driver.session() as count_sess:
+        after = count_sess.run(count_query).single()["n"]
+    logger.info("  %s country pass: matched %d candidates, edges Δ=%d",
+                label, written, after - before)
     return after - before
 
 
@@ -200,22 +225,18 @@ def run(driver, pcode_lookup: dict[tuple[str, str], str] | None = None) -> dict:
     t0 = time.time()
     postcode_counts: dict[str, int] = {}
     country_counts: dict[str, int] = {}
-    # Postcode pass takes its own sessions per call (read + write) to
-    # keep the bolt cursor genuinely streaming. Country pass is one
-    # CALL IN TRANSACTIONS so a single short-lived session is fine.
+    # Both passes own their sessions per call (one read + one write each)
+    # to keep the bolt cursor genuinely streaming and to drive batches
+    # sequentially without the in-Cypher CALL-IN-TRANSACTIONS deadlock.
     for label in ENTITY_LABELS:
         logger.info("Linking %s nodes via postcode (NUTS-3) ...", label)
         postcode_counts[label] = link_label_postcode(
             driver, label, pcode_lookup,
         )
-    with driver.session() as session:
-        for label in ENTITY_LABELS:
-            logger.info("Linking %s nodes via country (NUTS-0 fallback) ...",
-                        label)
-            created = link_label(session, label)
-            country_counts[label] = created
-            logger.info("  %s country pass: %d LOCATED_IN edges created",
-                        label, created)
+    for label in ENTITY_LABELS:
+        logger.info("Linking %s nodes via country (NUTS-0 fallback) ...",
+                    label)
+        country_counts[label] = link_label_country(driver, label)
     return {
         "postcode_counts": postcode_counts,
         "country_counts": country_counts,

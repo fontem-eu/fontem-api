@@ -3,10 +3,10 @@ from unittest.mock import MagicMock
 
 from src.etl.link_entities_to_nuts import (
     ENTITY_LABELS,
-    LINK_LABEL_TEMPLATE,
+    _MERGE_COUNTRY_EDGES,
     _MERGE_POSTCODE_EDGES,
     _resolve_postcode_rows,
-    link_label,
+    link_label_country,
     link_label_postcode,
     run,
 )
@@ -73,22 +73,25 @@ def test_entity_labels_covers_company_authority_lobbyist():
     assert set(ENTITY_LABELS) == {"Company", "Authority", "Lobbyist"}
 
 
-def test_country_link_is_idempotent_in_cypher():
-    """Generated Cypher skips entities already LOCATED_IN a NUTSRegion."""
-    assert "NOT (e)-[:LOCATED_IN]->(:NUTSRegion)" in LINK_LABEL_TEMPLATE
+def test_country_merge_joins_by_country_alpha3():
+    """Country-pass UNWIND writes match NUTSRegion {level:0, country_alpha3}.
+    Without this filter the join would either miss every row (wrong field
+    name) or fan out to all 1797 regions per entity."""
+    assert "UNWIND $rows AS row" in _MERGE_COUNTRY_EDGES
+    assert "country_alpha3: row.a3" in _MERGE_COUNTRY_EDGES
+    assert "level: 0" in _MERGE_COUNTRY_EDGES
+    assert "MERGE (e)-[:LOCATED_IN]->(n)" in _MERGE_COUNTRY_EDGES
 
 
-def test_country_link_matches_by_country_alpha3():
-    """Join key is country_alpha3 on NUTSRegion vs country on entity."""
-    assert "e.country AS a3" in LINK_LABEL_TEMPLATE
-    assert "country_alpha3: a3" in LINK_LABEL_TEMPLATE
-
-
-def test_country_link_uses_in_transactions_batching():
-    """Query must use CALL ... IN TRANSACTIONS so large datasets don't
-    blow past the per-tx memory cap (256 MB default)."""
-    assert "CALL" in LINK_LABEL_TEMPLATE
-    assert "IN TRANSACTIONS OF" in LINK_LABEL_TEMPLATE
+def test_country_merge_uses_unwind_not_call_in_transactions():
+    """The previous shape was a single CALL { ... } IN TRANSACTIONS OF
+    10000 ROWS. With ~38 NUTS-0 nodes and ~3M Company candidates the
+    parallel sub-transactions deadlocked on the same target nodes.
+    The new shape is Python-driven sequential UNWIND batches; this
+    test pins that the old in-Cypher concurrency primitive is gone.
+    """
+    assert "IN TRANSACTIONS" not in _MERGE_COUNTRY_EDGES
+    assert "CALL (" not in _MERGE_COUNTRY_EDGES
 
 
 def test_postcode_merge_writes_via_unwind():
@@ -98,14 +101,43 @@ def test_postcode_merge_writes_via_unwind():
     assert "MERGE (e)-[:LOCATED_IN]->(n)" in _MERGE_POSTCODE_EDGES
 
 
-# ── Country-link (legacy) ─────────────────────────────────────────────
+# ── Country pass (Python-driven UNWIND batches) ───────────────────────
 
 
-def test_link_label_diffs_count_to_compute_created_edges():
-    """link_label diffs count(r) before/after to compute created edges."""
-    _driver, session, _ = _mock_driver([42])
-    created = link_label(session, "Company")
-    assert created == 42
+def test_link_label_country_returns_edge_delta():
+    """link_label_country streams candidates + UNWIND-merges, then
+    returns the after-before count diff."""
+    fetch_page = [
+        {"eid": "e1", "a3": "PRT"},
+        {"eid": "e2", "a3": "DEU"},
+    ]
+    driver, session, _ = _mock_driver(
+        edges_per_pass=[2], fetch_pages=[fetch_page],
+    )
+    delta = link_label_country(driver, "Company")
+    assert delta == 2
+    merge_calls = [c for c in session.run.call_args_list
+                   if "UNWIND" in c.args[0]]
+    assert len(merge_calls) == 1
+    assert merge_calls[0].kwargs["rows"] == [
+        {"eid": "e1", "a3": "PRT"},
+        {"eid": "e2", "a3": "DEU"},
+    ]
+
+
+def test_link_label_country_uses_separate_read_and_write_sessions():
+    """Same separation as link_label_postcode — concurrent read cursor +
+    write txn on one session forces the driver to materialise the read,
+    risking OOM. Two sessions keep the cursor genuinely streaming.
+    Critical for the country pass too because it pulls ALL candidates
+    (no postcode filter), so it can be 3M+ rows on Company."""
+    driver, _session, _ = _mock_driver(
+        edges_per_pass=[1],
+        fetch_pages=[[{"eid": "e1", "a3": "PRT"}]],
+    )
+    link_label_country(driver, "Company")
+    # count-before, read+write block, count-after → at least 3 sessions.
+    assert driver.session.call_count >= 3
 
 
 # ── Postcode-link pass ────────────────────────────────────────────────
