@@ -20,10 +20,7 @@ and validate against the live Neo4j database.
 # pylint: disable=redefined-outer-name,unspecified-encoding,import-outside-toplevel,broad-exception-caught
 from __future__ import annotations
 
-import json
 import os
-import shutil
-import tempfile
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -33,7 +30,7 @@ import pytest
 from eforms.stream import stream_notices
 from eforms.filters import awards_only
 
-from src.services.currency import CurrencyService
+from src.services.currency import ConversionResult
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ted"
 SAMPLE_ARCHIVE = FIXTURE_DIR / "sample-2025-10.tar.gz"
@@ -75,16 +72,36 @@ SAMPLE_RATES = {
 
 @pytest.fixture(scope="module")
 def currency_svc():
-    """Build a temp CurrencyService with the SAMPLE_RATES."""
-    tmp = tempfile.mkdtemp()
-    rates_dir = Path(tmp) / "rates"
-    rates_dir.mkdir(parents=True)
-    for ccy, daily in SAMPLE_RATES.items():
-        with open(rates_dir / f"{ccy}.json", "w") as f:
-            json.dump({k: str(v) for k, v in daily.items()}, f)
-    svc = CurrencyService.load(tmp)
-    yield svc
-    shutil.rmtree(tmp)
+    """Stub CurrencyClient backed by SAMPLE_RATES.
+
+    The real CurrencyClient hits an HTTP service; in integration tests
+    we don't need the network round-trip — only the to_eur math. The
+    stub mimics the subset of the client surface used in this file
+    (to_eur) with the SAMPLE_RATES table.
+    """
+    class _Stub:
+        def to_eur(self, value, currency, on):
+            if value is None or on is None or currency is None:
+                return None
+            ccy = currency.upper()
+            if ccy == "EUR":
+                return Decimal(str(value)).quantize(Decimal("0.01"))
+            daily = SAMPLE_RATES.get(ccy, {})
+            rate = daily.get(on.isoformat())
+            if rate is None:
+                return None
+            return (Decimal(str(value)) / Decimal(str(rate))).quantize(
+                Decimal("0.01"),
+            )
+
+        def convert_detailed(self, value, currency, on):
+            eur = self.to_eur(value, currency, on)
+            return ConversionResult(
+                eur=eur, rate_used=None, rate_date=on,
+                source="ecb" if eur is not None else "unknown",
+            )
+
+    yield _Stub()
 
 
 def _parse_all_notices():
