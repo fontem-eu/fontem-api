@@ -1,3 +1,21 @@
+{{- /*
+  HTTP(S) proxy on every node's LAN interface, bypassing the wireguard
+  egress that ESMA's WAF blocks. See infra/esma-bypass-proxy role and
+  fontem-api PR #166. HOST_IP comes from the Downward API — each pod
+  reaches the proxy on whichever node it landed on. NO_PROXY keeps
+  cluster-local traffic (Neo4j, postgres event log, the consolidator)
+  off the proxy; only registers.esma + firds.esma are upstream-allowed
+  by tinyproxy anyway, so getting the NO_PROXY list right matters less
+  for correctness than for round-trip latency.
+*/}}
+{{- $firdsEnv := list
+    (dict "name" "HOST_IP"
+          "valueFrom" (dict "fieldRef" (dict "fieldPath" "status.hostIP")))
+    (dict "name" "HTTPS_PROXY" "value" "http://$(HOST_IP):8888")
+    (dict "name" "HTTP_PROXY"  "value" "http://$(HOST_IP):8888")
+    (dict "name" "NO_PROXY"
+          "value" "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8,192.168.0.0/16")
+}}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-firds"
       "schedule"        "0 6 * * *"
@@ -8,6 +26,6 @@
       "cpuLimit"        "2"
       "memRequest"      "1Gi"
       "memLimit"        "4Gi"
-      "extraEnv"        (list)
+      "extraEnv"        $firdsEnv
       "Values"          .Values
       "Release"         .Release) -}}
