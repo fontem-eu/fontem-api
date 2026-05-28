@@ -146,12 +146,31 @@ def download_zip(url):
 _RECORD_WRAPPERS = {"NewRcrd", "ModfdRcrd", "TermntdRcrd"}
 
 
-def parse_firds_xml(xml_stream):
+def parse_firds_xml(xml_stream, stats=None):
     """Stream-parse FIRDS DLTINS XML and yield instrument dicts.
     Keeps only equities (CFI starts with 'E') and collective
-    investment schemes (CFI starts with 'C')."""
+    investment schemes (CFI starts with 'C').
+
+    ``stats`` (dict, optional) is mutated to record:
+      * ``fin_instrm_seen`` — count of every <FinInstrm> element in
+        the document, regardless of wrapper or CFI filter. Always
+        non-zero for a valid DLTINS file; if a run sees zero across
+        all zips, the file format or our entry-point assumption
+        changed and the caller should fail loud.
+      * ``records_yielded`` — count of records that survived the
+        wrapper + CFI filter and got yielded.
+    """
+    fin_instrm = 0
+    yielded = 0
     for _event, elem in iterparse(xml_stream, events=("end",)):
         tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag == "FinInstrm":
+            fin_instrm += 1
+            # Clear so the parent doesn't accumulate half a million
+            # children on a real zip (each FinInstrm is small after
+            # the wrapper clear, but 500k of them still bloats memory).
+            elem.clear()
+            continue
         if tag not in _RECORD_WRAPPERS:
             continue
         gnl = None
@@ -166,7 +185,11 @@ def parse_firds_xml(xml_stream):
         record = _extract_instrument(gnl, elem, wrapper_tag=tag)
         elem.clear()
         if record:
+            yielded += 1
             yield record
+    if stats is not None:
+        stats["fin_instrm_seen"] = stats.get("fin_instrm_seen", 0) + fin_instrm
+        stats["records_yielded"] = stats.get("records_yielded", 0) + yielded
 
 
 def _extract_instrument(gnl_elem, record_elem, wrapper_tag="ModfdRcrd"):
@@ -291,9 +314,52 @@ def emit_listings(
     return {"total": total, "emitted": emitted, "skipped": skipped}
 
 
+class FirdsParseError(RuntimeError):
+    """Raised when a FIRDS run completed but the XML parser surfaced
+    no records from non-empty input. This is the "silent failure"
+    signal that the wrapper-tag mismatch bug used to produce; raising
+    instead of warning ensures a future schema drift fails the
+    cronjob rather than emitting zero events for months."""
+
+
+def _new_summary() -> dict:
+    return {
+        "total": 0,
+        "emitted": 0,
+        "skipped": 0,
+        "files_processed": 0,
+        "fin_instrm_seen": 0,
+        "records_yielded": 0,
+    }
+
+
+def _assert_parser_made_progress(summary: dict) -> None:
+    """Fail loud if zips were processed but zero records came out of
+    the parser. Legitimate cases that don't trigger this:
+      * zero zips downloaded (Solr returned empty / all downloads failed)
+        — handled separately by the URL list being empty
+      * zips processed, records yielded, but all skipped because no
+        Issr LEI resolves to a Company in Neo4j — that's a data-overlap
+        outcome, not a parser bug
+    """
+    if (
+        summary["files_processed"] > 0
+        and summary["fin_instrm_seen"] > 0
+        and summary["records_yielded"] == 0
+    ):
+        raise FirdsParseError(
+            f"FIRDS run processed {summary['files_processed']} zip(s) "
+            f"containing {summary['fin_instrm_seen']} <FinInstrm> elements "
+            "but the parser yielded zero records. This is the wrapper-tag /"
+            " CFI-filter mismatch signature — ESMA changed the schema or "
+            "the filter is dropping everything."
+        )
+
+
 def _load_from_file(driver, log, file_path) -> dict:
     """Parse a local ZIP and emit all instruments."""
     logger.info("Reading local file: %s", file_path)
+    summary = _new_summary()
     try:
         with zipfile.ZipFile(file_path) as zf:
             xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
@@ -301,22 +367,29 @@ def _load_from_file(driver, log, file_path) -> dict:
                 logger.error("No XML file found in ZIP")
                 sys.exit(1)
             all_records: list[dict] = []
+            parse_stats: dict = {}
             for xml_name in xml_names:
                 with zf.open(xml_name) as xml_stream:
-                    all_records.extend(parse_firds_xml(xml_stream))
+                    all_records.extend(parse_firds_xml(xml_stream, stats=parse_stats))
+            summary["files_processed"] = 1
+            summary["fin_instrm_seen"] = parse_stats.get("fin_instrm_seen", 0)
+            summary["records_yielded"] = parse_stats.get("records_yielded", 0)
     except (OSError, zipfile.BadZipFile):
         logger.exception("Failed to open ZIP %s", file_path)
         sys.exit(1)
-    if not all_records:
-        return {"total": 0, "emitted": 0, "skipped": 0}
-    lei_to_gmr = resolve_leis(driver, all_records)
-    return emit_listings(log, all_records, lei_to_gmr)
+    if all_records:
+        lei_to_gmr = resolve_leis(driver, all_records)
+        emit = emit_listings(log, all_records, lei_to_gmr)
+        for k in ("total", "emitted", "skipped"):
+            summary[k] += emit[k]
+    _assert_parser_made_progress(summary)
+    return summary
 
 
-def _load_from_solr(driver, log, since) -> dict:
+def _load_from_solr(driver, log, since) -> dict:  # pylint: disable=too-many-locals
     """Download delta ZIPs from FIRDS Solr and emit instruments."""
     urls = query_firds_files(since)
-    summary = {"total": 0, "emitted": 0, "skipped": 0}
+    summary = _new_summary()
     for url in urls:
         buf = download_zip(url)
         if buf is None:
@@ -326,16 +399,21 @@ def _load_from_solr(driver, log, since) -> dict:
         except zipfile.BadZipFile:
             logger.warning("Skipping bad ZIP: %s", url)
             continue
+        summary["files_processed"] += 1
         xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
         for xml_name in xml_names:
+            parse_stats: dict = {}
             with zf.open(xml_name) as xml_stream:
-                records = list(parse_firds_xml(xml_stream))
+                records = list(parse_firds_xml(xml_stream, stats=parse_stats))
+            summary["fin_instrm_seen"] += parse_stats.get("fin_instrm_seen", 0)
+            summary["records_yielded"] += parse_stats.get("records_yielded", 0)
             if not records:
                 continue
             lei_to_gmr = resolve_leis(driver, records)
             part = emit_listings(log, records, lei_to_gmr)
-            for k in summary:
+            for k in ("total", "emitted", "skipped"):
                 summary[k] += part[k]
+    _assert_parser_made_progress(summary)
     return summary
 
 
@@ -383,9 +461,11 @@ def main(argv=None):
         log.close()
     elapsed = time.time() - t0
     logger.info(
-        "FIRDS: %d instruments, %d events emitted, %d skipped (no LEI match) "
-        "in %.1fs",
-        summary["total"], summary["emitted"], summary["skipped"], elapsed,
+        "FIRDS: %d zips, %d <FinInstrm> seen, %d records yielded, "
+        "%d events emitted, %d skipped (no LEI match) in %.1fs",
+        summary["files_processed"], summary["fin_instrm_seen"],
+        summary["records_yielded"],
+        summary["emitted"], summary["skipped"], elapsed,
     )
 
 

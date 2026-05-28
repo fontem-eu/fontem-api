@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import io
+import zipfile
 from unittest.mock import MagicMock
+
+import pytest
 
 from src.etl import load_firds
 
@@ -223,6 +226,80 @@ def test_parse_firds_xml_yields_records_from_real_dltins_shape():
 
     term = by_isin["CA04031A1021"]
     assert term["active"] is False  # TermntdRcrd → inactive
+
+
+def _zip_fixture(xml_bytes: bytes) -> io.BytesIO:
+    """Wrap the DLTINS fixture XML in a single-entry zip so the test
+    can exercise _load_from_file (the path used by --file mode and
+    also the inner loop of --since/Solr mode)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("DLTINS_20260527_01of01.xml", xml_bytes)
+    buf.seek(0)
+    return buf
+
+
+def test_load_from_file_emits_one_listing_per_resolvable_lei(tmp_path):
+    """End-to-end --file mode against the real DLTINS fixture: 4 equity/
+    fund records survive parsing, the LEI resolver knows about 2 of
+    their 3 unique issuers, so we expect 3 emitted (2 modified equity +
+    1 fund) + 1 skipped (the NewRcrd whose LEI isn't in our fixture
+    resolver) + the debt record dropped at parse time."""
+    log, emit = _mock_log()
+    fixture_zip = tmp_path / "DLTINS.zip"
+    fixture_zip.write_bytes(_zip_fixture(_DLTINS_FIXTURE.encode()).getvalue())
+
+    # Resolver knows two issuers; the third (894500RZ4R5IQCB9U329 on
+    # the NewRcrd + TermntdRcrd Argyle records) is intentionally
+    # absent so we exercise the skip path on real-shape records.
+    driver = MagicMock()
+    session = MagicMock()
+    session.run.return_value = iter([
+        {"lei": "254900AL9ADPBO7BYJ95", "gmr_id": "gmr-canada-lithium"},
+        {"lei": "549300P8WRDH435O2450", "gmr_id": "gmr-ishares-canada"},
+    ])
+    driver.session.return_value.__enter__ = MagicMock(return_value=session)
+    driver.session.return_value.__exit__ = MagicMock(return_value=False)
+
+    summary = load_firds._load_from_file(driver, log, str(fixture_zip))
+
+    assert summary["fin_instrm_seen"] == 5  # full <FinInstrm> count
+    assert summary["records_yielded"] == 4  # debt filtered, 4 kept
+    assert summary["files_processed"] == 1
+    assert summary["total"] == 4
+    assert summary["emitted"] == 2  # 2 records resolved (one LEI used twice)
+    assert summary["skipped"] == 2
+
+    emitted_isins = {c.kwargs["iri"].rsplit("/", 1)[-1]
+                     for c in emit.upsert.call_args_list}
+    # The two ModfdRcrd-with-resolvable-LEI records: equity + fund.
+    assert emitted_isins == {"CA37956H1082", "CA46435V1094"}
+
+
+def test_load_from_file_raises_when_parser_yields_nothing(tmp_path):
+    """The wrapper-tag bug used to look like a clean "success" run.
+    The FirdsParseError guard makes the cronjob fail instead: if a zip
+    contained <FinInstrm> elements but the parser yielded zero records,
+    something about the schema or filter is wrong and we want to know.
+    """
+    # Use the old (buggy) wrapper tag <RefData> instead of NewRcrd/Mod/Term —
+    # the parser will count FinInstrm elements but yield nothing.
+    bad_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <BizData>
+      <FinInstrm><RefData>
+        <FinInstrmGnlAttrbts><Id>DE0007236101</Id>
+          <ClssfctnTp>ESVUFR</ClssfctnTp></FinInstrmGnlAttrbts>
+        <Issr>529900N0AYWGEKMC0739</Issr>
+      </RefData></FinInstrm>
+    </BizData>"""
+    bad_zip = tmp_path / "bad.zip"
+    bad_zip.write_bytes(_zip_fixture(bad_xml).getvalue())
+
+    log, _emit = _mock_log()
+    driver = MagicMock()
+
+    with pytest.raises(load_firds.FirdsParseError):
+        load_firds._load_from_file(driver, log, str(bad_zip))
 
 
 # ── helpers ───────────────────────────────────────────────────────
