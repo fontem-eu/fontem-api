@@ -6,6 +6,7 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+import io
 from unittest.mock import MagicMock
 
 from src.etl import load_firds
@@ -65,17 +66,163 @@ def test_extract_drops_non_equity_non_fund():
     """CFI codes outside the 'E' or 'C' families (eg debt 'DT', warrant 'RW')
     are dropped — the loader is for cash equities + funds."""
     gnl = _gnl_xml("DE0007236101", "Some Bond", "DT")
-    rd = _rd_xml(gnl)
+    rd = _record_xml(gnl)
     assert load_firds._extract_instrument(gnl, rd) is None
 
 
 def test_extract_keeps_equity():
     gnl = _gnl_xml("DE0007236101", "Siemens", "ESVUFR")
-    rd = _rd_xml(gnl)
+    rd = _record_xml(gnl)
     rec = load_firds._extract_instrument(gnl, rd)
     assert rec is not None
     assert rec["isin"] == "DE0007236101"
     assert rec["instrument_type"] == "equity"
+
+
+def test_extract_marks_terminated_records_inactive():
+    """TermntdRcrd → active=False so the consolidator can deactivate
+    the Listing; NewRcrd / ModfdRcrd → active=True."""
+    gnl = _gnl_xml("DE0007236101", "Siemens", "ESVUFR")
+    for wrapper, expected in [
+        ("NewRcrd", True),
+        ("ModfdRcrd", True),
+        ("TermntdRcrd", False),
+    ]:
+        rec = load_firds._extract_instrument(
+            gnl, _record_xml(gnl, wrapper=wrapper), wrapper_tag=wrapper,
+        )
+        assert rec is not None
+        assert rec["active"] is expected, f"{wrapper} should give active={expected}"
+
+
+# ── Full-XML parser: real DLTINS shape from auth.036.001.03 ───────────
+
+
+# Five slices lifted verbatim from a 2026-05-27 DLTINS_*_01of02.zip,
+# trimmed to the elements the parser inspects (FinInstrmGnlAttrbts,
+# Issr, TradgVnRltdAttrbts/Id). Each exercises a different wrapper or
+# CFI prefix:
+#
+#   * ESVUFR ModfdRcrd  → equity, kept, active=True
+#   * CEOJMU ModfdRcrd  → collective-investment fund, kept, active=True
+#   * ESVUXR NewRcrd    → equity (new listing), kept, active=True
+#   * ESVUFR TermntdRcrd → equity, kept, active=False
+#   * DEEVRB ModfdRcrd  → debt, dropped by CFI filter
+#
+# This pins the parser against the actual ESMA schema rather than the
+# `<RefData>` element the loader used to (incorrectly) look for. The
+# loader had been silently emitting zero events for months until the
+# first real-data probe surfaced the gap.
+_DLTINS_FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
+<BizData xmlns="urn:iso:std:iso:20022:tech:xsd:head.003.001.01">
+ <Pyld>
+  <Document xmlns="urn:iso:std:iso:20022:tech:xsd:auth.036.001.03">
+   <FinInstrmRptgRefDataDltaRpt>
+    <FinInstrm><ModfdRcrd>
+      <FinInstrmGnlAttrbts>
+        <Id>CA37956H1082</Id>
+        <FullNm>Global Li-Ion Graphite Corp.</FullNm>
+        <ClssfctnTp>ESVUFR</ClssfctnTp>
+        <NtnlCcy>CAD</NtnlCcy>
+      </FinInstrmGnlAttrbts>
+      <Issr>254900AL9ADPBO7BYJ95</Issr>
+      <TradgVnRltdAttrbts><Id>STUB</Id></TradgVnRltdAttrbts>
+    </ModfdRcrd></FinInstrm>
+    <FinInstrm><ModfdRcrd>
+      <FinInstrmGnlAttrbts>
+        <Id>CA46435V1094</Id>
+        <FullNm>iShares Core MSCI Canadian Qua ETFS</FullNm>
+        <ClssfctnTp>CEOJMU</ClssfctnTp>
+        <NtnlCcy>CAD</NtnlCcy>
+      </FinInstrmGnlAttrbts>
+      <Issr>549300P8WRDH435O2450</Issr>
+      <TradgVnRltdAttrbts><Id>BTFE</Id></TradgVnRltdAttrbts>
+    </ModfdRcrd></FinInstrm>
+    <FinInstrm><NewRcrd>
+      <FinInstrmGnlAttrbts>
+        <Id>CA04031A2011</Id>
+        <FullNm>Argyle Resources Corp. Registered Shares New o.N.</FullNm>
+        <ClssfctnTp>ESVUXR</ClssfctnTp>
+        <NtnlCcy>CAD</NtnlCcy>
+      </FinInstrmGnlAttrbts>
+      <Issr>894500RZ4R5IQCB9U329</Issr>
+      <TradgVnRltdAttrbts><Id>HAMB</Id></TradgVnRltdAttrbts>
+    </NewRcrd></FinInstrm>
+    <FinInstrm><TermntdRcrd>
+      <FinInstrmGnlAttrbts>
+        <Id>CA04031A1021</Id>
+        <FullNm>Argyle Resources Corp.</FullNm>
+        <ClssfctnTp>ESVUFR</ClssfctnTp>
+        <NtnlCcy>CAD</NtnlCcy>
+      </FinInstrmGnlAttrbts>
+      <Issr>894500RZ4R5IQCB9U329</Issr>
+      <TradgVnRltdAttrbts><Id>BERB</Id></TradgVnRltdAttrbts>
+    </TermntdRcrd></FinInstrm>
+    <FinInstrm><ModfdRcrd>
+      <FinInstrmGnlAttrbts>
+        <Id>CH1143296924</Id>
+        <FullNm>LQ EXP AZIMUT HOLDING/RWE/STEL 60 111126</FullNm>
+        <ClssfctnTp>DEEVRB</ClssfctnTp>
+        <NtnlCcy>EUR</NtnlCcy>
+      </FinInstrmGnlAttrbts>
+      <Issr>ML61HP3A4MKTTA1ZB671</Issr>
+      <TradgVnRltdAttrbts><Id>SEDX</Id></TradgVnRltdAttrbts>
+    </ModfdRcrd></FinInstrm>
+   </FinInstrmRptgRefDataDltaRpt>
+  </Document>
+ </Pyld>
+</BizData>
+"""
+
+
+def test_record_wrappers_cover_new_modified_terminated():
+    """auth.036.001.03 (DLTINS) wraps each instrument in exactly one of
+    these three elements. The parser must accept all three — looking
+    for ``RefData`` (a different ESMA schema) silently drops 100% of
+    real records, which is how this bug shipped for months."""
+    assert load_firds._RECORD_WRAPPERS == {"NewRcrd", "ModfdRcrd", "TermntdRcrd"}
+
+
+def test_parse_firds_xml_yields_records_from_real_dltins_shape():
+    """End-to-end parser test against a verbatim auth.036.001.03 slice
+    (5 instruments: 4 equity/fund + 1 debt). Pins:
+
+      * all three wrapper tags are walked,
+      * the equity/fund CFI filter passes ESVUFR, CEOJMU, ESVUXR,
+      * the filter drops DEEVRB (debt),
+      * TermntdRcrd flips active to False,
+      * Issr LEI and TradgVnRltdAttrbts/Id come through verbatim.
+    """
+    records = list(load_firds.parse_firds_xml(io.BytesIO(_DLTINS_FIXTURE.encode())))
+    assert len(records) == 4, [r["isin"] for r in records]
+
+    by_isin = {r["isin"]: r for r in records}
+
+    assert set(by_isin) == {
+        "CA37956H1082",   # ESVUFR equity, modified
+        "CA46435V1094",   # CEOJMU fund, modified
+        "CA04031A2011",   # ESVUXR equity, new listing
+        "CA04031A1021",   # ESVUFR equity, terminated
+    }
+    # Debt was correctly dropped.
+    assert "CH1143296924" not in by_isin
+
+    eq = by_isin["CA37956H1082"]
+    assert eq["lei"] == "254900AL9ADPBO7BYJ95"
+    assert eq["cfi_code"] == "ESVUFR"
+    assert eq["instrument_type"] == "equity"
+    assert eq["trading_venue_mic"] == "STUB"
+    assert eq["active"] is True
+
+    fund = by_isin["CA46435V1094"]
+    assert fund["instrument_type"] == "fund"
+    assert fund["active"] is True
+
+    new = by_isin["CA04031A2011"]
+    assert new["active"] is True   # NewRcrd → active
+
+    term = by_isin["CA04031A1021"]
+    assert term["active"] is False  # TermntdRcrd → inactive
 
 
 # ── helpers ───────────────────────────────────────────────────────
@@ -102,8 +249,12 @@ def _gnl_xml(isin: str, name: str, cfi: str) -> _Elem:
     ])
 
 
-def _rd_xml(gnl: _Elem) -> _Elem:
-    return _Elem("RefData", children=[
+def _record_xml(gnl: _Elem, wrapper: str = "ModfdRcrd") -> _Elem:
+    """Build a fake DLTINS record wrapper (NewRcrd / ModfdRcrd /
+    TermntdRcrd) containing the given FinInstrmGnlAttrbts + issuer +
+    trading-venue children. Used to drive _extract_instrument in
+    isolation without writing real XML."""
+    return _Elem(wrapper, children=[
         gnl,
         _Elem("TradgVnRltdAttrbts", children=[_Elem("Id", "XETR")]),
         _Elem("Issr", "529900N0AYWGEKMC0739"),

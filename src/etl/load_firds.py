@@ -137,14 +137,22 @@ def download_zip(url):
     return io.BytesIO(resp.content)
 
 
+# DLTINS = Daily Listed Trading Instruments New/Modified/Terminated. Each
+# instrument lives under exactly one of these wrappers — never a generic
+# <RefData> element (that's a different ESMA schema; auth.036.001.03 uses
+# the three-wrapper form). Discovered the hard way: the loader looked for
+# <RefData> for months, parsed zero records, and "successfully" emitted
+# zero events on every run.
+_RECORD_WRAPPERS = {"NewRcrd", "ModfdRcrd", "TermntdRcrd"}
+
+
 def parse_firds_xml(xml_stream):
     """Stream-parse FIRDS DLTINS XML and yield instrument dicts.
     Keeps only equities (CFI starts with 'E') and collective
     investment schemes (CFI starts with 'C')."""
     for _event, elem in iterparse(xml_stream, events=("end",)):
         tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-        if tag != "RefData":
-            elem.clear()
+        if tag not in _RECORD_WRAPPERS:
             continue
         gnl = None
         for child in elem:
@@ -155,14 +163,18 @@ def parse_firds_xml(xml_stream):
         if gnl is None:
             elem.clear()
             continue
-        record = _extract_instrument(gnl, elem)
+        record = _extract_instrument(gnl, elem, wrapper_tag=tag)
         elem.clear()
         if record:
             yield record
 
 
-def _extract_instrument(gnl_elem, ref_data_elem):
-    """Extract instrument data from FIRDS XML elements."""
+def _extract_instrument(gnl_elem, record_elem, wrapper_tag="ModfdRcrd"):
+    """Extract instrument data from FIRDS XML elements.
+
+    ``wrapper_tag`` is the surrounding NewRcrd/ModfdRcrd/TermntdRcrd
+    element name, used to set ``active`` (False for terminations).
+    """
     isin = _child_text(gnl_elem, "Id")
     name = _child_text(gnl_elem, "FullNm")
     cfi = _child_text(gnl_elem, "ClssfctnTp")
@@ -176,7 +188,7 @@ def _extract_instrument(gnl_elem, ref_data_elem):
 
     mic = ""
     lei = ""
-    for child in ref_data_elem:
+    for child in record_elem:
         child_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
         if child_tag == "TradgVnRltdAttrbts":
             mic = _child_text(child, "Id")
@@ -193,6 +205,7 @@ def _extract_instrument(gnl_elem, ref_data_elem):
         "trading_venue_mic": mic,
         "currency": currency or "",
         "lei": lei if lei and len(lei) == 20 else None,
+        "active": wrapper_tag != "TermntdRcrd",
     }
 
 
@@ -256,7 +269,7 @@ def emit_listings(
                         currency=rec["currency"] or None,
                         isin=rec["isin"],
                         mic=rec["trading_venue_mic"] or None,
-                        active=True,
+                        active=rec.get("active", True),
                     ),
                 )
                 n += 1
