@@ -1,14 +1,26 @@
 {{- /*
   HTTP(S) proxy on every node's LAN interface, bypassing the wireguard
   egress that ESMA's WAF blocks. See infra/esma-bypass-proxy role and
-  fontem-api PR #166. HOST_IP comes from the Downward API — each pod
-  reaches the proxy on whichever node it landed on. NO_PROXY keeps
-  cluster-local traffic (Neo4j, postgres event log, the consolidator)
-  off the proxy; only registers.esma + firds.esma are upstream-allowed
-  by tinyproxy anyway, so getting the NO_PROXY list right matters less
-  for correctness than for round-trip latency.
+  fontem-api PR #166.
+
+  Gated on .Values.firds.proxyEnabled so prod (where we don't yet want
+  daily FIRDS deltas landing) stays a no-op until we explicitly turn
+  it on. HOST_IP comes from the Downward API — each pod reaches the
+  proxy on whichever node it landed on. NO_PROXY keeps cluster-local
+  traffic (Neo4j, postgres event log, the consolidator) off the proxy;
+  only registers.esma + firds.esma are upstream-allowed by tinyproxy
+  anyway, so getting the NO_PROXY list right matters less for
+  correctness than for round-trip latency.
+
+  .Values.firds.since (optional) constrains how far back the loader
+  pulls deltas. Empty → use the loader's coded default. Staging sets
+  it to a recent month so we don't ingest a year of equity listings
+  while we're validating the matching path.
 */}}
-{{- $firdsEnv := list
+{{- $firds := default (dict) .Values.firds }}
+{{- $firdsEnv := list }}
+{{- if $firds.proxyEnabled }}
+{{- $firdsEnv = list
     (dict "name" "HOST_IP"
           "valueFrom" (dict "fieldRef" (dict "fieldPath" "status.hostIP")))
     (dict "name" "HTTPS_PROXY" "value" "http://$(HOST_IP):8888")
@@ -16,11 +28,16 @@
     (dict "name" "NO_PROXY"
           "value" "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8,192.168.0.0/16")
 }}
+{{- end }}
+{{- $firdsArgs := list }}
+{{- if $firds.since }}
+{{- $firdsArgs = list "--since" $firds.since }}
+{{- end }}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-firds"
       "schedule"        "0 6 * * *"
       "module"          "src.etl.load_firds"
-      "args"            (list)
+      "args"            $firdsArgs
       "deadlineSeconds" 7200
       "cpuRequest"      "250m"
       "cpuLimit"        "2"
