@@ -120,8 +120,45 @@ def query_firds_files(since):
     return urls
 
 
+# Disk cache for downloaded zips. DLTINS files are immutable — once ESMA
+# publishes (date, part), the file's contents never change — so a plain
+# filename-keyed cache with no TTL is correct. The default empty string
+# disables caching (handy for unit tests + the --file mode); the
+# CronJob sets FIRDS_CACHE_DIR to the NFS-backed PVC mount in deployed
+# environments. Atomic writes via .partial → rename keep a half-written
+# zip from being treated as cached on a crash.
+_FIRDS_CACHE_DIR = os.environ.get("FIRDS_CACHE_DIR", "")
+
+
+def _cache_path_for(url):
+    """Map a FIRDS zip URL to its cache file path. Returns None when
+    caching is disabled."""
+    if not _FIRDS_CACHE_DIR:
+        return None
+    name = url.rsplit("/", 1)[-1]
+    # Belt + braces: drop anything that wouldn't be a valid filename so
+    # an unexpected URL shape can't escape the cache dir.
+    if "/" in name or "\\" in name or not name:
+        return None
+    return os.path.join(_FIRDS_CACHE_DIR, name)
+
+
 def download_zip(url):
-    """Download a ZIP file into an in-memory buffer."""
+    """Download a ZIP file into an in-memory buffer.
+
+    When ``FIRDS_CACHE_DIR`` is set and the URL's filename already
+    exists in that dir, the bytes are read from disk instead of from
+    ESMA — DLTINS files are immutable, so a hit is always safe. On a
+    miss, the downloaded bytes are written atomically to the cache
+    (``.partial`` → rename) before being returned so a crash mid-write
+    can't leave a half-zip masquerading as cached.
+    """
+    cache_path = _cache_path_for(url)
+    if cache_path and os.path.exists(cache_path):
+        logger.info("Cache hit: %s", cache_path)
+        with open(cache_path, "rb") as fh:
+            return io.BytesIO(fh.read())
+
     logger.info("Downloading %s ...", url)
     try:
         resp = get_with_retry(
@@ -134,6 +171,14 @@ def download_zip(url):
     except httpx.HTTPError:
         logger.exception("Failed to download %s", url)
         return None
+
+    if cache_path:
+        os.makedirs(_FIRDS_CACHE_DIR, exist_ok=True)
+        partial = cache_path + ".partial"
+        with open(partial, "wb") as fh:
+            fh.write(resp.content)
+        os.replace(partial, cache_path)
+        logger.info("Cached → %s", cache_path)
     return io.BytesIO(resp.content)
 
 

@@ -18,7 +18,25 @@
   while we're validating the matching path.
 */}}
 {{- $firds := default (dict) .Values.firds }}
+{{- /*
+  Disk cache for DLTINS zips. NFS-backed (firds-cache PVC, defined in
+  gitops/infra/shared.yaml). FIRDS files are immutable — once published,
+  ESMA never re-issues them — so the loader just skips re-downloads on
+  cache hits. Default ON; envs that don't want it can set
+  firds.cacheEnabled=false to fall back to pure-network mode.
+
+  NOTE: ``default true false`` returns true in Sprig — false is one of
+  the "empty" values default falls back from. Use hasKey + explicit
+  read so a YAML ``cacheEnabled: false`` actually disables the cache.
+*/}}
+{{- $cacheEnabled := true }}
+{{- if hasKey $firds "cacheEnabled" }}
+{{- $cacheEnabled = $firds.cacheEnabled }}
+{{- end }}
 {{- $firdsEnv := list }}
+{{- if $cacheEnabled }}
+{{- $firdsEnv = append $firdsEnv (dict "name" "FIRDS_CACHE_DIR" "value" "/var/cache/firds") }}
+{{- end }}
 {{- if $firds.proxyEnabled }}
 {{- /*
   Address the proxy via the cluster Service, NOT the Downward API
@@ -33,12 +51,12 @@
 */}}
 {{- $proxyHost := default "esma-proxy.fontem-shared.svc.cluster.local" $firds.proxyHost }}
 {{- $proxyURL := printf "http://%s:8888" $proxyHost }}
-{{- $firdsEnv = list
+{{- $firdsEnv = concat $firdsEnv (list
     (dict "name" "HTTPS_PROXY" "value" $proxyURL)
     (dict "name" "HTTP_PROXY"  "value" $proxyURL)
     (dict "name" "NO_PROXY"
           "value" "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8")
-}}
+) }}
 {{- end }}
 {{- $firdsArgs := list }}
 {{- if $firds.since }}
@@ -55,5 +73,6 @@
       "memRequest"      "1Gi"
       "memLimit"        "4Gi"
       "extraEnv"        $firdsEnv
+      "needsFirdsCache" $cacheEnabled
       "Values"          .Values
       "Release"         .Release) -}}
