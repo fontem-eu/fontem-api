@@ -20,13 +20,24 @@
 {{- $firds := default (dict) .Values.firds }}
 {{- $firdsEnv := list }}
 {{- if $firds.proxyEnabled }}
+{{- /*
+  Address the proxy via the cluster Service, NOT the Downward API
+  status.hostIP — the latter resolves to the node's wireguard IP
+  (10.44.0.x), which is not routable from inside the pod netns
+  (flannel doesn't proxy the void42 interface). The Service +
+  manually-managed Endpoints in infra/shared.yaml point at the
+  three nodes' LAN IPs.
+
+  .Values.firds.proxyHost overrides the default for environments
+  whose proxy lives in a different namespace.
+*/}}
+{{- $proxyHost := default "esma-proxy.fontem-shared.svc.cluster.local" $firds.proxyHost }}
+{{- $proxyURL := printf "http://%s:8888" $proxyHost }}
 {{- $firdsEnv = list
-    (dict "name" "HOST_IP"
-          "valueFrom" (dict "fieldRef" (dict "fieldPath" "status.hostIP")))
-    (dict "name" "HTTPS_PROXY" "value" "http://$(HOST_IP):8888")
-    (dict "name" "HTTP_PROXY"  "value" "http://$(HOST_IP):8888")
+    (dict "name" "HTTPS_PROXY" "value" $proxyURL)
+    (dict "name" "HTTP_PROXY"  "value" $proxyURL)
     (dict "name" "NO_PROXY"
-          "value" "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8,192.168.0.0/16")
+          "value" "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8")
 }}
 {{- end }}
 {{- $firdsArgs := list }}
