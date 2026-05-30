@@ -129,6 +129,22 @@ spec:
                   name: neo4j-credentials
                   key: NEO4J_PASSWORD
 
+            # Fontem events Postgres — read by /api/atlas/etl-runs
+            # (events.etl_run table) so the data-quality dashboard can
+            # show "last successful run" per cronjob without scraping
+            # pod logs. Optional: when the secret is absent (envs that
+            # don't share the events DB), the env stays empty and
+            # /atlas/etl-runs returns 503 while /atlas/health flips to
+            # `degraded`. That's the trigger that makes the smoke ATLAS
+            # tests skip (they only run when /atlas/health == 'ok').
+            {{- if .Values.eventsDb.enabled }}
+            - name: EVENTS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.eventsDb.secretName | default "fontem-postgres-credentials" }}
+                  key: EVENTS_DATABASE_URL
+            {{- end }}
+
             # Fontem stats Postgres (TimescaleDB+PostGIS) — read by the
             # /api/atlas/* surface (src/atlas_api/). Optional: when the
             # secret is absent (dev/dast or before the stats stack is

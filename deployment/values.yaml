@@ -14,6 +14,16 @@ fontemStats:
   database: fontem_stats
   secretName: fontem-stats-credentials
 
+# Events Postgres (events.entity_events + events.etl_run) — read by
+# /api/atlas/etl-runs so the data-quality dashboard can read the per-
+# cronjob "last successful run" timestamp without scraping pod logs.
+# Disabled by default so envs that don't share the events DB still boot.
+# Non-prod consumes the shared events postgres at fontem-shared via
+# cross-ns secret; prod has its own.
+eventsDb:
+  enabled: false
+  secretName: fontem-postgres-credentials
+
 # Virtuoso SPARQL endpoint surfaced to the API for read-only sanctions
 # panels. Disabled by default — non-prod consumes the shared Virtuoso
 # at fontem-shared via cluster DNS, prod its own.
