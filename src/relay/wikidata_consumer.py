@@ -30,9 +30,16 @@ Required env:
   * ``VIRTUOSO_DBA_USER`` (default ``dba``)
   * ``VIRTUOSO_DBA_PASSWORD`` — required for write endpoint
   * ``WIKIDATA_CONSUMER_BATCH`` (optional, default 1000)
+  * ``WIKIDATA_CONSUMER_CONCURRENCY`` (optional, default 10) — number of
+    entities processed in parallel per batch. Each parallel slot does
+    its own HTTP roundtrip to Wikidata and Virtuoso; with serial
+    processing the wall-clock per entity was ~340ms and we couldn't
+    keep up with the live arrival rate. 10-way concurrency takes us
+    well past breakeven without straining either upstream.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import sys
@@ -50,6 +57,7 @@ from src.relay.wikidata_writer import (
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = int(os.environ.get("WIKIDATA_CONSUMER_BATCH", "1000"))
+CONCURRENCY = int(os.environ.get("WIKIDATA_CONSUMER_CONCURRENCY", "10"))
 
 
 def lease_batch(conn, batch_size: int) -> list[tuple[str, object, bool]]:
@@ -91,31 +99,35 @@ def clear_dirty(conn, entity_id: str, last_changed_at: object) -> bool:
 
 def process_one(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     entity_id: str, last_changed_at: object, is_deleted: bool,
-    pg_conn, http_client, sparql_url: str, auth: tuple[str, str],
-) -> str:
-    """Process one entity end-to-end. Returns the outcome label for
-    metrics. Exceptions propagate so the caller can decide whether to
-    leave the row in place (transient) or escalate."""
+    http_client, sparql_url: str, auth: tuple[str, str],
+) -> tuple[str, str, object]:
+    """Process one entity end-to-end against Wikidata + Virtuoso. The
+    caller is responsible for clearing the dirty-row in postgres
+    after this returns successfully. Returns ``(outcome, entity_id,
+    last_changed_at)`` so the caller can build a batched DELETE.
+
+    Postgres is intentionally not touched here — the function runs
+    inside a ThreadPoolExecutor and psycopg connections are not
+    thread-safe, so keeping the only pg connection on the main thread
+    is simpler than maintaining a pool."""
     if is_deleted:
         tombstone_entity(entity_id, http_client, sparql_url, auth)
-        clear_dirty(pg_conn, entity_id, last_changed_at)
-        return "tombstoned"
+        return ("tombstoned", entity_id, last_changed_at)
 
     fetched = fetch_truthy(entity_id, http_client)
     if fetched.outcome is FetchOutcome.NOT_FOUND:
         # Wikidata says it's gone; we did NOT come here from a tombstone
         # event so this is most likely a race with a delete that hasn't
         # flowed through our relay yet, OR a flaky 404. Conservative
-        # choice: do nothing now, leave the row, let the next run
-        # decide. If it really is deleted, the relay will catch the
-        # log event soon and flip is_deleted true.
-        return "not_found_left_pending"
+        # choice: leave the row, let the next run decide. If it really
+        # is deleted, the relay will catch the log event soon and flip
+        # is_deleted true.
+        return ("not_found_left_pending", entity_id, last_changed_at)
 
     graph = fetched.graph
     assert graph is not None  # OK and REDIRECT both carry a graph
     filtered = filter_graph(graph, entity_id)
     write_entity(entity_id, filtered, http_client, sparql_url, auth)
-    clear_dirty(pg_conn, entity_id, last_changed_at)
 
     if fetched.outcome is FetchOutcome.REDIRECT and fetched.redirected_to:
         # The survivor's RDF was returned by Wikidata; we've written
@@ -124,34 +136,65 @@ def process_one(  # pylint: disable=too-many-arguments,too-many-positional-argum
         # the graph itself.) The survivor will get its own
         # dirty_entities row from future edits — we don't pre-emptively
         # mark it dirty here.
-        return "redirected"
-    return "written"
+        return ("redirected", entity_id, last_changed_at)
+    return ("written", entity_id, last_changed_at)
 
 
-def run_batch(database_url: str, sparql_url: str,
-              auth: tuple[str, str], batch_size: int) -> dict[str, int]:
-    """One invocation. Lease a batch, process each entity, return
-    counts. Closes resources before exit so the pod can shut down
-    cleanly."""
+def clear_dirty_batch(conn, pairs: list[tuple[str, object]]) -> None:
+    """Optimistic-batched-delete the dirty-rows whose
+    ``(entity_id, last_changed_at)`` is still what we observed at
+    lease time. Rows whose timestamp moved (relay bumped them mid-
+    batch) are simply not matched and stay for the next run."""
+    if not pairs:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            DELETE FROM wikidata.dirty_entities
+             WHERE entity_id = %s AND last_changed_at = %s
+            """,
+            pairs,
+        )
+    conn.commit()
+
+
+def run_batch(database_url: str, sparql_url: str,  # pylint: disable=too-many-locals
+              auth: tuple[str, str], batch_size: int,
+              concurrency: int = CONCURRENCY) -> dict[str, int]:
+    """One invocation. Lease a batch, process entities in parallel,
+    bulk-clear the dirty rows for successfully-processed entities at
+    the end."""
     counts: dict[str, int] = {
         "leased": 0, "written": 0, "tombstoned": 0,
         "redirected": 0, "not_found_left_pending": 0, "errors": 0,
     }
+    # Outcomes that mean "we did our work, drop the dirty row".
+    success_outcomes = {"written", "tombstoned", "redirected"}
+    to_clear: list[tuple[str, object]] = []
     with psycopg.connect(database_url) as pg_conn, make_client() as http_client:
         rows = lease_batch(pg_conn, batch_size)
         counts["leased"] = len(rows)
-        for entity_id, last_changed_at, is_deleted in rows:
-            try:
-                outcome = process_one(
-                    entity_id, last_changed_at, is_deleted,
-                    pg_conn, http_client, sparql_url, auth,
-                )
-                counts[outcome] = counts.get(outcome, 0) + 1
-            except Exception as exc:  # pylint: disable=broad-except
-                # One entity's failure must not poison the whole batch.
-                # Log + leave the dirty row in place for the next run.
-                logger.exception("processing %s failed: %s", entity_id, exc)
-                counts["errors"] += 1
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="consumer",
+        ) as pool:
+            futures = [
+                pool.submit(process_one, eid, lc, isd,
+                            http_client, sparql_url, auth)
+                for eid, lc, isd in rows
+            ]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    outcome, eid, lc = fut.result()
+                    counts[outcome] = counts.get(outcome, 0) + 1
+                    if outcome in success_outcomes:
+                        to_clear.append((eid, lc))
+                except Exception as exc:  # pylint: disable=broad-except
+                    # One entity's failure must not poison the whole
+                    # batch. Log + leave the dirty row in place for
+                    # the next run.
+                    logger.exception("processing failed: %s", exc)
+                    counts["errors"] += 1
+        clear_dirty_batch(pg_conn, to_clear)
     return counts
 
 

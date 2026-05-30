@@ -44,10 +44,11 @@ logger = logging.getLogger(__name__)
 USER_AGENT = "Fontem-WikidataConsumer/1.0 (+https://fontem.eu; team@fontem.eu)"
 
 # Wikimedia is generous with reads but politely rate-limits aggressive
-# clients. 5 in-flight requests at a time keeps us well under their
-# soft cap (~50 conn/IP) and gives plenty of throughput for our
-# expected ~10 entities/second.
-MAX_INFLIGHT = 5
+# clients. 20 in-flight requests keeps us well under their soft cap
+# (~50 conn/IP) while letting the consumer's ThreadPoolExecutor (default
+# 10 workers, each potentially doing one fetch + one write at a time)
+# saturate the parallel slots without blocking on the connection pool.
+MAX_INFLIGHT = 20
 
 # Retries on 5xx and network errors. 5 attempts with a 2^n second
 # backoff means ~30s of grace on the worst transient.
