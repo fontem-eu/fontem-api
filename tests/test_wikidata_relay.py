@@ -1,15 +1,15 @@
 """Unit tests for the Wikidata EventStreams → Postgres relay.
 
-Only the pure-function helpers are covered here — the SSE I/O loop is
-exercised in operations against the live stream. The parser is the
-load-bearing surface: silent regressions there would let bogus titles
-silently land with NULL entity_id, which the downstream worker would
-then have to handle defensively.
+The pure-function helpers — entity-id parsing, SSE line decoding, and
+parse_event's wiki+timestamp gating — are covered here. The pre-filter
+itself is exercised in test_wikidata_event_filter.py; we only check
+that parse_event correctly threads its verdict through.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from src.relay.event_filter import EventAction
 from src.relay.wikidata_recentchange import (
     StreamEvent, iter_sse_data_lines, parse_event, _parse_entity_id,
 )
@@ -28,7 +28,6 @@ def test_parse_entity_id_strips_namespace_prefixes() -> None:
 
 
 def test_parse_entity_id_returns_none_for_non_entities() -> None:
-    # Talk pages, project pages, user pages — none are entities.
     assert _parse_entity_id("Wikidata:Project chat") is None
     assert _parse_entity_id("Q42/whatever") is None
     assert _parse_entity_id("User:Some person") is None
@@ -47,7 +46,7 @@ def test_parse_event_filters_non_wikidata() -> None:
     assert parse_event(raw) is None
 
 
-def test_parse_event_keeps_wikidatawiki_and_extracts_entity_id() -> None:
+def test_parse_event_keeps_wikidata_with_dirty_verdict() -> None:
     raw = {
         "wiki": "wikidatawiki",
         "title": "Q312",
@@ -56,16 +55,49 @@ def test_parse_event_keeps_wikidatawiki_and_extracts_entity_id() -> None:
         "type": "edit",
         "user": "SomeBot",
         "namespace": 0,
+        "comment": "/* wbcreateclaim-create:1|P31 */ instance-of human",
     }
     ev = parse_event(raw)
     assert isinstance(ev, StreamEvent)
     assert ev.wiki == "wikidatawiki"
     assert ev.entity_id == "Q312"
-    assert ev.edit_type == "edit"
+    assert ev.action is EventAction.DIRTY
+    assert ev.comment_kind == "wbcreateclaim-create"
     assert ev.event_id == "999"
     assert ev.event_ts == datetime(2024, 5, 6, 12, 53, 20, tzinfo=timezone.utc)
-    # The full raw dict is preserved for downstream replay.
-    assert ev.payload == raw
+
+
+def test_parse_event_threads_ignore_verdict() -> None:
+    # Non-EU-language description add — filter marks IGNORE, parse_event
+    # must preserve that.
+    raw = {
+        "wiki": "wikidatawiki",
+        "title": "Q42",
+        "timestamp": 1_715_000_000,
+        "id": 1,
+        "type": "edit",
+        "comment": "/* wbsetdescription-add:1|bn */ Bengali description",
+    }
+    ev = parse_event(raw)
+    assert ev is not None
+    assert ev.action is EventAction.IGNORE
+
+
+def test_parse_event_threads_delete_verdict() -> None:
+    raw = {
+        "wiki": "wikidatawiki",
+        "title": "Q139814288",
+        "timestamp": 1_715_000_000,
+        "id": 1,
+        "type": "log",
+        "log_type": "delete",
+        "log_action": "delete",
+        "comment": "Does not meet notability policy",
+    }
+    ev = parse_event(raw)
+    assert ev is not None
+    assert ev.action is EventAction.DELETED
+    assert ev.entity_id == "Q139814288"
 
 
 def test_parse_event_keeps_event_with_null_entity_when_title_unparseable() -> None:
@@ -75,10 +107,11 @@ def test_parse_event_keeps_event_with_null_entity_when_title_unparseable() -> No
         "timestamp": 1_715_000_000,
         "id": 1001,
         "type": "edit",
+        "comment": "/* wbeditentity-update:0| */ ",
     }
     ev = parse_event(raw)
     assert ev is not None
-    assert ev.entity_id is None  # surface that we couldn't extract
+    assert ev.entity_id is None
     assert ev.wiki == "wikidatawiki"
 
 
@@ -87,8 +120,9 @@ def test_parse_event_handles_missing_id_field() -> None:
         "wiki": "wikidatawiki",
         "title": "Q42",
         "timestamp": 1_715_000_000,
-        # id deliberately missing
         "type": "log",
+        "log_type": "delete",
+        "log_action": "delete",
     }
     ev = parse_event(raw)
     assert ev is not None
@@ -105,8 +139,6 @@ def test_parse_event_drops_event_without_timestamp() -> None:
 
 
 def test_iter_sse_data_lines_strips_data_prefix_and_handles_both_separator_styles():
-    # Wikimedia ships "data: <json>" (with space). Some implementations
-    # send "data:<json>" (no space). Both are valid per the SSE spec.
     lines = [
         ": this is a heartbeat comment",
         "event: message",

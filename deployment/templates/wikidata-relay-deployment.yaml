@@ -1,12 +1,17 @@
 {{/*
-Long-lived consumer of Wikimedia's SSE recentchange stream. Buffers
-every wikidatawiki edit into Postgres so we own retention and decouple
-the Virtuoso-load worker's pace from the upstream's 7-day Kafka window.
+Long-lived consumer of Wikimedia's SSE recentchange stream. Filters
+out edits we don't care about (sitelink-only, non-EU labels) and
+upserts the surviving entity ids into wikidata.dirty_entities. A
+separate CronJob (wikidata-consumer.yaml) drains that set on the
+hour, fetches each entity's truthy RDF, and rewrites it in Virtuoso.
+
+The dirty-set shape is intentional: SSE events have no content, only
+an entity id + edit-kind hint, so storing a row per event is just a
+long way of building a dedup'd set. We build the set directly.
 
 Single replica — the relay is the system-of-record for the resume
 cursor (wikidata.relay_state.id=1). A second replica would race on
-that row and double-insert events. If we ever need horizontal scale,
-shard by entity-id-prefix at the consumer side, not the relay side.
+that row and double-insert events.
 
 Image source: shares the fontem-api image because the relay code lives
 under src/relay/ alongside the ETL loaders. ENTRYPOINT is overridden

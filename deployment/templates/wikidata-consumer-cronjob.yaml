@@ -1,0 +1,91 @@
+{{/*
+Hourly drain of wikidata.dirty_entities into Virtuoso.
+
+The relay (wikidata-relay-deployment.yaml) populates dirty_entities;
+this CronJob consumes it. Cadence is hourly because:
+  * Wikidata's edit rate averages ~10/s on wikidatawiki, of which we
+    filter ~20% — net ~30k entities/hour reach us. A 1000-entity
+    batch at 5 in-flight Wikidata API calls takes ~10 minutes
+    wall-clock, with plenty of margin in the hour.
+  * Daily would be too stale for the transparency use-case: a
+    sanctioned-entity ownership change taking up to 24h to surface
+    is a credibility hit for journalists eyeballing the data.
+  * Sub-hourly cadence over-stresses the Wikidata API for marginal
+    user-visible benefit.
+
+concurrencyPolicy: Forbid — if a slow run is still going when the
+next tick fires, skip rather than overlap. The leftover dirty rows
+just get picked up by the run after that. Safer than racing two
+workers against each other on the same dirty rows (the optimistic
+delete handles correctness but not load).
+
+backoffLimit: 0 — a failed run is fine; the cron tries again in an
+hour with whatever's still in dirty_entities. We don't want
+Kubernetes to retry-burst the pod when Virtuoso is wedged.
+
+successfulJobsHistoryLimit / failedJobsHistoryLimit kept low so
+`kubectl get jobs` stays readable; production telemetry lives in
+the JSON logs and (later) Prometheus.
+*/}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fontem-wikidata-consumer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fontem-wikidata-consumer
+    component: relay
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: fontem-wikidata-consumer
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: regcred
+          containers:
+            - name: consumer
+              image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
+              imagePullPolicy: Always
+              command: ["python", "-m", "src.relay.wikidata_consumer"]
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1000m"
+                  memory: "1Gi"
+              env:
+                - name: EVENTS_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: fontem-postgres-credentials
+                      key: EVENTS_DATABASE_URL
+                # Virtuoso write endpoint. The chart's existing
+                # virtuoso.sparqlEndpoint value points at the
+                # read-only /sparql; we explicitly compose the
+                # /sparql-auth URL from the same host because the
+                # consumer needs UPDATE rights.
+                - name: VIRTUOSO_SPARQL_UPDATE_URL
+                  value: "http://virtuoso.{{ .Release.Namespace }}.svc.cluster.local:8890/sparql-auth"
+                - name: VIRTUOSO_DBA_USER
+                  value: "dba"
+                - name: VIRTUOSO_DBA_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: virtuoso-credentials
+                      key: VIRTUOSO_DBA_PASSWORD
+                # Per-run entity budget. 1000 entities with 5
+                # in-flight Wikidata API calls takes ~5 min on the
+                # happy path; tune up if the dirty set grows
+                # faster than we drain.
+                - name: WIKIDATA_CONSUMER_BATCH
+                  value: "1000"
