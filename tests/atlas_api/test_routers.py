@@ -43,18 +43,20 @@ def test_health_unconfigured_when_no_dsn():
 
 
 def test_health_ok_when_source_pingable():
+    """Atlas-health only rolls up sources the Atlas feature itself uses
+    — fontem-stats-postgres at the moment. The events-postgres source
+    (which only backs /data-quality/etl-runs) is intentionally excluded:
+    bundling it in would make /atlas/health flip to ``degraded`` on envs
+    that have Atlas fully wired but happen not to expose the events DB
+    to the API pod, which is the trip-wire that used to silently skip
+    smoke ATLAS-19/20/21/22.
+    """
     fake_stats = SourceHealth(
         name="fontem-stats-postgres", status="ok", latency_ms=2.1,
-    )
-    fake_events = SourceHealth(
-        name="fontem-events-postgres", status="ok", latency_ms=1.5,
     )
     with patch(
         "src.atlas_api.sources.fontem_stats.FontemStatsSource.health",
         return_value=fake_stats,
-    ), patch(
-        "src.atlas_api.sources.etl_runs.EtlRunsSource.health",
-        return_value=fake_events,
     ):
         r = _client().get("/health")
     assert r.status_code == 200
@@ -62,7 +64,33 @@ def test_health_ok_when_source_pingable():
     assert body["status"] == "ok"
     sources_by_name = {s["name"]: s for s in body["sources"]}
     assert sources_by_name["fontem-stats-postgres"]["latency_ms"] == 2.1
-    assert sources_by_name["fontem-events-postgres"]["latency_ms"] == 1.5
+    assert "fontem-events-postgres" not in sources_by_name
+
+
+def test_health_stays_ok_when_events_db_unset():
+    """Concrete regression: /atlas/health must NOT flip to 'degraded'
+    just because EVENTS_DATABASE_URL is absent. That env var only
+    affects /data-quality/etl-runs.
+    """
+    fake_stats = SourceHealth(
+        name="fontem-stats-postgres", status="ok", latency_ms=2.1,
+    )
+    with patch(
+        "src.atlas_api.sources.fontem_stats.FontemStatsSource.health",
+        return_value=fake_stats,
+    ):
+        # Build a client WITHOUT EVENTS_DATABASE_URL set; atlas-health
+        # must still report 'ok' because the stats source is fine.
+        with patch.dict(
+            "os.environ",
+            {"STATS_DATABASE_URL": "postgresql://test:test@h/d"},
+            clear=False,
+        ):
+            os.environ.pop("EVENTS_DATABASE_URL", None)
+            app = build_app()
+        r = TestClient(app).get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
 
 
 # ── /datasets ────────────────────────────────────────────────────────

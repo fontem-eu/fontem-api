@@ -1,8 +1,13 @@
-"""Tests for /atlas/etl-runs.
+"""Tests for /data-quality/etl-runs.
 
-Mocks `EtlRunsSource.recent_runs` so the routers exercise their
-contract (filters, validation, 503 on unconfigured) without needing
-a live events DB.
+Mocks ``EtlRunsSource.recent_runs`` so the router exercises its contract
+(filters, validation, 503 on unconfigured) without needing a live events
+DB.
+
+The endpoint used to live at ``/atlas/etl-runs`` inside ``src/atlas_api/``.
+Moving it under ``/data-quality`` decoupled atlas-health from the events
+DB connection — see the docstring on ``src/atlas_api/app._attach_state``
+and the matching tests in ``tests/atlas_api/test_routers.py``.
 """
 from __future__ import annotations
 
@@ -14,14 +19,20 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from src.atlas_api.app import build_app
-
 
 def _client(
     *,
     stats_dsn: str | None = "postgresql://test:test@h/stats",
     events_dsn: str | None = "postgresql://test:test@h/events",
 ):
+    """Build a TestClient against the main API app.
+
+    The DQ etl-runs endpoint shares ``app.state.etl_runs_source`` with
+    Atlas (atlas owns the events-DB connection wiring), so the same env
+    vars STATS_DATABASE_URL + EVENTS_DATABASE_URL drive both feature
+    surfaces. Until tests/conftest.py grows a proper fixture, build the
+    app inline with the env in place.
+    """
     env: dict[str, str] = {}
     if stats_dsn is not None:
         env["STATS_DATABASE_URL"] = stats_dsn
@@ -32,8 +43,11 @@ def _client(
             os.environ.pop("STATS_DATABASE_URL", None)
         if events_dsn is None:
             os.environ.pop("EVENTS_DATABASE_URL", None)
-        app = build_app()
-    return TestClient(app)
+        # Re-import inside the patched env so the app picks up the DSNs.
+        import importlib  # pylint: disable=import-outside-toplevel
+        from src.api import app as app_module  # pylint: disable=import-outside-toplevel
+        importlib.reload(app_module)
+        return TestClient(app_module.app)
 
 
 def _row(**overrides):
@@ -52,7 +66,7 @@ def _row(**overrides):
 
 
 def test_etl_runs_503_when_unconfigured():
-    r = _client(events_dsn=None).get("/etl-runs")
+    r = _client(events_dsn=None).get("/data-quality/etl-runs")
     assert r.status_code == 503
 
 
@@ -66,7 +80,7 @@ def test_etl_runs_returns_recent():
         "src.atlas_api.sources.etl_runs.EtlRunsSource.recent_runs",
         return_value=rows,
     ):
-        r = _client().get("/etl-runs")
+        r = _client().get("/data-quality/etl-runs")
     assert r.status_code == 200
     body = r.json()
     assert len(body) == 2
@@ -81,7 +95,10 @@ def test_etl_runs_passes_filters():
         "src.atlas_api.sources.etl_runs.EtlRunsSource.recent_runs",
         return_value=[],
     ) as mock:
-        _client().get("/etl-runs?cronjob_name=etl-gleif&status=failed&limit=10")
+        _client().get(
+            "/data-quality/etl-runs"
+            "?cronjob_name=etl-gleif&status=failed&limit=10",
+        )
     mock.assert_called_once()
     _, kwargs = mock.call_args
     assert kwargs["cronjob_name"] == "etl-gleif"
@@ -96,7 +113,7 @@ def test_etl_runs_caps_limit_to_etl_runs_row_limit():
         return_value=[],
     ) as mock:
         # Default cap is 200; ask for 500 (the schema's upper bound).
-        _client().get("/etl-runs?limit=500")
+        _client().get("/data-quality/etl-runs?limit=500")
     _, kwargs = mock.call_args
     assert kwargs["limit"] == 200
 
@@ -109,7 +126,7 @@ def test_etl_runs_returns_empty_when_table_missing():
         "src.atlas_api.sources.etl_runs.EtlRunsSource.recent_runs",
         return_value=[],
     ):
-        r = _client().get("/etl-runs")
+        r = _client().get("/data-quality/etl-runs")
     assert r.status_code == 200
     assert r.json() == []
 
@@ -122,7 +139,7 @@ def test_etl_runs_handles_running_status_without_finished_at():
         return_value=[_row(status="running", finished_at=None,
                            summary=None, error_message=None)],
     ):
-        r = _client().get("/etl-runs")
+        r = _client().get("/data-quality/etl-runs")
     assert r.status_code == 200
     body = r.json()
     assert body[0]["finished_at"] is None
