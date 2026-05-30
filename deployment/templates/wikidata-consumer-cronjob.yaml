@@ -47,6 +47,15 @@ spec:
         metadata:
           labels:
             app: fontem-wikidata-consumer
+          annotations:
+            # Linkerd's sidecar doesn't exit when the main container
+            # finishes, so a Job-with-Linkerd pod stays at 1/2
+            # NotReady forever and `kubectl get jobs` shows Running
+            # even though the consumer succeeded. The consumer talks
+            # to Postgres + Virtuoso + Wikidata; none of those need
+            # mTLS for our threat model (cluster network is already
+            # trusted, Wikidata is external). Skip injection.
+            linkerd.io/inject: disabled
         spec:
           restartPolicy: Never
           imagePullSecrets:
