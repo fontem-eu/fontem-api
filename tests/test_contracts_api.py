@@ -195,6 +195,58 @@ class TestUnifiedSearch:
         cleanup_dishka()
         assert resp.status_code == 422
 
+    def test_listed_query_orders_results_by_rank(self):
+        """Smoke SEARCH-04 caught that an exact-name match could surface
+        AFTER a CONTAINS-only hit (e.g. searching for "Apple" returned
+        PINEAPPL.L before AAPL because Neo4j had no implicit ordering and
+        both companies' names matched via CONTAINS). Pin the rank tiers
+        and the ORDER BY here so a regression on this query trips a unit
+        test instead of a smoke retry.
+        """
+        # The Cypher must contain the CASE-when rank ladder and an
+        # ORDER BY rank DESC before LIMIT — that's the load-bearing fix.
+        # We assert the query shape rather than rerunning a real graph.
+        from src.api.routers import contracts as contracts_router  # pylint: disable=import-outside-toplevel
+        import inspect  # pylint: disable=import-outside-toplevel
+        source = inspect.getsource(contracts_router.unified_search)
+        assert "CASE" in source
+        assert "STARTS WITH toLower($q)" in source
+        assert "ORDER BY rank DESC" in source
+
+    def test_rank_field_not_leaked_to_client(self):
+        """`rank` is internal to the Cypher; clients see ordered rows."""
+        mock = _mock_contract_source()
+        neo4j_mock = MagicMock()
+        session = MagicMock()
+        call_count = {"n": 0}
+
+        def _run_side(*_args, **_kwargs):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                # Listed companies — Neo4j returns rank=3 for an exact
+                # name match. The response must strip it.
+                result.data.return_value = [
+                    {"gmr_id": "g-1", "name": "Apple Inc.", "country": "USA",
+                     "ticker": "AAPL", "exchange": "US", "currency": "USD",
+                     "is_active": True, "rank": 3},
+                ]
+            else:
+                result.data.return_value = []
+            return result
+
+        session.run = MagicMock(side_effect=_run_side)
+        neo4j_mock.session.return_value.__enter__ = MagicMock(return_value=session)
+        neo4j_mock.session.return_value.__exit__ = MagicMock(return_value=False)
+
+        client = make_test_client(contract_source=mock, neo4j_client=neo4j_mock)
+        resp = client.get("/search?q=Apple")
+        cleanup_dishka()
+        assert resp.status_code == 200
+        company = resp.json()["companies"][0]
+        assert company["ticker"] == "AAPL"
+        assert "rank" not in company
+
 
 class TestSectorSummary:
     """Tests for GET /contracts/sectors."""

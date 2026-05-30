@@ -186,24 +186,48 @@ def unified_search(  # pylint: disable=too-many-locals,unused-argument
     Deduplicates by gmr_id (a company with multiple listings appears once).
     """
     with neo4j.session() as session:
-        # 1. Listed companies matching by ticker OR name (highest priority)
+        # 1. Listed companies matching by ticker OR name. Without a rank,
+        # a CONTAINS-only hit ("Pineapple" contains "apple") can outrank
+        # an exact-name match ("Apple Inc.") because Neo4j has no implicit
+        # ordering — smoke test SEARCH-04 caught this when PINEAPPL.L
+        # surfaced before AAPL for q="Apple". Score tiers:
+        #   4 → name equals q exactly
+        #   3 → ticker equals q exactly
+        #   2 → name starts with q (Apple Inc., Apple Hospitality, ...)
+        #   1 → ticker starts with q
+        #   0 → name contains q (the fallback that PINEAPPLE POWER hits)
+        # Within a tier, shorter names win (Apple Inc. → 10 chars beats
+        # Apple Hospitality REIT, Inc. → 28 chars); alphabetical tiebreak
+        # after that for determinism across reruns.
         listed = session.run(
             "MATCH (c:Company)-[:LISTED_AS]->(l:Listing) "
             "WHERE toLower(l.ticker) STARTS WITH toLower($q) "
             "   OR toLower(c.name) CONTAINS toLower($q) "
-            "RETURN DISTINCT c.gmr_id AS gmr_id, c.name AS name, "
-            "  c.country AS country, "
+            "WITH c, l, "
+            "  CASE "
+            "    WHEN toLower(c.name) = toLower($q) THEN 4 "
+            "    WHEN toLower(l.ticker) = toLower($q) THEN 3 "
+            "    WHEN toLower(c.name) STARTS WITH toLower($q) THEN 2 "
+            "    WHEN toLower(l.ticker) STARTS WITH toLower($q) THEN 1 "
+            "    ELSE 0 END AS rank "
+            "WITH c, max(rank) AS rank, "
             "  collect(l.ticker)[0] AS ticker, "
             "  collect(l.exchange)[0] AS exchange, "
-            "  collect(l.currency)[0] AS currency, "
-            "  true AS is_active "
+            "  collect(l.currency)[0] AS currency "
+            "RETURN c.gmr_id AS gmr_id, c.name AS name, "
+            "  c.country AS country, "
+            "  ticker, exchange, currency, "
+            "  true AS is_active, rank "
+            "ORDER BY rank DESC, size(c.name) ASC, c.name ASC "
             "LIMIT $limit",
             q=q, limit=limit,
         ).data()
 
         seen = {r["gmr_id"] for r in listed}
 
-        # 2. Companies with contracts (procurement-only, no listing)
+        # 2. Companies with contracts (procurement-only, no listing).
+        # Same tier scheme as above; no ticker tier because there's no
+        # Listing edge on these.
         remaining = max(0, limit - len(listed))
         procurement = []
         if remaining > 0:
@@ -211,10 +235,16 @@ def unified_search(  # pylint: disable=too-many-locals,unused-argument
                 "MATCH (ct:Contract)-[:AWARDED_TO]->(c:Company) "
                 "WHERE NOT c.gmr_id IN $seen "
                 "  AND toLower(c.name) CONTAINS toLower($q) "
-                "RETURN DISTINCT c.gmr_id AS gmr_id, c.name AS name, "
+                "WITH DISTINCT c, "
+                "  CASE "
+                "    WHEN toLower(c.name) = toLower($q) THEN 4 "
+                "    WHEN toLower(c.name) STARTS WITH toLower($q) THEN 2 "
+                "    ELSE 0 END AS rank "
+                "RETURN c.gmr_id AS gmr_id, c.name AS name, "
                 "  c.country AS country, "
                 "  null AS ticker, null AS exchange, null AS currency, "
-                "  null AS is_active "
+                "  null AS is_active, rank "
+                "ORDER BY rank DESC, size(c.name) ASC, c.name ASC "
                 "LIMIT $remaining",
                 q=q, seen=list(seen), remaining=remaining,
             ).data()
@@ -230,6 +260,9 @@ def unified_search(  # pylint: disable=too-many-locals,unused-argument
                 "esef" if r.get("currency") not in (None, "USD")
                 else "edgar"
             )
+            # `rank` is only used to sort inside the Cypher; clients see
+            # the ordered list, not the raw score.
+            r.pop("rank", None)
 
         # 3. Authorities — name coalesces with translation if lang given.
         # Search still matches on the original `a.name` field so results
