@@ -37,18 +37,25 @@ class GraphContractSource(ContractDataSource):
             if not company:
                 return {"gmr_id": gmr_id, "contracts": [], "contract_count": 0}
 
+            # TED awards land with the publication date (from the TED
+            # XML <issue_date> field) — there is no separate "award date"
+            # in the source, so the panel's `award_date` column reads
+            # from `publication_date` under the hood. Likewise `cpv` is
+            # written by the loader as `cpv` (the earlier `cpv_main`
+            # name never existed on the nodes — the dashboard pre-fix
+            # reported all 56k contracts as "missing cpv_main").
             rows = session.run(
                 "MATCH (a:Authority)-[:AWARDED]->(ct:Contract)"
                 "-[:AWARDED_TO]->(c:Company {gmr_id: $gid}) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN ct.ted_notice_id AS notice_id, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
-                "  ct.award_date AS award_date, ct.cpv_main AS cpv, "
+                "  ct.publication_date AS award_date, ct.cpv AS cpv, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
                 f"  {auth_name} AS authority, a.country AS authority_country, "
                 "  cpv.description AS cpv_description "
-                "ORDER BY ct.award_date DESC LIMIT $limit",
+                "ORDER BY ct.publication_date DESC LIMIT $limit",
                 gid=gmr_id, limit=limit,
             ).data()
 
@@ -101,19 +108,21 @@ class GraphContractSource(ContractDataSource):
             if not authority:
                 return {"authority_id": authority_id, "contracts": [], "contract_count": 0}
 
+            # Same property-name remap as get_company_contracts —
+            # award_date / cpv aliases read from publication_date / cpv.
             rows = session.run(
                 "MATCH (a:Authority {authority_id: $aid})"
                 "-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN ct.ted_notice_id AS notice_id, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
-                "  ct.award_date AS award_date, ct.cpv_main AS cpv, "
+                "  ct.publication_date AS award_date, ct.cpv AS cpv, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
                 "  c.name AS contractor, c.country AS contractor_country, "
                 "  c.gmr_id AS contractor_gmr_id, "
                 "  cpv.description AS cpv_description "
-                "ORDER BY ct.award_date DESC LIMIT $limit",
+                "ORDER BY ct.publication_date DESC LIMIT $limit",
                 aid=authority_id, limit=limit,
             ).data()
 
@@ -176,15 +185,23 @@ class GraphContractSource(ContractDataSource):
         title = (
             ct.get(f"title_{lang}") if lang else None
         ) or ct.get("title")
+        # API output keys are kept stable for the frontend; the source
+        # property names are the storage ones (see render_upsert_contract
+        # in fontem-neo4j-sink). Notes:
+        #   - `description` doesn't exist on the Contract node at all;
+        #     the TED loader doesn't carry one, so this stays None until
+        #     a future loader version adds it.
+        #   - `cpv_main` reads from `cpv`, `award_date` reads from
+        #     `publication_date` (no separate award date in the TED XML).
         return {
             "ted_notice_id": ct["ted_notice_id"],
             "ted_url": ct.get("ted_url"),
             "title": title,
-            "description": ct.get("description"),
+            "description": None,
             "value_eur": ct.get("value_eur"),
-            "cpv_main": ct.get("cpv_main"),
+            "cpv_main": ct.get("cpv"),
             "procedure_type": ct.get("procedure_type"),
-            "award_date": ct.get("award_date"),
+            "award_date": ct.get("publication_date"),
             "authority": {
                 "name": auth_name,
                 "country": auth_node.get("country"),

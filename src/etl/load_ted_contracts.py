@@ -258,6 +258,11 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                         cpv=notice.cpv_main,
                         nuts=getattr(notice, "place_nuts", None),
                         language=getattr(notice, "language", None),
+                        # Country of the contracting authority (the buyer /
+                        # acquirer). Cascaded onto the Contract because TED
+                        # contracts are jurisdictionally grouped by the
+                        # procuring entity, not the awarded vendor.
+                        country=LocationService.to_alpha3(buyer.country),
                     ),
                 )
                 total += 1

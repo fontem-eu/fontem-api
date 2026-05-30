@@ -174,6 +174,11 @@ def test_contract_payload_carries_authority_and_company_links(
     assert payload["company_gmr_id"] == "company-1"
     assert payload["ted_notice_id"] == "2025-OJS123-456789"
     assert payload["cpv"] == "45000000"
+    # The acquirer (buyer.country = "FR") cascades onto the Contract
+    # as alpha-3 "FRA". Before this fix, Contract had no country at
+    # all — the dashboard's "contracts by country" panel was empty
+    # for 56k staging contracts.
+    assert payload["country"] == "FRA"
 
 
 @patch("src.etl.load_ted_contracts.stream_notices")

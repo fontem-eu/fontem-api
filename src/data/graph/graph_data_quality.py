@@ -256,13 +256,23 @@ class GraphDataQualitySource(DataQualitySource):
             }
 
     def get_contracts_nulls(self) -> dict:
-        """Count of contracts missing key fields."""
+        """Count of contracts missing key fields.
+
+        The property names here must match what the TED loader actually
+        writes (see fontem-api/src/etl/load_ted_contracts.py + the sink
+        in fontem-neo4j-sink/neo4j_sink/cypher.py:render_upsert_contract):
+        ``cpv`` (not ``cpv_main``), ``publication_date`` (not
+        ``award_date``), ``title`` (not ``description``). ``country``
+        cascades from the contracting authority and was added in the
+        same fix-up — before that, this query reported 100% null on
+        every field because the names didn't exist on the nodes.
+        """
         with self._neo4j.session() as session:
             total = session.run(
                 "MATCH (ct:Contract) RETURN count(ct) AS n"
             ).single()["n"]
             fields = {}
-            for field in ["value_eur", "cpv_main", "award_date", "description", "country"]:
+            for field in ["value_eur", "cpv", "publication_date", "title", "country"]:
                 n = session.run(
                     f"MATCH (ct:Contract) WHERE ct.{field} IS NULL "
                     "RETURN count(ct) AS n"
