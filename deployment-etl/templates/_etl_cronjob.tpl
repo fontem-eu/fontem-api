@@ -100,11 +100,12 @@ spec:
                 {{- range .extraEnv }}
                 - {{ toYaml . | nindent 18 | trim }}
                 {{- end }}
-              {{- if or .needsEdgarData .needsEsefData }}
-              # The edgar-data / esef-data PVCs are owned by the
-              # **main** fontem-api chart (see deployment-etl/values.yaml
-              # → "PVC dependencies"). This template only mounts them
-              # read-only; the API workers populate the caches.
+              {{- if or .needsEdgarData .needsEsefData .needsFirdsCache }}
+              # edgar-data / esef-data PVCs are owned by the main fontem-api
+              # chart (RO mount; API workers write). firds-cache is owned by
+              # this ETL chart (RW mount; the FIRDS cronjob writes downloaded
+              # DLTINS zips and reuses them on the next run — see
+              # gitops/infra/shared.yaml for the PV/PVC definition).
               volumeMounts:
                 {{- if .needsEdgarData }}
                 - name: edgar-data
@@ -115,6 +116,10 @@ spec:
                 - name: esef-data
                   mountPath: /esef-data
                   readOnly: true
+                {{- end }}
+                {{- if .needsFirdsCache }}
+                - name: firds-cache
+                  mountPath: /var/cache/firds
                 {{- end }}
               {{- end }}
               resources:
@@ -141,7 +146,7 @@ spec:
                 {{- range .args }}
                 - {{ . | quote }}
                 {{- end }}
-          {{- if or .needsEdgarData .needsEsefData }}
+          {{- if or .needsEdgarData .needsEsefData .needsFirdsCache }}
           volumes:
             {{- if .needsEdgarData }}
             - name: edgar-data
@@ -152,6 +157,11 @@ spec:
             - name: esef-data
               persistentVolumeClaim:
                 claimName: esef-data
+            {{- end }}
+            {{- if .needsFirdsCache }}
+            - name: firds-cache
+              persistentVolumeClaim:
+                claimName: firds-cache
             {{- end }}
           {{- end }}
 {{- end -}}

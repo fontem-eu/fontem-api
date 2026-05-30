@@ -1,13 +1,78 @@
+{{- /*
+  HTTP(S) proxy on every node's LAN interface, bypassing the wireguard
+  egress that ESMA's WAF blocks. See infra/esma-bypass-proxy role and
+  fontem-api PR #166.
+
+  Gated on .Values.firds.proxyEnabled so prod (where we don't yet want
+  daily FIRDS deltas landing) stays a no-op until we explicitly turn
+  it on. HOST_IP comes from the Downward API — each pod reaches the
+  proxy on whichever node it landed on. NO_PROXY keeps cluster-local
+  traffic (Neo4j, postgres event log, the consolidator) off the proxy;
+  only registers.esma + firds.esma are upstream-allowed by tinyproxy
+  anyway, so getting the NO_PROXY list right matters less for
+  correctness than for round-trip latency.
+
+  .Values.firds.since (optional) constrains how far back the loader
+  pulls deltas. Empty → use the loader's coded default. Staging sets
+  it to a recent month so we don't ingest a year of equity listings
+  while we're validating the matching path.
+*/}}
+{{- $firds := default (dict) .Values.firds }}
+{{- /*
+  Disk cache for DLTINS zips. NFS-backed (firds-cache PVC, defined in
+  gitops/infra/shared.yaml). FIRDS files are immutable — once published,
+  ESMA never re-issues them — so the loader just skips re-downloads on
+  cache hits. Default ON; envs that don't want it can set
+  firds.cacheEnabled=false to fall back to pure-network mode.
+
+  NOTE: ``default true false`` returns true in Sprig — false is one of
+  the "empty" values default falls back from. Use hasKey + explicit
+  read so a YAML ``cacheEnabled: false`` actually disables the cache.
+*/}}
+{{- $cacheEnabled := true }}
+{{- if hasKey $firds "cacheEnabled" }}
+{{- $cacheEnabled = $firds.cacheEnabled }}
+{{- end }}
+{{- $firdsEnv := list }}
+{{- if $cacheEnabled }}
+{{- $firdsEnv = append $firdsEnv (dict "name" "FIRDS_CACHE_DIR" "value" "/var/cache/firds") }}
+{{- end }}
+{{- if $firds.proxyEnabled }}
+{{- /*
+  Address the proxy via the cluster Service, NOT the Downward API
+  status.hostIP — the latter resolves to the node's wireguard IP
+  (10.44.0.x), which is not routable from inside the pod netns
+  (flannel doesn't proxy the void42 interface). The Service +
+  manually-managed Endpoints in infra/shared.yaml point at the
+  three nodes' LAN IPs.
+
+  .Values.firds.proxyHost overrides the default for environments
+  whose proxy lives in a different namespace.
+*/}}
+{{- $proxyHost := default "esma-proxy.fontem-shared.svc.cluster.local" $firds.proxyHost }}
+{{- $proxyURL := printf "http://%s:8888" $proxyHost }}
+{{- $firdsEnv = concat $firdsEnv (list
+    (dict "name" "HTTPS_PROXY" "value" $proxyURL)
+    (dict "name" "HTTP_PROXY"  "value" $proxyURL)
+    (dict "name" "NO_PROXY"
+          "value" "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8")
+) }}
+{{- end }}
+{{- $firdsArgs := list }}
+{{- if $firds.since }}
+{{- $firdsArgs = list "--since" $firds.since }}
+{{- end }}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-firds"
       "schedule"        "0 6 * * *"
       "module"          "src.etl.load_firds"
-      "args"            (list)
+      "args"            $firdsArgs
       "deadlineSeconds" 7200
       "cpuRequest"      "250m"
       "cpuLimit"        "2"
       "memRequest"      "1Gi"
       "memLimit"        "4Gi"
-      "extraEnv"        (list)
+      "extraEnv"        $firdsEnv
+      "needsFirdsCache" $cacheEnabled
       "Values"          .Values
       "Release"         .Release) -}}

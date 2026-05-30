@@ -45,6 +45,28 @@ cronjobs:
   openfigi:
     limit: ""
 
+# FIRDS-specific knobs. See cronjob-firds.yaml for the wiring.
+#
+# proxyEnabled — wires the cronjob to use the per-node tinyproxy
+# (infra/esma-bypass-proxy role) so it can reach ESMA without the
+# wireguard egress IP getting WAF'd. Default OFF: prod doesn't want
+# daily Listing deltas landing yet. Staging flips this to true.
+#
+# since — passed as --since to the loader. Empty → use the loader's
+# coded default (2025-09-01). Staging uses a recent date so we ingest
+# only a few months of equity / fund Listings while validating the
+# matching path; prod will use the full history when it turns on.
+#
+# cacheEnabled — mount the NFS-backed firds-cache PVC and tell the
+# loader to skip re-downloading zips that are already on disk. DLTINS
+# files are immutable so this is a pure-win cache. Default ON; flip
+# to false for environments where the PVC isn't provisioned (eg the
+# golden chart template tests).
+firds:
+  proxyEnabled: false
+  since: ""
+  cacheEnabled: true
+
 # nodeSelector + tolerations propagate to every rendered CronJob via
 # the _etl_cronjob.tpl helper. Prod pins to cluster-node-3-prod, non-prod
 # leaves these empty.

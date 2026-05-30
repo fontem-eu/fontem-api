@@ -338,6 +338,68 @@ def _record_xml(gnl: _Elem, wrapper: str = "ModfdRcrd") -> _Elem:
     ])
 
 
+# ── Disk cache (DLTINS zips are immutable) ────────────────────────
+
+
+def test_download_zip_writes_cache_on_miss_and_reads_on_hit(tmp_path, monkeypatch):
+    """First call hits the network and writes the cache; second call
+    returns from disk without touching the network."""
+    monkeypatch.setattr(load_firds, "_FIRDS_CACHE_DIR", str(tmp_path))
+
+    body = b"PK\x03\x04not-a-real-zip"
+    calls = {"n": 0}
+
+    def fake_get_with_retry(_url, **_kw):
+        calls["n"] += 1
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.content = body
+        return resp
+
+    monkeypatch.setattr(load_firds, "get_with_retry", fake_get_with_retry)
+    url = "https://firds.esma.europa.eu/firds/DLTINS_20260527_01of01.zip"
+
+    # Miss → network + cache write.
+    buf = load_firds.download_zip(url)
+    assert buf is not None and buf.getvalue() == body
+    assert calls["n"] == 1
+    cached = tmp_path / "DLTINS_20260527_01of01.zip"
+    assert cached.read_bytes() == body
+    assert not (tmp_path / "DLTINS_20260527_01of01.zip.partial").exists()
+
+    # Hit → cache read, no network.
+    buf2 = load_firds.download_zip(url)
+    assert buf2 is not None and buf2.getvalue() == body
+    assert calls["n"] == 1, "second call must NOT re-fetch on cache hit"
+
+
+def test_download_zip_no_cache_when_dir_unset(tmp_path, monkeypatch):
+    """Empty FIRDS_CACHE_DIR (default) → behave as before, no disk I/O."""
+    monkeypatch.setattr(load_firds, "_FIRDS_CACHE_DIR", "")
+
+    body = b"PK\x03\x04"
+
+    def fake_get_with_retry(_url, **_kw):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.content = body
+        return resp
+
+    monkeypatch.setattr(load_firds, "get_with_retry", fake_get_with_retry)
+    load_firds.download_zip("https://firds.esma.europa.eu/firds/x.zip")
+    # The cache dir wasn't created and no file lands in tmp_path.
+    assert not list(tmp_path.iterdir())
+
+
+def test_cache_path_rejects_url_filenames_with_path_chars():
+    """Defence in depth: a URL whose tail contains "/" or "\\" must not
+    escape FIRDS_CACHE_DIR. _cache_path_for returns None in that case.
+    """
+    # The slash inside the path here is the URL separator, so basename
+    # extraction picks up an empty string and bails.
+    assert load_firds._cache_path_for("https://x/") is None
+
+
 # ── ESMA throttling wiring ─────────────────────────────────────────
 
 
