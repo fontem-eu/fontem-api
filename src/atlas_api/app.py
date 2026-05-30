@@ -14,38 +14,54 @@ from __future__ import annotations
 from fastapi import APIRouter, FastAPI
 
 from src.atlas_api import config as atlas_config
-from src.atlas_api.routers import datasets, etl_runs, health, series
+from src.atlas_api.routers import datasets, health, series
 from src.atlas_api.sources.etl_runs import EtlRunsSource
 from src.atlas_api.sources.fontem_stats import FontemStatsSource
 
 
 def _attach_state(app: FastAPI) -> None:
+    """Attach Atlas + cross-feature sources to ``app.state``.
+
+    Atlas-only state lives in ``atlas_sources`` — those are the sources
+    /atlas/health rolls up. ``etl_runs_source`` is stashed separately
+    because it is not an Atlas source: it backs the /data-quality/etl-runs
+    endpoint (one row per cronjob invocation, written by every fontem
+    ETL via ``fontem_events.RunLog``). It was historically bundled into
+    src/atlas_api/ for code-organisation convenience, but it has no
+    semantic dependency on the Atlas feature. Bundling it into
+    ``atlas_sources`` made /atlas/health flip to ``degraded`` whenever
+    EVENTS_DATABASE_URL was absent, which is what caused smoke
+    ATLAS-19/20/21/22 to skip on otherwise-healthy environments.
+    """
     settings = atlas_config.load()
     fontem = FontemStatsSource(settings.stats_database_url)
     # Idempotent forward-migrations (slice-stats table on already-
     # deployed clusters). Best-effort: list_datasets falls back to
     # an empty slice_stats array if this no-ops on a read-only role.
     fontem.migrate()
-    # events DB is bootstrapped out-of-chart (gitops/infra/*); the
+    # Events DB is bootstrapped out-of-chart (gitops/infra/*); the
     # source is read-only, never runs DDL.
     etl_src = EtlRunsSource(settings.events_database_url)
     app.state.atlas_settings = settings
     app.state.fontem_stats_source = fontem
     app.state.etl_runs_source = etl_src
-    app.state.atlas_sources = [fontem, etl_src]
+    # ONLY Atlas-required sources here. etl_runs_source intentionally
+    # excluded — see docstring.
+    app.state.atlas_sources = [fontem]
 
 
 def build_router() -> APIRouter:
     """Mountable router for the main fontem-api app.
 
     Caller must run ``_attach_state`` against its own app — see
-    ``mount_into(parent_app)`` for the typical wiring.
+    ``mount_into(parent_app)`` for the typical wiring. The
+    /data-quality/etl-runs router is registered separately by the
+    parent app (src/api/app.py).
     """
     parent = APIRouter()
     parent.include_router(health.router)
     parent.include_router(datasets.router)
     parent.include_router(series.router)
-    parent.include_router(etl_runs.router)
     return parent
 
 
