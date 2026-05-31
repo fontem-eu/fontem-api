@@ -36,7 +36,13 @@ metadata:
     app: fontem-wikidata-consumer
     component: relay
 spec:
-  schedule: "0 * * * *"
+  # Every 15 minutes. With BATCH_SIZE=5000 and CONCURRENCY=3 a run
+  # processes ~5000 entities in ~12 min (3 ms/entity sustained — the
+  # bottleneck is Wikidata's per-IP rate limit, not Virtuoso). 3 min
+  # idle between runs absorbs occasional slow batches. Forbid policy
+  # below means we skip a tick rather than overlap if a batch ever
+  # spills past 15 min.
+  schedule: "*/15 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 3
@@ -92,9 +98,12 @@ spec:
                     secretKeyRef:
                       name: virtuoso-credentials
                       key: VIRTUOSO_DBA_PASSWORD
-                # Per-run entity budget. 1000 entities with 5
-                # in-flight Wikidata API calls takes ~5 min on the
-                # happy path; tune up if the dirty set grows
-                # faster than we drain.
+                # Per-run entity budget. 5000 entities with 3
+                # concurrent workers takes ~12 min on the happy path
+                # (measured at 6.9 ev/s sustained in prod after the
+                # 429-retry fix; lower-bound 5 min, upper-bound ~14
+                # min when Wikidata throttles). Combined with the
+                # */15 schedule that gives ~5.5 ev/s averaged drain,
+                # comfortably above the ~1.8 ev/s arrival rate.
                 - name: WIKIDATA_CONSUMER_BATCH
-                  value: "1000"
+                  value: "5000"

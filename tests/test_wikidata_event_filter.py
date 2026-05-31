@@ -97,6 +97,24 @@ def test_alias_add_in_non_eu_language_is_ignored() -> None:
         is EventAction.IGNORE
 
 
+def test_quickstatements_languages_short_non_eu_is_ignored() -> None:
+    # Format: `wbeditentity-update-languages-short:0||<lang>` — note
+    # the double-pipe, which is why the regex had to grow. Bengali
+    # is non-EU so this should be dropped.
+    out = classify(_edit(
+        "/* wbeditentity-update-languages-short:0||bn */ QuickStatements 3.0"
+    ))
+    assert out.action is EventAction.IGNORE
+    assert out.comment_kind == "wbeditentity-update-languages-short"
+
+
+def test_quickstatements_languages_short_eu_is_dirty() -> None:
+    out = classify(_edit(
+        "/* wbeditentity-update-languages-short:0||de */ QuickStatements 3.0"
+    ))
+    assert out.action is EventAction.DIRTY
+
+
 def test_mul_language_is_kept() -> None:
     # The Wikidata "multilingual" / language-neutral bucket.
     assert classify(_edit("/* wbsetlabel-add:1|mul */ Foo")).action \

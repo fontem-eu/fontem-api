@@ -70,14 +70,18 @@ class FilterDecision:
 # regex below if relevant.
 _COMMENT_KIND_RE = re.compile(r"/\*\s*([a-zA-Z][a-zA-Z\-]*)")
 
-# Pull the BCP-47 language tag out of label/description/alias actions:
+# Pull the BCP-47 language tag out of language-scoped actions:
 #   /* wbsetlabel-add:1|fr */ ...
 #   /* wbsetdescription-set:1|en-gb */ ...
-# Wikidata uses the bare language subtag for the wb* APIs (e.g.
-# ``en-gb`` exists; ``zh-hans`` etc.). We extract the whole tag and
-# compare case-insensitively against ``EU_LANGUAGES``.
+#   /* wbeditentity-update-languages-short:0||de */ QuickStatements 3.0
+# The wbeditentity-update-languages-short format uses a double-pipe
+# (the empty middle field is the entity-id slot, which is implicit in
+# the URL). The regex accepts both single and double `|` separator
+# styles. Wikidata uses the bare language subtag (en-gb, zh-hans etc.).
 _LANG_SUFFIX_RE = re.compile(
-    r"wbset(?:label|description|aliases)-(?:add|set|remove):[0-9]+\|"
+    r"(?:wbset(?:label|description|aliases)-(?:add|set|remove)"
+    r"|wbeditentity-update-languages-short)"
+    r":[0-9]+\|\|?"
     r"([a-zA-Z]+(?:-[a-zA-Z]+)*)"
 )
 
@@ -107,6 +111,11 @@ _LANG_SCOPED_PREFIXES: frozenset[str] = frozenset({
     "wbsetaliases-add",
     "wbsetaliases-set",
     "wbsetaliases-remove",
+    # QuickStatements-driven bulk lang edit (one specific language per
+    # comment, format `:0||<lang>`). Was ~21% of post-relay dirty
+    # entries before this was added; nearly all of them are non-EU
+    # langs (bn, hi, ml) so we drop them at the source.
+    "wbeditentity-update-languages-short",
 })
 
 
