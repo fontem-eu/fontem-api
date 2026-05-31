@@ -54,6 +54,12 @@ class GraphContractSource(ContractDataSource):
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
                 f"  {auth_name} AS authority, a.country AS authority_country, "
+                # `authority_id` lets the contracts UI link each row's
+                # authority cell back to the authority profile. Without
+                # this the panel could only render the name as plain
+                # text — there was no path from "X awarded by Y" back
+                # to Y's profile page.
+                "  a.authority_id AS authority_id, "
                 "  cpv.description AS cpv_description "
                 "ORDER BY ct.publication_date DESC LIMIT $limit",
                 gid=gmr_id, limit=limit,
@@ -80,6 +86,7 @@ class GraphContractSource(ContractDataSource):
                 "procedure_type": r["procedure_type"],
                 "ted_url": r["ted_url"],
                 "authority": r["authority"],
+                "authority_id": r["authority_id"],
                 "authority_country": r["authority_country"],
             })
 

@@ -31,6 +31,7 @@ def _mock_contract_source(company_contracts=None, search_companies=None,
                 "procedure_type": "open",
                 "ted_url": "https://ted.europa.eu/en/notice/123-2024",
                 "authority": "Ministry of X",
+                "authority_id": "auth-ministry-x",
                 "authority_country": "DE",
             },
             {
@@ -42,6 +43,7 @@ def _mock_contract_source(company_contracts=None, search_companies=None,
                 "procedure_type": "negotiated",
                 "ted_url": "https://ted.europa.eu/en/notice/456-2024",
                 "authority": "City of Y",
+                "authority_id": "auth-city-y",
                 "authority_country": "DE",
             },
         ],
@@ -120,6 +122,25 @@ class TestCompanyContracts:
         cleanup_dishka()
         assert resp.status_code == 200
         assert resp.json()["contract_count"] == 0
+
+    def test_each_row_carries_authority_id_for_profile_linking(self):
+        """Every contract row must carry an `authority_id` so the
+        contracts panel can link the authority cell back to its
+        profile. Without this the panel could only render the
+        authority as plain text.
+        """
+        mock = _mock_contract_source()
+        client = make_test_client(contract_source=mock)
+        resp = client.get("/companies/test-gid/contracts")
+        cleanup_dishka()
+        assert resp.status_code == 200
+        contracts = resp.json()["contracts"]
+        for row in contracts:
+            assert "authority_id" in row, (
+                f"authority_id missing from contract row {row.get('ted_notice_id')}"
+            )
+        assert contracts[0]["authority_id"] == "auth-ministry-x"
+        assert contracts[1]["authority_id"] == "auth-city-y"
 
 
 class TestContractDetail:
