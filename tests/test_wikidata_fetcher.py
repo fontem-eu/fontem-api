@@ -103,6 +103,43 @@ def test_fetch_retries_5xx_then_succeeds() -> None:
     assert calls["n"] == 3
 
 
+def test_fetch_429_with_retry_after_succeeds_after_one_retry() -> None:
+    # Wikimedia returns 429 when we burst too hard. We must NOT
+    # treat that as not-found (would silently drop the entity) —
+    # respect Retry-After if present, then retry.
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, content=b"",
+                                  headers={"Retry-After": "1"})
+        return httpx.Response(200, content=_Q42_TTL)
+
+    client = _client_with(handler)
+    result = fetch_truthy("Q42", client)
+    assert result.outcome is FetchOutcome.OK
+    assert calls["n"] == 2
+
+
+def test_fetch_429_without_retry_after_uses_backoff() -> None:
+    # Some 429s arrive without a Retry-After header (especially from
+    # a Varnish edge). Fall back to exponential backoff so we still
+    # retry instead of dropping.
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, content=b"")
+        return httpx.Response(200, content=_Q42_TTL)
+
+    client = _client_with(handler)
+    result = fetch_truthy("Q42", client)
+    assert result.outcome is FetchOutcome.OK
+    assert calls["n"] == 2
+
+
 def test_fetch_persistent_5xx_raises_after_retries() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, content=b"")

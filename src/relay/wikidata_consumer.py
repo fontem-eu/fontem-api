@@ -30,12 +30,13 @@ Required env:
   * ``VIRTUOSO_DBA_USER`` (default ``dba``)
   * ``VIRTUOSO_DBA_PASSWORD`` — required for write endpoint
   * ``WIKIDATA_CONSUMER_BATCH`` (optional, default 1000)
-  * ``WIKIDATA_CONSUMER_CONCURRENCY`` (optional, default 10) — number of
-    entities processed in parallel per batch. Each parallel slot does
-    its own HTTP roundtrip to Wikidata and Virtuoso; with serial
-    processing the wall-clock per entity was ~340ms and we couldn't
-    keep up with the live arrival rate. 10-way concurrency takes us
-    well past breakeven without straining either upstream.
+  * ``WIKIDATA_CONSUMER_CONCURRENCY`` (optional, default 3) — number of
+    entities processed in parallel per batch. Serial processing was
+    ~340ms per entity which never kept up with the live arrival rate.
+    A first parallel run at 10 workers triggered Wikimedia's rate
+    limit hard (~90% 429s in a single batch). 3 workers keeps the
+    sustained request rate well under their threshold while still
+    giving us 3-5x the serial throughput.
 """
 from __future__ import annotations
 
@@ -57,7 +58,7 @@ from src.relay.wikidata_writer import (
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = int(os.environ.get("WIKIDATA_CONSUMER_BATCH", "1000"))
-CONCURRENCY = int(os.environ.get("WIKIDATA_CONSUMER_CONCURRENCY", "10"))
+CONCURRENCY = int(os.environ.get("WIKIDATA_CONSUMER_CONCURRENCY", "3"))
 
 
 def lease_batch(conn, batch_size: int) -> list[tuple[str, object, bool]]:

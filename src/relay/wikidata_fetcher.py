@@ -43,12 +43,13 @@ logger = logging.getLogger(__name__)
 # traffic under one identity, with a deliverable contact.
 USER_AGENT = "Fontem-WikidataConsumer/1.0 (+https://fontem.eu; team@fontem.eu)"
 
-# Wikimedia is generous with reads but politely rate-limits aggressive
-# clients. 20 in-flight requests keeps us well under their soft cap
-# (~50 conn/IP) while letting the consumer's ThreadPoolExecutor (default
-# 10 workers, each potentially doing one fetch + one write at a time)
-# saturate the parallel slots without blocking on the connection pool.
-MAX_INFLIGHT = 20
+# Wikimedia is generous with reads but rate-limits aggressive clients
+# fairly hard — bursting 1000 entities at 10-way parallelism with 20
+# in-flight connections triggered ~90% 429 in our first prod run.
+# Cut it to 5 in-flight + 3 consumer workers (default) for a sustainable
+# request rate; the 429 path now has proper Retry-After/backoff so a
+# brief overshoot is recoverable rather than a silent drop.
+MAX_INFLIGHT = 5
 
 # Retries on 5xx and network errors. 5 attempts with a 2^n second
 # backoff means ~30s of grace on the worst transient.
@@ -140,6 +141,24 @@ def fetch_truthy(  # pylint: disable=too-many-return-statements
 
         if resp.status_code in (404, 410):
             return FetchResult(FetchOutcome.NOT_FOUND, entity_id, None, None)
+
+        if resp.status_code == 429:
+            # Wikimedia rate-limit. Respect Retry-After if present
+            # (it can be either a seconds-integer or an HTTP-date;
+            # the seconds form is what their varnish layer sends in
+            # practice). Without the header, exponential backoff.
+            # We never treat 429 as "not found" — that would
+            # silently lose the entity from our drain.
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                sleep_for = float(retry_after) if retry_after else \
+                    BASE_BACKOFF_S * (2 ** attempt)
+            except ValueError:
+                sleep_for = BASE_BACKOFF_S * (2 ** attempt)
+            logger.warning("fetch %s rate-limited (429); sleeping %.1fs",
+                           entity_id, sleep_for)
+            time.sleep(sleep_for)
+            continue
 
         if resp.status_code in (301, 302, 303, 307, 308):
             # Wikidata redirects merged entities to their survivor.
