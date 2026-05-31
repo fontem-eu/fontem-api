@@ -35,7 +35,7 @@ import logging
 import time
 
 import httpx
-from rdflib import Graph
+from rdflib import Graph, URIRef
 
 logger = logging.getLogger(__name__)
 
@@ -99,21 +99,26 @@ def _parse_ttl(content: bytes) -> Graph:
     return graph
 
 
+_OWL_SAMEAS = URIRef("http://www.w3.org/2002/07/owl#sameAs")
+_WIKIDATA_ENTITY_PREFIX = "http://www.wikidata.org/entity/"
+
+
 def _extract_redirect_target(graph: Graph, source_id: str) -> str | None:
     """When Wikidata serves a redirect-target's RDF, the source
     entity is marked with ``owl:sameAs`` pointing to the survivor.
     We pull the target id out of that triple, fall back to None if
-    the assertion isn't there (treat as a normal fetch)."""
-    query = f"""
-    PREFIX owl: <http://www.w3.org/2002/07/owl#>
-    PREFIX wd:  <http://www.wikidata.org/entity/>
-    SELECT ?target WHERE {{
-        wd:{source_id} owl:sameAs ?target .
-    }} LIMIT 1
-    """
-    for row in graph.query(query):
-        target_iri = str(row.target)  # type: ignore[attr-defined]
-        if target_iri.startswith("http://www.wikidata.org/entity/"):
+    the assertion isn't there (treat as a normal fetch).
+
+    Uses graph.objects() rather than graph.query() because rdflib's
+    SPARQL parser drags in pyparsing — and a CI build picked up a
+    pyparsing version where the SPARQL grammar throws
+    ``Param.postParse2() missing 1 required positional argument:
+    'tokenList'`` on every parse. Single-hop lookups don't need a
+    query engine; iterate the triples directly."""
+    source_iri = URIRef(f"{_WIKIDATA_ENTITY_PREFIX}{source_id}")
+    for target in graph.objects(source_iri, _OWL_SAMEAS):
+        target_iri = str(target)
+        if target_iri.startswith(_WIKIDATA_ENTITY_PREFIX):
             return target_iri.rsplit("/", 1)[-1]
     return None
 
