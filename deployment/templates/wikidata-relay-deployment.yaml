@@ -37,7 +37,9 @@ spec:
       labels:
         app: fontem-wikidata-relay
       annotations:
-        prometheus.io/scrape: "false"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
     spec:
       imagePullSecrets:
         - name: regcred
@@ -46,6 +48,10 @@ spec:
           image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
           imagePullPolicy: Always
           command: ["python", "-m", "src.relay.wikidata_recentchange"]
+          ports:
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
           resources:
             requests:
               cpu: "50m"

@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 import httpx
 import psycopg
 
+from src.relay import metrics
 from src.relay.event_filter import EventAction, classify
 
 logger = logging.getLogger(__name__)
@@ -267,14 +268,22 @@ def stream_loop(database_url: str) -> None:  # pylint: disable=too-many-locals,t
                             if ev.action is EventAction.DELETED:
                                 mark_deleted(conn, ev.entity_id, ev.event_ts)
                                 deleted_n += 1
+                                metrics.EVENTS_TOTAL.labels(
+                                    outcome="deleted").inc()
                             elif ev.action is EventAction.DIRTY:
                                 mark_dirty(conn, ev.entity_id, ev.event_ts,
                                            ev.comment_kind)
                                 dirty_n += 1
+                                metrics.EVENTS_TOTAL.labels(
+                                    outcome="dirty").inc()
                             else:
                                 ignored_n += 1
+                                metrics.EVENTS_TOTAL.labels(
+                                    outcome="ignored").inc()
                         else:
                             ignored_n += 1
+                            metrics.EVENTS_TOTAL.labels(
+                                outcome="ignored").inc()
 
                         if pending_n >= CHECKPOINT_BATCH:
                             assert pending_ts is not None
@@ -320,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=unused-argume
         logger.info("SIGTERM received, exiting")
         sys.exit(0)
     signal.signal(signal.SIGTERM, _on_term)
+    metrics.start(database_url)
     stream_loop(database_url)
     return 0
 

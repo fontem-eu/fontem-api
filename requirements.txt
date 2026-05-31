@@ -44,4 +44,8 @@ psycopg[binary]>=3.1
 
 # Observability
 prometheus-fastapi-instrumentator
+# Direct dep for the wikidata relay's stand-alone /metrics endpoint;
+# prometheus-fastapi-instrumentator pulls it in too but the relay
+# isn't a FastAPI app so we need explicit access.
+prometheus-client>=0.20
 pycountry

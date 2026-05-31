@@ -45,6 +45,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import psycopg
 
@@ -159,12 +160,34 @@ def clear_dirty_batch(conn, pairs: list[tuple[str, object]]) -> None:
     conn.commit()
 
 
+def log_run(conn, started_at: datetime, counts: dict[str, int]) -> None:
+    """Write the per-batch summary into ``wikidata.consumer_runs`` so
+    the relay's metrics poller can fold it into the
+    ``wikidata_consumer_entities_total`` counter. This is the only
+    way the short-lived CronJob pod's per-batch numbers reach
+    Prometheus — there is no scrape target on the consumer side."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO wikidata.consumer_runs
+              (started_at, finished_at, leased, written, tombstoned,
+               redirected, not_found_left_pending, errors)
+            VALUES (%s, now(), %s, %s, %s, %s, %s, %s)
+            """,
+            (started_at, counts["leased"], counts["written"],
+             counts["tombstoned"], counts["redirected"],
+             counts["not_found_left_pending"], counts["errors"]),
+        )
+    conn.commit()
+
+
 def run_batch(database_url: str, sparql_url: str,  # pylint: disable=too-many-locals
               auth: tuple[str, str], batch_size: int,
               concurrency: int = CONCURRENCY) -> dict[str, int]:
     """One invocation. Lease a batch, process entities in parallel,
     bulk-clear the dirty rows for successfully-processed entities at
     the end."""
+    started_at = datetime.now(timezone.utc)
     counts: dict[str, int] = {
         "leased": 0, "written": 0, "tombstoned": 0,
         "redirected": 0, "not_found_left_pending": 0, "errors": 0,
@@ -196,6 +219,7 @@ def run_batch(database_url: str, sparql_url: str,  # pylint: disable=too-many-lo
                     logger.exception("processing failed: %s", exc)
                     counts["errors"] += 1
         clear_dirty_batch(pg_conn, to_clear)
+        log_run(pg_conn, started_at, counts)
     return counts
 
 

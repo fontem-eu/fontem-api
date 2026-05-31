@@ -1,0 +1,156 @@
+{{/*
+Grafana dashboard for the Wikidata relay + consumer drain. Picked
+up by the kube-prometheus-stack Grafana sidecar via the
+`grafana_dashboard: "1"` label. Renders three panels:
+
+  1. New dirty rate   — rate(wikidata_relay_events_total{outcome="dirty"}[5m])
+  2. Consumer process rate — rate(wikidata_consumer_entities_total{outcome=~"written|tombstoned|redirected"}[5m])
+  3. Dirty queue depth  — wikidata_dirty_entities_total
+
+Plus the cursor lag as a small instant-value box so we can tell
+at a glance whether the relay is still real-time.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fontem-wikidata-relay-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  wikidata-relay-drain.json: |
+    {
+      "title": "Wikidata Relay + Consumer Drain",
+      "uid": "fontem-wikidata-drain",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": {"from": "now-6h", "to": "now"},
+      "timezone": "",
+      "tags": ["fontem", "wikidata", "relay"],
+      "templating": {"list": []},
+      "annotations": {"list": []},
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Arrival vs Drain (entities/sec)",
+          "description": "Net flow on wikidata.dirty_entities. Arrival is the relay's filtered SSE rate; drain is the consumer's success-outcomes rate.",
+          "gridPos": {"x": 0, "y": 0, "w": 18, "h": 9},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 2,
+              "custom": {"axisLabel": "entities / sec"}
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(wikidata_relay_events_total{outcome=\"dirty\"}[5m])",
+              "refId": "A",
+              "legendFormat": "arrival (dirty)"
+            },
+            {
+              "expr": "rate(wikidata_relay_events_total{outcome=\"deleted\"}[5m])",
+              "refId": "B",
+              "legendFormat": "arrival (deleted)"
+            },
+            {
+              "expr": "sum(rate(wikidata_consumer_entities_total{outcome=~\"written|tombstoned|redirected\"}[5m]))",
+              "refId": "C",
+              "legendFormat": "drain (success)"
+            },
+            {
+              "expr": "rate(wikidata_consumer_entities_total{outcome=\"errors\"}[5m])",
+              "refId": "D",
+              "legendFormat": "drain (errors)"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Cursor lag",
+          "description": "now() - last_event_ts on the relay's resume cursor. Should stay under 60s under normal load.",
+          "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "green", "value": null},
+                  {"color": "yellow", "value": 60},
+                  {"color": "red", "value": 300}
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "wikidata_relay_cursor_lag_seconds",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Total in queue",
+          "description": "Current row count in wikidata.dirty_entities.",
+          "gridPos": {"x": 18, "y": 4, "w": 6, "h": 5},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(wikidata_dirty_entities_total)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Dirty queue depth",
+          "description": "Total rows in wikidata.dirty_entities by state.",
+          "gridPos": {"x": 0, "y": 9, "w": 24, "h": 8},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0
+            }
+          },
+          "targets": [
+            {
+              "expr": "wikidata_dirty_entities_total",
+              "refId": "A",
+              "legendFormat": "{{`{{state}}`}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Consumer outcomes (per second)",
+          "description": "Per-outcome breakdown of consumer batches. `written`+`redirected`+`tombstoned` is the useful drain, `not_found` and `errors` represent retries on the next run.",
+          "gridPos": {"x": 0, "y": 17, "w": 24, "h": 8},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 2
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(wikidata_consumer_entities_total[5m])",
+              "refId": "A",
+              "legendFormat": "{{`{{outcome}}`}}"
+            }
+          ]
+        }
+      ]
+    }

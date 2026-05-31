@@ -1,0 +1,48 @@
+{{/*
+ClusterIP Service in front of the relay pod, used only to give the
+ServiceMonitor below a stable selector target. Prometheus scrapes
+:9100/metrics; no other consumer of this Service exists.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: fontem-wikidata-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fontem-wikidata-relay
+    component: relay
+spec:
+  type: ClusterIP
+  clusterIP: None   # headless — no virtual IP needed
+  selector:
+    app: fontem-wikidata-relay
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP
+---
+{{/*
+ServiceMonitor so the Prometheus Operator scrapes the relay's
+/metrics endpoint. The release label matches the kube-prometheus-stack
+deployment so the operator's serviceMonitorSelector picks it up.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fontem-wikidata-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fontem-wikidata-relay
+    release: monitoring-stack
+spec:
+  selector:
+    matchLabels:
+      app: fontem-wikidata-relay
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
