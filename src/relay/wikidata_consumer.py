@@ -6,15 +6,14 @@ rewrites it in Virtuoso, or — for tombstoned rows — issues a DELETE.
 Concurrency-safe so it can run alongside the relay (the relay only
 upserts; the worker only reads + deletes).
 
-Designed as a single-shot batch process invoked by a Kubernetes
-CronJob. Each invocation processes a configurable budget of entities
-(``WIKIDATA_CONSUMER_BATCH``, default 1000), then exits. The hour-cron
-scheduling means we trade a small staleness window for huge
-operational simplicity over a long-lived process: no health-check, no
-graceful-shutdown, no leader-election, no leases. If a run is killed
-mid-flight, the next run picks up where it left off because every
-written entity is removed from dirty_entities only after Virtuoso
-commits.
+Runs as a long-lived Deployment. ``main()`` loops
+``run_batch()`` forever, sleeping briefly between iterations
+(``WIKIDATA_CONSUMER_SLEEP_IDLE_S`` when the queue is empty,
+``WIKIDATA_CONSUMER_SLEEP_BUSY_S`` otherwise — the busy delay lets
+Wikidata's per-IP rate budget recover slightly between batches so
+we don't park ourselves in a 429 storm). SIGTERM is handled
+cooperatively: the current batch finishes (so the Virtuoso write
++ clear_dirty pair stays atomic) then the loop exits.
 
 Optimistic concurrency:
   The worker captures ``last_changed_at`` at lease-time, and on
@@ -37,12 +36,18 @@ Required env:
     limit hard (~90% 429s in a single batch). 3 workers keeps the
     sustained request rate well under their threshold while still
     giving us 3-5x the serial throughput.
+  * ``WIKIDATA_CONSUMER_SLEEP_BUSY_S`` (optional, default 5) — seconds
+    to sleep between batches when work is available, to let Wikidata's
+    rate-limit budget recover.
+  * ``WIKIDATA_CONSUMER_SLEEP_IDLE_S`` (optional, default 60) — seconds
+    to sleep between polls when the dirty set is empty.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import logging
 import os
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -60,6 +65,19 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = int(os.environ.get("WIKIDATA_CONSUMER_BATCH", "1000"))
 CONCURRENCY = int(os.environ.get("WIKIDATA_CONSUMER_CONCURRENCY", "3"))
+SLEEP_BUSY_S = int(os.environ.get("WIKIDATA_CONSUMER_SLEEP_BUSY_S", "5"))
+SLEEP_IDLE_S = int(os.environ.get("WIKIDATA_CONSUMER_SLEEP_IDLE_S", "60"))
+
+_shutdown = False  # pylint: disable=invalid-name
+
+
+def _on_sigterm(_sig, _frame) -> None:
+    """Flip the loop's exit flag. We do NOT abort the in-flight batch
+    — the consumer's atomic unit is one ``run_batch`` call, and
+    finishing the current batch leaves dirty_entities consistent."""
+    global _shutdown  # pylint: disable=global-statement
+    logger.info("SIGTERM received; will exit after current batch")
+    _shutdown = True
 
 
 def lease_batch(conn, batch_size: int) -> list[tuple[str, object, bool]]:
@@ -242,15 +260,32 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=unused-argume
         )
         return 1
 
-    started = time.monotonic()
-    counts = run_batch(database_url, sparql_url, (dba_user, dba_pw), BATCH_SIZE)
-    elapsed = time.monotonic() - started
-    logger.info(
-        "batch done in %.1fs: leased=%d written=%d tombstoned=%d "
-        "redirected=%d not_found_left_pending=%d errors=%d",
-        elapsed, counts["leased"], counts["written"], counts["tombstoned"],
-        counts["redirected"], counts["not_found_left_pending"], counts["errors"],
-    )
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    signal.signal(signal.SIGINT, _on_sigterm)
+
+    auth = (dba_user, dba_pw)
+    while not _shutdown:
+        started = time.monotonic()
+        counts = run_batch(database_url, sparql_url, auth, BATCH_SIZE)
+        elapsed = time.monotonic() - started
+        logger.info(
+            "batch done in %.1fs: leased=%d written=%d tombstoned=%d "
+            "redirected=%d not_found_left_pending=%d errors=%d",
+            elapsed, counts["leased"], counts["written"], counts["tombstoned"],
+            counts["redirected"], counts["not_found_left_pending"],
+            counts["errors"],
+        )
+
+        if _shutdown:
+            break
+
+        # Empty queue: poll more slowly so we don't spam Postgres with
+        # zero-row lease queries. Busy: brief breather to give
+        # Wikidata's rate budget a moment to recover.
+        sleep_for = SLEEP_IDLE_S if counts["leased"] == 0 else SLEEP_BUSY_S
+        time.sleep(sleep_for)
+
+    logger.info("clean shutdown after %s", time.strftime("%X"))
     return 0
 
 

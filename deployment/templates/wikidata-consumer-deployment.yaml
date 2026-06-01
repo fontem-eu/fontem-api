@@ -1,0 +1,98 @@
+{{/*
+Long-lived continuous-drain consumer for wikidata.dirty_entities.
+
+Replaces the earlier hourly CronJob. Reasons we moved off CronJob:
+  * The hourly cadence drained at most ~5000 entities/hr against an
+    arrival rate of ~10k/hr — the queue grew, never shrank.
+  * The CronJob would have to fire every 15 min at minimum to
+    keep up, but then a slow batch fights Forbid concurrency.
+  * Continuous-loop semantics are simpler: one pod, one config,
+    and dropping the queue to zero is just a matter of the loop's
+    cadence.
+
+Singleton — replicas: 1 — because the lease query is a plain
+SELECT ... LIMIT N (no FOR UPDATE SKIP LOCKED), so two consumer
+pods would mostly hand-shake on the same 1000 entities and waste
+Wikidata API budget. Optimistic-delete still keeps the data
+correct under any race, just not efficient. If we ever need to
+parallelise: add `FOR UPDATE SKIP LOCKED` and bump replicas.
+
+Image source: same fontem-api image as the relay; ENTRYPOINT is
+overridden to the consumer module.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fontem-wikidata-consumer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fontem-wikidata-consumer
+    component: relay
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # single consumer; never two pods racing on the same lease
+  selector:
+    matchLabels:
+      app: fontem-wikidata-consumer
+  template:
+    metadata:
+      labels:
+        app: fontem-wikidata-consumer
+      annotations:
+        # Same as the CronJob had: Linkerd's sidecar doesn't ever
+        # exit, so even though this is a Deployment (no
+        # `Completed` state needed) the sidecar would still inject
+        # latency on Postgres + Virtuoso calls without adding mTLS
+        # we actually need (all in-cluster + plain-HTTPS Wikidata).
+        linkerd.io/inject: disabled
+    spec:
+      restartPolicy: Always
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: consumer
+          image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.relay.wikidata_consumer"]
+          resources:
+            # In daemon mode each loop iteration holds rdflib graphs
+            # for `BATCH_SIZE` × CONCURRENCY entities. With the
+            # default BATCH=1000 / CONCURRENCY=3 the working set is
+            # well under 1 GiB; 2 GiB limit is generous headroom.
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          env:
+            - name: EVENTS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fontem-postgres-credentials
+                  key: EVENTS_DATABASE_URL
+            - name: VIRTUOSO_SPARQL_UPDATE_URL
+              value: "http://virtuoso.{{ .Release.Namespace }}.svc.cluster.local:8890/sparql-auth"
+            - name: VIRTUOSO_DBA_USER
+              value: "dba"
+            - name: VIRTUOSO_DBA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: virtuoso-credentials
+                  key: VIRTUOSO_DBA_PASSWORD
+            # Daemon-mode tuning. Smaller batch than the old hourly
+            # CronJob because the throughput math now lives in the
+            # loop interval, not the per-batch size.
+            - name: WIKIDATA_CONSUMER_BATCH
+              value: "1000"
+            - name: WIKIDATA_CONSUMER_CONCURRENCY
+              value: "3"
+            - name: WIKIDATA_CONSUMER_SLEEP_BUSY_S
+              value: "5"
+            - name: WIKIDATA_CONSUMER_SLEEP_IDLE_S
+              value: "60"
+          # SIGTERM is handled cooperatively (we finish the current
+          # batch then exit), so allow up to ~one full BATCH
+          # duration for the loop to drain.
+          terminationGracePeriodSeconds: 300
