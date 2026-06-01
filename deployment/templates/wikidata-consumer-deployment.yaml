@@ -56,16 +56,17 @@ spec:
           imagePullPolicy: Always
           command: ["python", "-m", "src.relay.wikidata_consumer"]
           resources:
-            # In daemon mode each loop iteration holds rdflib graphs
-            # for `BATCH_SIZE` × CONCURRENCY entities. With the
-            # default BATCH=1000 / CONCURRENCY=3 the working set is
-            # well under 1 GiB; 2 GiB limit is generous headroom.
+            # First prod run with the daemon hit OOM at 2 GiB — the
+            # loop holds onto rdflib Graph objects (huge entities can
+            # be many MBs each) until GC ticks. 4 GiB plus explicit
+            # gc.collect() between iterations comfortably absorbs the
+            # peaks.
             requests:
               cpu: "100m"
-              memory: "512Mi"
+              memory: "1Gi"
             limits:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "1500m"
+              memory: "4Gi"
           env:
             - name: EVENTS_DATABASE_URL
               valueFrom:
@@ -81,11 +82,12 @@ spec:
                 secretKeyRef:
                   name: virtuoso-credentials
                   key: VIRTUOSO_DBA_PASSWORD
-            # Daemon-mode tuning. Smaller batch than the old hourly
-            # CronJob because the throughput math now lives in the
-            # loop interval, not the per-batch size.
+            # Daemon-mode tuning. 500 entities per batch keeps the
+            # peak working set well under the memory limit even when
+            # one of the entities is a "huge" one (popular Q-ids
+            # can return rdflib Graphs sized in the tens of MBs).
             - name: WIKIDATA_CONSUMER_BATCH
-              value: "1000"
+              value: "500"
             - name: WIKIDATA_CONSUMER_CONCURRENCY
               value: "3"
             - name: WIKIDATA_CONSUMER_SLEEP_BUSY_S

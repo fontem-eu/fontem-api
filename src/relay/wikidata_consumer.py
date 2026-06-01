@@ -45,6 +45,7 @@ Required env:
 from __future__ import annotations
 
 import concurrent.futures
+import gc
 import logging
 import os
 import signal
@@ -149,15 +150,21 @@ def process_one(  # pylint: disable=too-many-arguments,too-many-positional-argum
     filtered = filter_graph(graph, entity_id)
     write_entity(entity_id, filtered, http_client, sparql_url, auth)
 
-    if fetched.outcome is FetchOutcome.REDIRECT and fetched.redirected_to:
-        # The survivor's RDF was returned by Wikidata; we've written
-        # it. The redirected-from id no longer needs separate
-        # tracking. (The owl:sameAs from source→target is included in
-        # the graph itself.) The survivor will get its own
-        # dirty_entities row from future edits — we don't pre-emptively
-        # mark it dirty here.
-        return ("redirected", entity_id, last_changed_at)
-    return ("written", entity_id, last_changed_at)
+    # Help the daemon's tight loop: drop our handles on the rdflib
+    # Graph objects (popular entities can be tens of MBs each)
+    # before returning. The FetchResult will go out of scope too but
+    # explicit del here makes the lifetime obvious. The redirect
+    # outcome is captured before del because we still need it.
+    outcome = (
+        "redirected"
+        if fetched.outcome is FetchOutcome.REDIRECT
+        and fetched.redirected_to
+        else "written"
+    )
+    del filtered
+    del graph
+    del fetched
+    return (outcome, entity_id, last_changed_at)
 
 
 def clear_dirty_batch(conn, pairs: list[tuple[str, object]]) -> None:
@@ -278,6 +285,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=unused-argume
 
         if _shutdown:
             break
+
+        # Force GC between iterations: rdflib Graph objects can be
+        # multi-MB for popular entities, and CPython's incremental
+        # collector lags behind a tight loop. Without this the daemon
+        # OOMs after 1-2 batches even with a 4 GiB limit.
+        gc.collect()
 
         # Empty queue: poll more slowly so we don't spam Postgres with
         # zero-row lease queries. Busy: brief breather to give
