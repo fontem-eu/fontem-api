@@ -36,13 +36,13 @@ metadata:
     app: fontem-wikidata-consumer
     component: relay
 spec:
-  # Every 15 minutes. With BATCH_SIZE=5000 and CONCURRENCY=3 a run
-  # processes ~5000 entities in ~12 min (3 ms/entity sustained — the
-  # bottleneck is Wikidata's per-IP rate limit, not Virtuoso). 3 min
-  # idle between runs absorbs occasional slow batches. Forbid policy
-  # below means we skip a tick rather than overlap if a batch ever
-  # spills past 15 min.
-  schedule: "*/15 * * * *"
+  # Hourly. concurrencyPolicy: Forbid means if a run is still in
+  # flight when the next tick fires, the new tick is skipped — we
+  # never have two consumer pods talking to Wikidata at once. With
+  # BATCH=5000 and CONCURRENCY=3 a healthy run is ~20-25 min;
+  # leftover idle each hour is wasted but the price of a polite,
+  # predictable cadence.
+  schedule: "0 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 3
@@ -71,13 +71,19 @@ spec:
               image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
               imagePullPolicy: Always
               command: ["python", "-m", "src.relay.wikidata_consumer"]
+              # 1Gi was enough at BATCH=1000 but blows past with
+              # BATCH=5000: 3 concurrent workers each hold rdflib
+              # Graph objects for the entity they're processing,
+              # ~30-200 KB per Graph times the buffer-of-results
+              # under as_completed adds up to 1.5-2 GiB peaks. Cap
+              # at 3 GiB to leave bmax-b9 headroom.
               resources:
                 requests:
                   cpu: "100m"
-                  memory: "256Mi"
+                  memory: "512Mi"
                 limits:
                   cpu: "1000m"
-                  memory: "1Gi"
+                  memory: "3Gi"
               env:
                 - name: EVENTS_DATABASE_URL
                   valueFrom:
