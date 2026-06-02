@@ -12,11 +12,20 @@ Two concerns separated:
       - Literals with a language tag outside EU_LANGUAGES are dropped.
         Untagged literals (numbers, dates, IRIs) are kept.
 
-  * ``write_entity`` — apply the filtered graph to Virtuoso by issuing
-    a single SPARQL UPDATE that DELETEs every existing triple for the
-    entity in our named graph, then INSERTs the new ones. Atomic per
-    entity. The Virtuoso `Update` endpoint is used over HTTP — no
-    direct isql dependency in the worker pod.
+  * ``write_entity`` — apply the filtered graph to Virtuoso. For
+    small entities (≤ ``SPARQL_CHUNK_TRIPLES``) we issue one combined
+    DELETE+INSERT-DATA UPDATE so the swap is atomic. For larger
+    entities — a "popular" Q-id can carry hundreds to thousands of
+    triples — Virtuoso refuses the SPARQL with
+    ``SP031: SPARQL: Internal error: The length of generated SQL
+    text has exceeded 10000 lines of code``. We avoid that by
+    chunking: one initial UPDATE does the DELETE plus the first
+    chunk's INSERT atomically, then subsequent UPDATEs append the
+    remaining chunks. Per-entity atomicity is lost across chunks
+    but RDF is set-semantic so the only externally-visible effect
+    is a brief window where the entity has fewer-than-final
+    triples. On a mid-chunk failure the entity stays dirty and the
+    next consumer pass retries from scratch.
 
 The named graph is hard-coded to ``https://fontem.eu/graph/wikidata``,
 matching the bulk-load. Don't parameterise — drifting from the
@@ -26,6 +35,7 @@ that none of our SPARQL endpoints query.
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 from rdflib import Graph, Literal
@@ -36,6 +46,11 @@ logger = logging.getLogger(__name__)
 
 WIKIDATA_GRAPH = "https://fontem.eu/graph/wikidata"
 WIKIDATA_ENTITY_PREFIX = "http://www.wikidata.org/entity/"
+
+# Max triples per INSERT DATA call. Each triple expands to a handful
+# of SQL lines in Virtuoso; 500 stays comfortably under the SP031
+# 10k-line ceiling even for triples with long literal values.
+SPARQL_CHUNK_TRIPLES = int(os.environ.get("WIKIDATA_SPARQL_CHUNK", "500"))
 
 
 def filter_graph(graph: Graph, entity_id: str) -> Graph:
@@ -67,31 +82,30 @@ def _entity_uri(entity_id: str) -> str:
     return f"{WIKIDATA_ENTITY_PREFIX}{entity_id}"
 
 
-def _serialise_for_insert(graph: Graph) -> str:
-    """Turtle is convenient locally but SPARQL UPDATE needs N-Triples
-    in an INSERT DATA block. rdflib's ``nt`` serializer gives us
-    exactly that — one triple per line, IRIs in angle brackets."""
-    return graph.serialize(format="nt").strip()
+def _serialise_nt(triples) -> str:
+    """N-Triples serialise the provided iterable of (s, p, o). Builds
+    a fresh Graph because rdflib's serializer needs one."""
+    tmp = Graph()
+    for triple in triples:
+        tmp.add(triple)
+    return tmp.serialize(format="nt").strip()
 
 
-def _sparql_update_replace(entity_id: str, filtered: Graph) -> str:
-    """Build the SPARQL UPDATE that atomically replaces an entity's
-    triples in our named graph.
+def _chunk_triples(graph: Graph, chunk_size: int) -> list[list]:
+    """Split the graph's triples into chunks of at most ``chunk_size``
+    each. Returns a list of triple-lists so the caller can iterate
+    without needing the Graph machinery again."""
+    triples = list(graph)
+    return [triples[i:i + chunk_size]
+            for i in range(0, len(triples), chunk_size)]
 
-    Three statements separated by `;` — Virtuoso executes them as one
-    transaction:
 
-      1. DELETE every triple in the entity's named graph where the
-         subject is the entity. We don't try to be clever and DELETE
-         only the diff — at ~50–200 triples per entity it's cheaper
-         to drop and rewrite than to compute the set difference.
-      2. (Implicit) The INSERT DATA below.
-
-    The entity URI is interpolated as a literal IRI, not bound — the
-    UPDATE only fires for one entity per call so a bound variable
-    would be an unnecessary indirection."""
+def _sparql_replace_with_first_chunk(entity_id: str, first_chunk) -> str:
+    """Atomic DELETE + INSERT-DATA(first chunk) — runs as one
+    transaction so the swap of old → new is visible all at once for
+    the slice of triples that fits in the first chunk."""
     entity_iri = _entity_uri(entity_id)
-    nt_body = _serialise_for_insert(filtered)
+    nt_body = _serialise_nt(first_chunk)
     return (
         f"WITH <{WIKIDATA_GRAPH}>\n"
         f"DELETE {{ <{entity_iri}> ?p ?o }}\n"
@@ -100,8 +114,16 @@ def _sparql_update_replace(entity_id: str, filtered: Graph) -> str:
     )
 
 
-def _sparql_update_delete_only(entity_id: str) -> str:
-    """Tombstone path: just DELETE everything for the entity."""
+def _sparql_insert_chunk(chunk) -> str:
+    """Subsequent INSERT-DATA-only UPDATEs for chunks 2..N."""
+    nt_body = _serialise_nt(chunk)
+    return f"INSERT DATA {{ GRAPH <{WIKIDATA_GRAPH}> {{\n{nt_body}\n}} }}"
+
+
+def _sparql_delete_only(entity_id: str) -> str:
+    """Tombstone path: DELETE every triple for the entity, no INSERT.
+    Also the "the entity has zero triples after filtering" path
+    inside ``write_entity``."""
     entity_iri = _entity_uri(entity_id)
     return (
         f"WITH <{WIKIDATA_GRAPH}>\n"
@@ -110,19 +132,13 @@ def _sparql_update_delete_only(entity_id: str) -> str:
     )
 
 
-def write_entity(
-    entity_id: str, filtered: Graph,
-    client: httpx.Client, sparql_update_url: str,
-    auth: tuple[str, str] | None = None,
+def _post_update(
+    client: httpx.Client, sparql_update_url: str, update: str,
+    entity_id: str, auth: tuple[str, str] | None,
 ) -> None:
-    """Apply the filtered graph for one entity to Virtuoso via SPARQL
-    UPDATE. Raises on non-2xx response; caller decides retry policy.
-
-    ``sparql_update_url`` is Virtuoso's ``/sparql-auth`` endpoint
-    (typically ``http://virtuoso:8890/sparql-auth``). It requires
-    Digest-auth using the DBA credential. The read-only ``/sparql``
-    endpoint cannot mutate."""
-    update = _sparql_update_replace(entity_id, filtered)
+    """POST a single SPARQL UPDATE to Virtuoso. Raise on non-2xx so
+    the caller's optimistic-delete doesn't fire for this entity and
+    it stays in dirty_entities for retry."""
     resp = client.post(
         sparql_update_url,
         data={"query": update},
@@ -135,6 +151,46 @@ def write_entity(
         )
 
 
+def write_entity(
+    entity_id: str, filtered: Graph,
+    client: httpx.Client, sparql_update_url: str,
+    auth: tuple[str, str] | None = None,
+) -> None:
+    """Apply the filtered graph for one entity to Virtuoso. One UPDATE
+    if the graph fits in a single chunk; otherwise an atomic
+    DELETE+first-chunk-INSERT followed by N-1 INSERT-DATA UPDATEs for
+    the remaining chunks. Raises on the first failing UPDATE.
+
+    ``sparql_update_url`` is Virtuoso's ``/sparql-auth`` endpoint
+    (typically ``http://virtuoso:8890/sparql-auth``). It requires
+    Digest-auth using the DBA credential. The read-only ``/sparql``
+    endpoint cannot mutate."""
+    chunks = _chunk_triples(filtered, SPARQL_CHUNK_TRIPLES)
+
+    if not chunks:
+        # Filter stripped everything (rare — entity with only non-EU
+        # labels and no claims). Clear what's currently in Virtuoso
+        # so we don't keep stale state.
+        _post_update(client, sparql_update_url,
+                     _sparql_delete_only(entity_id), entity_id, auth)
+        return
+
+    # First UPDATE is the atomic swap.
+    _post_update(
+        client, sparql_update_url,
+        _sparql_replace_with_first_chunk(entity_id, chunks[0]),
+        entity_id, auth,
+    )
+
+    # Remaining chunks append (INSERT DATA is set-semantic so it's
+    # idempotent if a retry re-runs them).
+    for chunk in chunks[1:]:
+        _post_update(
+            client, sparql_update_url,
+            _sparql_insert_chunk(chunk), entity_id, auth,
+        )
+
+
 def tombstone_entity(
     entity_id: str, client: httpx.Client, sparql_update_url: str,
     auth: tuple[str, str] | None = None,
@@ -142,14 +198,7 @@ def tombstone_entity(
     """Remove all triples for ``entity_id`` from our named graph. Used
     when the relay marked the entity ``is_deleted=true`` from a
     Wikidata page-delete event."""
-    update = _sparql_update_delete_only(entity_id)
-    resp = client.post(
-        sparql_update_url,
-        data={"query": update},
-        auth=httpx.DigestAuth(*auth) if auth else None,
+    _post_update(
+        client, sparql_update_url,
+        _sparql_delete_only(entity_id), entity_id, auth,
     )
-    if resp.status_code >= 400:
-        raise RuntimeError(
-            f"Virtuoso DELETE for {entity_id} failed {resp.status_code}: "
-            f"{resp.text[:300]}"
-        )

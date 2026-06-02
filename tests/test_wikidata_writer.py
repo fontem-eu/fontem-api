@@ -1,28 +1,44 @@
-"""Unit tests for the Wikidata graph filter + SPARQL UPDATE builder.
+"""Unit tests for the Wikidata graph filter + chunked SPARQL UPDATE
+writer.
 
-We pin two behaviours:
+Three behaviours pinned:
 
-  * the language filter drops non-EU literals but keeps untagged ones
-    (numbers, dates, IRIs, language-neutral strings);
-  * the SPARQL UPDATE is shaped so Virtuoso treats DELETE+INSERT as
-    one transaction — a half-applied entity rewrite would leave the
-    graph inconsistent.
+  * ``filter_graph`` drops sitelink / metadata subjects and non-EU
+    literals;
+  * a single-chunk write keeps the DELETE + first-chunk INSERT atomic
+    inside one transaction (a half-applied entity rewrite would leave
+    the graph inconsistent);
+  * a multi-chunk write fires the atomic first UPDATE, then one
+    ``INSERT DATA`` per remaining chunk — the Virtuoso SP031 ceiling
+    on a single statement is the entire reason the writer chunks at
+    all, so the per-chunk wire shape is the contract being protected.
 """
 from __future__ import annotations
 
+from typing import Callable
+
+import httpx
 from rdflib import Graph, Literal, URIRef
 
+from src.relay import wikidata_writer
 from src.relay.wikidata_writer import (
+    SPARQL_CHUNK_TRIPLES,
     WIKIDATA_GRAPH,
-    _sparql_update_delete_only,
-    _sparql_update_replace,
+    _chunk_triples,
+    _sparql_delete_only,
+    _sparql_insert_chunk,
+    _sparql_replace_with_first_chunk,
     filter_graph,
+    write_entity,
 )
 
 
 WD = "http://www.wikidata.org/entity/"
 WDT = "http://www.wikidata.org/prop/direct/"
 RDFS = "http://www.w3.org/2000/01/rdf-schema#"
+
+
+# ----------------------- filter_graph -----------------------
 
 
 def test_filter_keeps_eu_language_labels() -> None:
@@ -53,11 +69,10 @@ def test_filter_keeps_untagged_literals() -> None:
 
 
 def test_filter_drops_non_entity_subjects() -> None:
-    # flavor=simple emits sitelink cards (subject = wikipedia URL),
-    # an EntityData dataset block (subject = Special:EntityData/Qxxx),
-    # and in flavor=dump it would also emit statement/reference/value
-    # subjects. None of those belong in our graph because we can only
-    # DELETE triples whose subject is the entity on the next re-fetch.
+    # flavor=simple emits sitelink cards (subject = wikipedia URL) and
+    # an EntityData dataset block (subject = Special:EntityData/Qxxx).
+    # None of those belong in our graph because we can only DELETE
+    # triples whose subject is the entity on the next re-fetch.
     g = Graph()
     g.add((URIRef("https://en.wikipedia.org/wiki/Douglas_Adams"),
            URIRef("http://schema.org/about"),
@@ -81,12 +96,14 @@ def test_filter_keeps_mul_literals() -> None:
     assert len(out) == 1
 
 
-def test_sparql_update_replace_uses_named_graph_and_delete_then_insert() -> None:
+# ----------------------- SPARQL UPDATE shape -----------------------
+
+
+def test_sparql_replace_uses_named_graph_and_delete_then_insert() -> None:
     g = Graph()
     g.add((URIRef(f"{WD}Q42"), URIRef(f"{WDT}P31"), URIRef(f"{WD}Q5")))
-    update = _sparql_update_replace("Q42", g)
-    # The graph clause is shared by DELETE and INSERT (WITH + INSERT
-    # DATA into GRAPH) so both target the same named-graph slice.
+    update = _sparql_replace_with_first_chunk("Q42", list(g))
+    # Both clauses target the same named-graph slice.
     assert WIKIDATA_GRAPH in update
     # DELETE must come before INSERT or we'd lose the new triples.
     assert update.index("DELETE") < update.index("INSERT")
@@ -96,17 +113,146 @@ def test_sparql_update_replace_uses_named_graph_and_delete_then_insert() -> None
     assert f"<{WD}Q42> <{WDT}P31> <{WD}Q5>" in update
 
 
-def test_sparql_update_replace_handles_empty_graph() -> None:
-    # If the filter strips everything (a now-empty entity), we still
-    # need the DELETE to run — otherwise stale triples persist.
-    out = _sparql_update_replace("Q42", Graph())
+def test_sparql_replace_handles_empty_chunk() -> None:
+    # Edge: the chunker yielded an empty list. Builder must still
+    # emit a syntactically-valid UPDATE; the DELETE clause does the
+    # work and the INSERT DATA block is just empty.
+    out = _sparql_replace_with_first_chunk("Q42", [])
     assert "DELETE" in out
     assert "INSERT DATA" in out
 
 
-def test_sparql_update_delete_only_for_tombstone() -> None:
-    update = _sparql_update_delete_only("Q42")
+def test_sparql_insert_chunk_has_no_delete() -> None:
+    # Subsequent chunks are pure INSERT — the DELETE happened in the
+    # first UPDATE and replaying it would wipe the work-in-progress.
+    g = Graph()
+    g.add((URIRef(f"{WD}Q42"), URIRef(f"{WDT}P31"), URIRef(f"{WD}Q5")))
+    out = _sparql_insert_chunk(list(g))
+    assert "INSERT DATA" in out
+    assert "DELETE" not in out
+    assert WIKIDATA_GRAPH in out
+
+
+def test_sparql_delete_only_for_tombstone() -> None:
+    update = _sparql_delete_only("Q42")
     assert "DELETE" in update
     assert "INSERT" not in update
     assert WIKIDATA_GRAPH in update
     assert f"<{WD}Q42>" in update
+
+
+# ----------------------- chunker -----------------------
+
+
+def test_chunk_triples_groups_by_size() -> None:
+    g = Graph()
+    for i in range(1250):
+        g.add((URIRef(f"{WD}Q42"), URIRef(f"{WDT}P{i}"), URIRef(f"{WD}Q{i}")))
+    chunks = _chunk_triples(g, 500)
+    assert len(chunks) == 3
+    assert [len(c) for c in chunks] == [500, 500, 250]
+
+
+def test_chunk_triples_empty_graph_yields_empty_list() -> None:
+    assert _chunk_triples(Graph(), 500) == []
+
+
+# ----------------------- write_entity wire behaviour -----------------------
+
+
+def _captured_client(handler: Callable[[httpx.Request], httpx.Response]
+                     ) -> tuple[httpx.Client, list[str]]:
+    """Returns a client whose POSTs we can inspect. The list grows
+    with each request body so the test can assert on counts + shapes."""
+    captured: list[str] = []
+
+    def wrapped(request: httpx.Request) -> httpx.Response:
+        captured.append(request.content.decode())
+        return handler(request)
+    client = httpx.Client(transport=httpx.MockTransport(wrapped))
+    return client, captured
+
+
+def test_write_entity_small_graph_uses_single_combined_update() -> None:
+    g = Graph()
+    g.add((URIRef(f"{WD}Q42"), URIRef(f"{WDT}P31"), URIRef(f"{WD}Q5")))
+    client, captured = _captured_client(
+        lambda _r: httpx.Response(200, content=b""))
+    write_entity("Q42", g, client, "http://v/sparql-auth")
+    assert len(captured) == 1
+    body = captured[0]
+    assert "DELETE" in body and "INSERT+DATA" in body.replace("%20", "+")
+
+
+def test_write_entity_large_graph_chunks_into_multiple_updates(
+    monkeypatch,
+) -> None:
+    # Force a tiny chunk size so we can exercise the chunked path
+    # without building thousands of triples in the test.
+    monkeypatch.setattr(wikidata_writer, "SPARQL_CHUNK_TRIPLES", 2)
+    g = Graph()
+    for i in range(5):  # 5 triples, chunk 2 → 3 chunks
+        g.add((URIRef(f"{WD}Q42"), URIRef(f"{WDT}P{i}"), URIRef(f"{WD}Q{i}")))
+    client, captured = _captured_client(
+        lambda _r: httpx.Response(200, content=b""))
+    write_entity("Q42", g, client, "http://v/sparql-auth")
+    # 3 POSTs: one DELETE+INSERT and two INSERT-only chunks.
+    assert len(captured) == 3
+    first = captured[0]
+    assert "DELETE" in first
+    for rest in captured[1:]:
+        assert "DELETE" not in rest
+        assert "INSERT" in rest
+
+
+def test_write_entity_empty_graph_just_deletes() -> None:
+    client, captured = _captured_client(
+        lambda _r: httpx.Response(200, content=b""))
+    write_entity("Q42", Graph(), client, "http://v/sparql-auth")
+    assert len(captured) == 1
+    assert "DELETE" in captured[0]
+    assert "INSERT" not in captured[0]
+
+
+def test_write_entity_raises_on_500_response() -> None:
+    client, _ = _captured_client(
+        lambda _r: httpx.Response(500, content=b"server boom"))
+    g = Graph()
+    g.add((URIRef(f"{WD}Q42"), URIRef(f"{WDT}P31"), URIRef(f"{WD}Q5")))
+    try:
+        write_entity("Q42", g, client, "http://v/sparql-auth")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "Q42" in str(exc) and "500" in str(exc)
+
+
+def test_write_entity_stops_chunking_when_first_update_fails(
+    monkeypatch,
+) -> None:
+    # SP031 is what we're avoiding — if the first UPDATE still fails
+    # we must NOT keep firing follow-up INSERTs (would leave Virtuoso
+    # in a half-state and waste API time).
+    monkeypatch.setattr(wikidata_writer, "SPARQL_CHUNK_TRIPLES", 2)
+    g = Graph()
+    for i in range(5):
+        g.add((URIRef(f"{WD}Q42"), URIRef(f"{WDT}P{i}"), URIRef(f"{WD}Q{i}")))
+    posts = [0]
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        posts[0] += 1
+        return httpx.Response(400, content=b"SP031")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        write_entity("Q42", g, client, "http://v/sparql-auth")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError:
+        pass
+    # Just the one failing POST, no chunked follow-ups.
+    assert posts[0] == 1
+
+
+def test_write_entity_respects_module_chunk_constant() -> None:
+    # Sanity: the chunk size hasn't drifted from the documented
+    # "stay under SP031" budget.
+    assert SPARQL_CHUNK_TRIPLES <= 1000
+    assert SPARQL_CHUNK_TRIPLES >= 100
