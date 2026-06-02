@@ -111,6 +111,22 @@ def test_sparql_replace_uses_named_graph_and_delete_then_insert() -> None:
     assert ";" in update
     # The new triples appear in the INSERT DATA block.
     assert f"<{WD}Q42> <{WDT}P31> <{WD}Q5>" in update
+    # Must include the big-data-const override so the HTTP endpoint's
+    # silently-prepended `define sql:big-data-const 0` doesn't take
+    # effect (it triggers SR580 on the inline-constant path for
+    # entities whose hash cache has stale entries).
+    assert "define sql:big-data-const 1" in update
+
+
+def test_sparql_replace_override_comes_after_endpoint_prepend_order() -> None:
+    # Order matters: Virtuoso honors the LAST `define <directive>`
+    # for any given directive. The endpoint's prepend is implicit
+    # (we can't see it), but our override must be the FIRST line of
+    # what we send so it lands after that prepend in the parser's
+    # view.
+    update = _sparql_replace_with_first_chunk("Q42", [])
+    first_line = update.splitlines()[0]
+    assert first_line == "define sql:big-data-const 1"
 
 
 def test_sparql_replace_handles_empty_chunk() -> None:
@@ -131,6 +147,10 @@ def test_sparql_insert_chunk_has_no_delete() -> None:
     assert "INSERT DATA" in out
     assert "DELETE" not in out
     assert WIKIDATA_GRAPH in out
+    # The directive override applies to chunks 2..N too — without it
+    # the INSERT-alone path still triggers SR580 for hash-cache
+    # entries left over from previous failed writes.
+    assert out.splitlines()[0] == "define sql:big-data-const 1"
 
 
 def test_sparql_delete_only_for_tombstone() -> None:
@@ -139,6 +159,8 @@ def test_sparql_delete_only_for_tombstone() -> None:
     assert "INSERT" not in update
     assert WIKIDATA_GRAPH in update
     assert f"<{WD}Q42>" in update
+    # And the tombstone path too.
+    assert update.splitlines()[0] == "define sql:big-data-const 1"
 
 
 # ----------------------- chunker -----------------------

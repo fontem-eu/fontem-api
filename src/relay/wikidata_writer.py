@@ -52,6 +52,18 @@ WIKIDATA_ENTITY_PREFIX = "http://www.wikidata.org/entity/"
 # 10k-line ceiling even for triples with long literal values.
 SPARQL_CHUNK_TRIPLES = int(os.environ.get("WIKIDATA_SPARQL_CHUNK", "500"))
 
+# Virtuoso's /sparql-auth endpoint silently prepends
+# ``define sql:big-data-const 0`` before our UPDATE — that variant
+# of the inline-constant path tries to resolve large literal/IRI
+# hashes against pre-existing RDF_OBJ rows, and entities whose
+# previous-write history left stale hash-cache entries blow up with
+# SR580 ("RDF box refers to row with RO_ID = X of table RDF_OBJ,
+# but no such row in the table"). Setting it back to 1 forces the
+# fresh-insertion path that doesn't consult the hash cache. The
+# endpoint's prepend goes first; ours lands after; Virtuoso honors
+# the last define for any given directive.
+_BIG_DATA_CONST_OVERRIDE = "define sql:big-data-const 1\n"
+
 
 def filter_graph(graph: Graph, entity_id: str) -> Graph:
     """Return a new graph containing only triples that describe
@@ -107,6 +119,7 @@ def _sparql_replace_with_first_chunk(entity_id: str, first_chunk) -> str:
     entity_iri = _entity_uri(entity_id)
     nt_body = _serialise_nt(first_chunk)
     return (
+        f"{_BIG_DATA_CONST_OVERRIDE}"
         f"WITH <{WIKIDATA_GRAPH}>\n"
         f"DELETE {{ <{entity_iri}> ?p ?o }}\n"
         f"WHERE  {{ <{entity_iri}> ?p ?o }} ;\n"
@@ -117,7 +130,10 @@ def _sparql_replace_with_first_chunk(entity_id: str, first_chunk) -> str:
 def _sparql_insert_chunk(chunk) -> str:
     """Subsequent INSERT-DATA-only UPDATEs for chunks 2..N."""
     nt_body = _serialise_nt(chunk)
-    return f"INSERT DATA {{ GRAPH <{WIKIDATA_GRAPH}> {{\n{nt_body}\n}} }}"
+    return (
+        f"{_BIG_DATA_CONST_OVERRIDE}"
+        f"INSERT DATA {{ GRAPH <{WIKIDATA_GRAPH}> {{\n{nt_body}\n}} }}"
+    )
 
 
 def _sparql_delete_only(entity_id: str) -> str:
@@ -126,6 +142,7 @@ def _sparql_delete_only(entity_id: str) -> str:
     inside ``write_entity``."""
     entity_iri = _entity_uri(entity_id)
     return (
+        f"{_BIG_DATA_CONST_OVERRIDE}"
         f"WITH <{WIKIDATA_GRAPH}>\n"
         f"DELETE {{ <{entity_iri}> ?p ?o }}\n"
         f"WHERE  {{ <{entity_iri}> ?p ?o }}"
