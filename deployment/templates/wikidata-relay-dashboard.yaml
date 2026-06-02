@@ -22,7 +22,7 @@ data:
       "title": "Wikidata Relay + Consumer Drain",
       "uid": "fontem-wikidata-drain",
       "schemaVersion": 38,
-      "version": 2,
+      "version": 3,
       "refresh": "30s",
       "time": {"from": "now-6h", "to": "now"},
       "timezone": "",
@@ -154,13 +154,26 @@ data:
           "id": 5,
           "type": "timeseries",
           "title": "Dirty queue depth",
-          "description": "Total rows in wikidata.dirty_entities by state. Aggregated across the relay's pod restarts so each state shows as one line.",
-          "gridPos": {"x": 0, "y": 17, "w": 24, "h": 8},
+          "description": "Total rows in wikidata.dirty_entities by state. Aggregated across the relay's pod restarts so each state shows as one line. Hover anywhere on the chart to read the instant value.",
+          "gridPos": {"x": 0, "y": 17, "w": 12, "h": 8},
           "fieldConfig": {
             "defaults": {
               "unit": "short",
-              "decimals": 0
+              "decimals": 0,
+              "custom": {
+                "axisLabel": "entities in queue",
+                "axisPlacement": "auto",
+                "axisGridShow": true,
+                "axisBorderShow": true,
+                "showPoints": "auto",
+                "lineWidth": 2,
+                "fillOpacity": 8
+              }
             }
+          },
+          "options": {
+            "tooltip": {"mode": "multi", "sort": "desc"},
+            "legend": {"showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"]}
           },
           "targets": [
             {
@@ -172,6 +185,49 @@ data:
               "expr": "sum(wikidata_dirty_entities_total)",
               "refId": "B",
               "legendFormat": "total"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Net drain rate (drain success − arrival, entities/sec)",
+          "description": "Positive = queue is shrinking, the consumer is outpacing relay arrivals. Negative = backlog is growing. Zero line = steady-state, drain matches arrival. Same 5-minute rate window as the other panels so the lines line up. Hover to read the instant value.",
+          "gridPos": {"x": 12, "y": 17, "w": 12, "h": 8},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 2,
+              "custom": {
+                "axisLabel": "net drain (entities / sec)",
+                "axisPlacement": "auto",
+                "axisGridShow": true,
+                "axisBorderShow": true,
+                "showPoints": "auto",
+                "lineWidth": 2,
+                "fillOpacity": 12,
+                "gradientMode": "scheme",
+                "thresholdsStyle": {"mode": "line"}
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "red", "value": null},
+                  {"color": "green", "value": 0}
+                ]
+              },
+              "color": {"mode": "thresholds"}
+            }
+          },
+          "options": {
+            "tooltip": {"mode": "single"},
+            "legend": {"showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "mean"]}
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(wikidata_consumer_entities_total{outcome=~\"written|tombstoned|redirected\"}[5m])) - sum(rate(wikidata_relay_events_total{outcome=~\"dirty|deleted\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "net drain"
             }
           ]
         },
