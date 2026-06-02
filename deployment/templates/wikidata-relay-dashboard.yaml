@@ -1,14 +1,13 @@
 {{/*
 Grafana dashboard for the Wikidata relay + consumer drain. Picked
 up by the kube-prometheus-stack Grafana sidecar via the
-`grafana_dashboard: "1"` label. Renders three panels:
+`grafana_dashboard: "1"` label.
 
-  1. New dirty rate   — rate(wikidata_relay_events_total{outcome="dirty"}[5m])
-  2. Consumer process rate — rate(wikidata_consumer_entities_total{outcome=~"written|tombstoned|redirected"}[5m])
-  3. Dirty queue depth  — wikidata_dirty_entities_total
-
-Plus the cursor lag as a small instant-value box so we can tell
-at a glance whether the relay is still real-time.
+All time-series queries wrap their rate() in sum by (outcome) /
+sum by (state) so that pod restarts (each restart creates a new
+`instance` label and Prometheus retains the old series until the
+retention window expires) don't multiply the lines on the chart.
+The "total" lines are simple sum() with no `by`.
 */}}
 apiVersion: v1
 kind: ConfigMap
@@ -23,7 +22,7 @@ data:
       "title": "Wikidata Relay + Consumer Drain",
       "uid": "fontem-wikidata-drain",
       "schemaVersion": 38,
-      "version": 1,
+      "version": 2,
       "refresh": "30s",
       "time": {"from": "now-6h", "to": "now"},
       "timezone": "",
@@ -35,8 +34,8 @@ data:
           "id": 1,
           "type": "timeseries",
           "title": "Arrival vs Drain (entities/sec)",
-          "description": "Net flow on wikidata.dirty_entities. Arrival is the relay's filtered SSE rate; drain is the consumer's success-outcomes rate.",
-          "gridPos": {"x": 0, "y": 0, "w": 18, "h": 9},
+          "description": "Rate of work entering and leaving wikidata.dirty_entities. Arrival = relay-side counter (post-filter); drain = consumer-side counter (sum of successful outcomes). Each metric is sum across pod restarts.",
+          "gridPos": {"x": 0, "y": 0, "w": 24, "h": 9},
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -46,36 +45,48 @@ data:
           },
           "targets": [
             {
-              "expr": "rate(wikidata_relay_events_total{outcome=\"dirty\"}[5m])",
+              "expr": "sum(rate(wikidata_relay_events_total{outcome=\"dirty\"}[5m]))",
               "refId": "A",
               "legendFormat": "arrival (dirty)"
             },
             {
-              "expr": "rate(wikidata_relay_events_total{outcome=\"deleted\"}[5m])",
+              "expr": "sum(rate(wikidata_relay_events_total{outcome=\"deleted\"}[5m]))",
               "refId": "B",
               "legendFormat": "arrival (deleted)"
             },
             {
-              "expr": "sum(rate(wikidata_consumer_entities_total{outcome=~\"written|tombstoned|redirected\"}[5m]))",
+              "expr": "sum(rate(wikidata_relay_events_total{outcome=~\"dirty|deleted\"}[5m]))",
               "refId": "C",
+              "legendFormat": "arrival (total)"
+            },
+            {
+              "expr": "sum(rate(wikidata_consumer_entities_total{outcome=~\"written|tombstoned|redirected\"}[5m]))",
+              "refId": "D",
               "legendFormat": "drain (success)"
             },
             {
-              "expr": "rate(wikidata_consumer_entities_total{outcome=\"errors\"}[5m])",
-              "refId": "D",
+              "expr": "sum(rate(wikidata_consumer_entities_total{outcome=\"errors\"}[5m]))",
+              "refId": "E",
               "legendFormat": "drain (errors)"
+            },
+            {
+              "expr": "sum(rate(wikidata_consumer_entities_total[5m]))",
+              "refId": "F",
+              "legendFormat": "drain (total)"
             }
           ]
         },
         {
           "id": 2,
-          "type": "stat",
-          "title": "Cursor lag",
-          "description": "now() - last_event_ts on the relay's resume cursor. Should stay under 60s under normal load.",
-          "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+          "type": "timeseries",
+          "title": "Cursor lag (seconds behind real-time)",
+          "description": "How many seconds the relay's resume cursor is behind Wikidata's wall-clock now(). Numbers near 0 = real-time. A persistent rise means the relay can't keep up or has stalled. A short spike during the daily Wikidata maintenance window is normal.",
+          "gridPos": {"x": 0, "y": 9, "w": 12, "h": 8},
           "fieldConfig": {
             "defaults": {
               "unit": "s",
+              "min": 0,
+              "custom": {"axisLabel": "seconds behind real-time", "lineWidth": 2, "fillOpacity": 10},
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -88,17 +99,18 @@ data:
           },
           "targets": [
             {
-              "expr": "wikidata_relay_cursor_lag_seconds",
-              "refId": "A"
+              "expr": "max(wikidata_relay_cursor_lag_seconds)",
+              "refId": "A",
+              "legendFormat": "lag"
             }
           ]
         },
         {
           "id": 3,
           "type": "stat",
-          "title": "Total in queue",
-          "description": "Current row count in wikidata.dirty_entities.",
-          "gridPos": {"x": 18, "y": 4, "w": 6, "h": 5},
+          "title": "Total in queue (right now)",
+          "description": "Current row count in wikidata.dirty_entities, summed across refetch + tombstone.",
+          "gridPos": {"x": 12, "y": 9, "w": 6, "h": 4},
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -114,10 +126,36 @@ data:
         },
         {
           "id": 4,
+          "type": "stat",
+          "title": "Cursor lag (right now)",
+          "description": "Snapshot of the lag at the moment of refresh. Below 60s = healthy, above 300s = the relay is falling behind.",
+          "gridPos": {"x": 18, "y": 9, "w": 6, "h": 4},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "green", "value": null},
+                  {"color": "yellow", "value": 60},
+                  {"color": "red", "value": 300}
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "max(wikidata_relay_cursor_lag_seconds)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
           "type": "timeseries",
           "title": "Dirty queue depth",
-          "description": "Total rows in wikidata.dirty_entities by state.",
-          "gridPos": {"x": 0, "y": 9, "w": 24, "h": 8},
+          "description": "Total rows in wikidata.dirty_entities by state. Aggregated across the relay's pod restarts so each state shows as one line.",
+          "gridPos": {"x": 0, "y": 17, "w": 24, "h": 8},
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -126,18 +164,23 @@ data:
           },
           "targets": [
             {
-              "expr": "wikidata_dirty_entities_total",
+              "expr": "sum by (state) (wikidata_dirty_entities_total)",
               "refId": "A",
               "legendFormat": "{{`{{state}}`}}"
+            },
+            {
+              "expr": "sum(wikidata_dirty_entities_total)",
+              "refId": "B",
+              "legendFormat": "total"
             }
           ]
         },
         {
-          "id": 5,
+          "id": 6,
           "type": "timeseries",
-          "title": "Consumer outcomes (per second)",
-          "description": "Per-outcome breakdown of consumer batches. `written`+`redirected`+`tombstoned` is the useful drain, `not_found` and `errors` represent retries on the next run.",
-          "gridPos": {"x": 0, "y": 17, "w": 24, "h": 8},
+          "title": "Consumer outcomes (entities/sec)",
+          "description": "Per-outcome rate. `written + redirected + tombstoned` is the useful drain. `not_found_left_pending` rows stay in the queue for the next run. `errors` likewise — usually transient 429s.",
+          "gridPos": {"x": 0, "y": 25, "w": 24, "h": 8},
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -146,7 +189,7 @@ data:
           },
           "targets": [
             {
-              "expr": "rate(wikidata_consumer_entities_total[5m])",
+              "expr": "sum by (outcome) (rate(wikidata_consumer_entities_total[5m]))",
               "refId": "A",
               "legendFormat": "{{`{{outcome}}`}}"
             }
