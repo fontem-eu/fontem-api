@@ -19,6 +19,8 @@ its own module and Atlas will drop the import.
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.atlas_api.schemas import EtlRun
@@ -36,18 +38,19 @@ def _etl_runs_source(request: Request):
     return src
 
 
-@router.get("/etl-runs", response_model=list[EtlRun])
+@router.get(
+    "/etl-runs",
+    responses={503: {"description": "events store unavailable"}},
+)
 def list_etl_runs(
     request: Request,
-    cronjob_name: str | None = Query(
-        default=None,
+    cronjob_name: Annotated[str | None, Query(
         description="filter to a single cronjob (e.g. etl-gleif)",
-    ),
-    status: str | None = Query(
-        default=None,
+    )] = None,
+    status: Annotated[str | None, Query(
         description="filter to running | success | failed",
-    ),
-    limit: int = Query(default=50, ge=1, le=500),
+    )] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> list[EtlRun]:
     """Last `limit` ETL CronJob runs across the cluster.
 
