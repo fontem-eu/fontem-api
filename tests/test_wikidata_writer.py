@@ -96,6 +96,36 @@ def test_filter_keeps_mul_literals() -> None:
     assert len(out) == 1
 
 
+GEO_WKT = "http://www.opengis.net/ont/geosparql#wktLiteral"
+P625 = f"{WDT}P625"
+
+
+def test_filter_keeps_earth_wkt_coords() -> None:
+    # Earth coords have no globe prefix — Wikidata's default.
+    g = Graph()
+    g.add((URIRef(f"{WD}Q243"), URIRef(P625),
+           Literal("Point(2.294479 48.858296)",
+                   datatype=URIRef(GEO_WKT))))
+    out = filter_graph(g, "Q243")
+    assert len(out) == 1
+
+
+def test_filter_drops_extraterrestrial_wkt_coords() -> None:
+    # Olympus Mons on Mars: globe IRI prefix in the lexical form
+    # → Virtuoso rejects with RDFGE error → entity stuck dirty forever.
+    g = Graph()
+    g.add((URIRef(f"{WD}Q520"), URIRef(P625),
+           Literal("<http://www.wikidata.org/entity/Q111> Point(226.2 18.65)",
+                   datatype=URIRef(GEO_WKT))))
+    g.add((URIRef(f"{WD}Q520"), URIRef(f"{RDFS}label"),
+           Literal("Olympus Mons", lang="en")))
+    out = filter_graph(g, "Q520")
+    # Drop the WKT, keep the label.
+    assert len(out) == 1
+    only = list(out)[0]
+    assert only[1] == URIRef(f"{RDFS}label")
+
+
 # ----------------------- SPARQL UPDATE shape -----------------------
 
 

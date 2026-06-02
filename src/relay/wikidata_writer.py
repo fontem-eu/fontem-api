@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 WIKIDATA_GRAPH = "https://fontem.eu/graph/wikidata"
 WIKIDATA_ENTITY_PREFIX = "http://www.wikidata.org/entity/"
+GEO_WKT_DATATYPE = "http://www.opengis.net/ont/geosparql#wktLiteral"
 
 # Max triples per INSERT DATA call. Each triple expands to a handful
 # of SQL lines in Virtuoso; 500 stays comfortably under the SP031
@@ -85,6 +86,19 @@ def filter_graph(graph: Graph, entity_id: str) -> Graph:
         if isinstance(obj, Literal):
             lang = obj.language
             if lang is not None and lang.lower() not in EU_LANGUAGES:
+                continue
+            # Wikidata serialises extraterrestrial coordinates as
+            # ``<http://www.wikidata.org/entity/Q111> Point(lon lat)``
+            # (Q111=Mars, Q405=Moon, Q308=Mercury, ...) — Earth coords
+            # have no globe prefix because Earth is the default. Virtuoso's
+            # GeoSPARQL parser only accepts pure WKT for Earth CRS and
+            # rejects the prefixed form with ``RDFGE: RDF box with a
+            # geometry RDF type and a non-geometry content`` → entity
+            # gets stuck in dirty_entities forever. Drop these triples;
+            # we have no use for off-world coordinates in the EU-scoped
+            # graph anyway.
+            if str(obj.datatype) == GEO_WKT_DATATYPE \
+                    and str(obj).startswith("<"):
                 continue
         out.add((subj, pred, obj))
     return out
