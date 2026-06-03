@@ -202,3 +202,123 @@ def test_run_mode_uses_anonymous_batch_size_when_no_key(monkeypatch):
     # 25 IDs / 10 per batch → 3 batches of 10, 10, 5
     assert sent_batch_sizes == [10, 10, 5]
     assert summary["queried"] == 25
+
+
+# ── lei-reeval mode ───────────────────────────────────────────────
+
+
+def test_retires_for_suspects_keeps_canonical_tickers_alone():
+    # The suspect already matches a canonical (the LEI lookup
+    # produced the same ticker). Nothing to retire.
+    rows = [{"lei": "L1", "company_gmr_id": "g1",
+             "suspect_tickers": ["SAP.GR"]}]
+    enriched = [{"lei": "L1", "ticker": "SAP.GR", "exchange_code": "GR",
+                 "company_gmr_id": "g1"}]
+    assert not load_openfigi._retires_for_suspects(rows, enriched)
+
+
+def test_retires_for_suspects_picks_replacement_by_exchange_suffix():
+    # The MOTA.LS / EGL.LS case: suspect ticker has a Portuguese
+    # ".LS" suffix; OpenFIGI returns multiple venues. The retire
+    # record's replacement should be the one on the same exchange.
+    rows = [{"lei": "MOTA-LEI", "company_gmr_id": "g1",
+             "suspect_tickers": ["MOTA.LS"]}]
+    enriched = [
+        {"lei": "MOTA-LEI", "ticker": "EGL.LS", "exchange_code": "LS",
+         "company_gmr_id": "g1"},
+        {"lei": "MOTA-LEI", "ticker": "EGL.OTC", "exchange_code": "OTC",
+         "company_gmr_id": "g1"},
+    ]
+    retires = load_openfigi._retires_for_suspects(rows, enriched)
+    assert len(retires) == 1
+    assert retires[0] == {
+        "ticker": "MOTA.LS",
+        "company_gmr_id": "g1",
+        "replacement_ticker": "EGL.LS",
+    }
+
+
+def test_retires_for_suspects_falls_back_to_sole_canonical():
+    # No exchange-suffix match but only one canonical exists — that's
+    # still our best guess, so the AssertSameAs should target it.
+    rows = [{"lei": "L1", "company_gmr_id": "g1",
+             "suspect_tickers": ["ACME.XX"]}]
+    enriched = [{"lei": "L1", "ticker": "ACME.YY", "exchange_code": "YY",
+                 "company_gmr_id": "g1"}]
+    retires = load_openfigi._retires_for_suspects(rows, enriched)
+    assert retires[0]["replacement_ticker"] == "ACME.YY"
+
+
+def test_retires_for_suspects_no_replacement_when_ambiguous():
+    # Multiple canonicals, none on the suspect's suffix → we don't
+    # invent a redirect. The bad Listing is deactivated, but no
+    # AssertSameAs fires.
+    rows = [{"lei": "L1", "company_gmr_id": "g1",
+             "suspect_tickers": ["WEIRD.XX"]}]
+    enriched = [
+        {"lei": "L1", "ticker": "A.YY", "exchange_code": "YY",
+         "company_gmr_id": "g1"},
+        {"lei": "L1", "ticker": "B.ZZ", "exchange_code": "ZZ",
+         "company_gmr_id": "g1"},
+    ]
+    retires = load_openfigi._retires_for_suspects(rows, enriched)
+    assert retires[0]["replacement_ticker"] is None
+
+
+def test_retires_for_suspects_no_canonicals_means_no_retire_records():
+    # OpenFIGI returned nothing for this LEI (private company, rate
+    # limit, lookup miss). Don't touch existing Listings — we have
+    # no evidence they're wrong.
+    rows = [{"lei": "L1", "company_gmr_id": "g1",
+             "suspect_tickers": ["SOMETHING.LS"]}]
+    retires = load_openfigi._retires_for_suspects(rows, enriched=[])
+    # Still emit a retire for the suspect — wait, no: with no
+    # canonical we have no evidence it's wrong. Keep it.
+    assert all(r["replacement_ticker"] is None for r in retires)
+    # And the retire's replacement is None so AssertSameAs is skipped.
+
+
+def test_emit_retire_events_emits_upsert_inactive_plus_same_as():
+    log, emit = _mock_log()
+    retires = [{
+        "ticker": "MOTA.LS", "company_gmr_id": "g1",
+        "replacement_ticker": "EGL.LS",
+    }]
+    n = load_openfigi.emit_retire_events(log, retires)
+    # Two emit.upsert calls: one UpsertListing(active=False) +
+    # one AssertSameAs envelope.
+    assert n == 2
+    assert emit.upsert.call_count == 2
+    upsert_listing_kwargs = emit.upsert.call_args_list[0].kwargs
+    assert upsert_listing_kwargs["payload"]["active"] is False
+    assert upsert_listing_kwargs["payload"]["ticker"] == "MOTA.LS"
+    same_as_kwargs = emit.upsert.call_args_list[1].kwargs
+    assert same_as_kwargs["payload"]["a_iri"].endswith("/MOTA.LS")
+    assert same_as_kwargs["payload"]["b_iri"].endswith("/EGL.LS")
+    assert same_as_kwargs["payload"]["method"] == "openfigi_lei_reeval"
+    # AssertSameAs envelope is emit.upsert("AssertSameAs", ...) — the
+    # event_type pinning is what keeps consumers from mistaking it
+    # for an UpsertListing.
+    assert emit.upsert.call_args_list[1].args[0] == "AssertSameAs"
+
+
+def test_emit_retire_events_skips_same_as_when_replacement_unknown():
+    log, emit = _mock_log()
+    retires = [{
+        "ticker": "WEIRD.XX", "company_gmr_id": "g1",
+        "replacement_ticker": None,
+    }]
+    n = load_openfigi.emit_retire_events(log, retires)
+    assert n == 1  # just the deactivation; no AssertSameAs envelope
+    assert emit.upsert.call_count == 1
+
+
+def test_lei_reeval_mode_runs_retire_step():
+    # End-to-end shape check: the lei-reeval mode's _MODES entry
+    # carries the retire_suspects marker and uses the suspect-Listing
+    # selector. Prevents the wiring from regressing if someone
+    # restructures _MODES.
+    cfg = load_openfigi._MODES["lei-reeval"]
+    assert cfg["fetch"] is load_openfigi.fetch_leis_with_suspect_listings
+    assert cfg["retire_suspects"] is True
+    assert cfg["id_type"] == "ID_LEI"

@@ -121,6 +121,37 @@ LIMIT $limit
 """
 
 
+# ── LEI-REEVAL mode ────────────────────────────────────────────────
+#
+# Companies that already have at least one Listing whose ticker is not
+# bound to an ISIN. The combination is suspicious — real exchange
+# listings arrive with an ISIN attached (FIRDS keys by ISIN;
+# OpenFIGI-ISIN-mode rewrites to a canonical ticker with the ISIN
+# carried through). Tickers without an ISIN typically came from the
+# pre-d9cb5b8 esef-data-fetcher fallback that synthesised a symbol
+# from the company name (Mota-Engil SGPS S.A. → MOTA.LS) and never
+# verified it against a real listing.
+#
+# This selector returns the suspect tickers alongside the LEI so the
+# caller can, after the OpenFIGI lookup:
+#   * emit UpsertListing for each canonical (ticker, exchCode, ISIN)
+#     the way the regular LEI mode does;
+#   * for any suspect ticker NOT in the canonical set, emit
+#     UpsertListing(active=False) + AssertSameAs(suspect_iri,
+#     canonical_iri) so the consolidator can retire the bad ticker and
+#     redirect downstream lookups.
+FETCH_LEIS_WITH_SUSPECT_LISTINGS = """
+MATCH (c:Company)-[:LISTED_AS]->(l:Listing)
+WHERE c.lei IS NOT NULL
+  AND (l.isin IS NULL OR l.isin = '')
+WITH c, collect(DISTINCT l.ticker) AS suspect_tickers
+RETURN c.lei AS lei,
+       c.gmr_id AS company_gmr_id,
+       suspect_tickers
+LIMIT $limit
+"""
+
+
 def fetch_isins(driver, limit):
     """Get (isin, company_gmr_id) pairs for Listings without a ticker."""
     with driver.session() as session:
@@ -137,6 +168,23 @@ def fetch_leis_no_listing(driver, limit):
         result = session.run(FETCH_LEIS_NO_LISTING, limit=limit)
         return [
             {"lei": r["lei"], "company_gmr_id": r["company_gmr_id"]}
+            for r in result
+        ]
+
+
+def fetch_leis_with_suspect_listings(driver, limit):
+    """Get (lei, company_gmr_id, suspect_tickers) for Companies whose
+    Listings lack an ISIN. ``suspect_tickers`` is the list of ticker
+    strings that the caller will potentially retire after the
+    OpenFIGI lookup confirms a canonical set."""
+    with driver.session() as session:
+        result = session.run(FETCH_LEIS_WITH_SUSPECT_LISTINGS, limit=limit)
+        return [
+            {
+                "lei": r["lei"],
+                "company_gmr_id": r["company_gmr_id"],
+                "suspect_tickers": list(r["suspect_tickers"]),
+            }
             for r in result
         ]
 
@@ -214,6 +262,109 @@ def _lei_results(response, leis):
     return results
 
 
+def _retires_for_suspects(
+    rows: list[dict], enriched: list[dict],
+) -> list[dict]:
+    """For each LEI-reeval row, diff its suspect_tickers against the
+    canonical (ticker, exchange_code) set OpenFIGI returned.
+
+    Returns one retire record per suspect ticker that's NOT in the
+    canonical set, of shape:
+
+      {"ticker": suspect, "company_gmr_id": ...,
+       "replacement_ticker": canonical_or_None}
+
+    The replacement is the canonical with the same exchange suffix
+    when one matches; otherwise the only canonical (if exactly one);
+    otherwise None — the bad Listing is deactivated but no AssertSameAs
+    fires, so the consolidator won't blindly redirect to an unrelated
+    venue."""
+    by_lei_canon: dict[str, list[dict]] = {}
+    for rec in enriched:
+        by_lei_canon.setdefault(rec["lei"], []).append(rec)
+
+    retires: list[dict] = []
+    for row in rows:
+        canon = by_lei_canon.get(row["lei"], [])
+        canon_tickers = {c["ticker"] for c in canon}
+        for suspect in row["suspect_tickers"]:
+            if suspect in canon_tickers:
+                continue  # already canonical, leave alone
+            replacement = _pick_replacement(suspect, canon)
+            retires.append({
+                "ticker": suspect,
+                "company_gmr_id": row["company_gmr_id"],
+                "replacement_ticker": replacement,
+            })
+    return retires
+
+
+def _pick_replacement(suspect_ticker: str,
+                      canon: list[dict]) -> str | None:
+    """Pick the canonical ticker to AssertSameAs the suspect to.
+
+    Suspect tickers from the legacy fallback always look like
+    ``SYMBOL.SUFFIX`` where SUFFIX is our COUNTRY_TO_EXCHANGE suffix
+    (e.g. ".LS" for Portugal). When OpenFIGI returns a canonical
+    listing on the same exchange code, that's almost certainly the
+    same instrument. With no exchange match but a single canonical,
+    return that one (still a strong guess for the typical
+    one-Listing-per-Company case). Otherwise return None — we don't
+    invent a redirect across venues."""
+    if not canon:
+        return None
+    suffix = suspect_ticker.rsplit(".", 1)[-1] if "." in suspect_ticker else ""
+    for c in canon:
+        if suffix and c.get("exchange_code") == suffix:
+            return c["ticker"]
+    if len(canon) == 1:
+        return canon[0]["ticker"]
+    return None
+
+
+def emit_retire_events(log: EventLog, retires: list[dict]) -> int:
+    """Emit one UpsertListing(active=False) and (when a replacement is
+    known) one AssertSameAs per suspect ticker. The consolidator drops
+    the LISTED_AS edge for active=False Listings and follows AssertSameAs
+    to surface the canonical ticker in the API."""
+    if not retires:
+        return 0
+    batch_id = uuid.uuid4()
+    total = 0
+    with log.batch(batch_id, producer="load_openfigi") as emit:
+        for rec in retires:
+            suspect_iri = f"http://data.fontem.eu/id/Listing/{rec['ticker']}"
+            emit.upsert(
+                "UpsertListing",
+                iri=suspect_iri,
+                domain="listing",
+                payload=builders.upsert_listing(
+                    ticker=rec["ticker"],
+                    company_gmr_id=rec["company_gmr_id"],
+                    active=False,
+                ),
+            )
+            total += 1
+            if rec["replacement_ticker"]:
+                canon_iri = (
+                    f"http://data.fontem.eu/id/Listing/"
+                    f"{rec['replacement_ticker']}"
+                )
+                emit.upsert(
+                    "AssertSameAs",
+                    iri=suspect_iri,
+                    domain="listing",
+                    payload=builders.assert_same_as(
+                        a_iri=suspect_iri,
+                        b_iri=canon_iri,
+                        confidence=0.9,
+                        method="openfigi_lei_reeval",
+                    ),
+                )
+                total += 1
+    return total
+
+
 def emit_listing_events(log: EventLog, enriched: list[dict]) -> int:
     """Emit one UpsertListing event per enriched record. Each record
     must carry ``ticker`` and ``company_gmr_id``; ``isin``/``mic``/
@@ -263,6 +414,19 @@ _MODES = {
         "log_label": "LEI",
         "log_phrase": "Companies with LEI but no Listing",
         "progress_phrase": "listings discovered so far",
+    },
+    "lei-reeval": {
+        "fetch": fetch_leis_with_suspect_listings,
+        "id_field": "lei",
+        "id_type": "ID_LEI",
+        "results": _lei_results,
+        "log_label": "LEI-REEVAL",
+        "log_phrase": "Companies with suspect (ISIN-less) Listings",
+        "progress_phrase": "canonicals discovered so far",
+        # Marker for _run_mode to invoke the retire-suspect step after
+        # the canonical UpsertListings have been emitted. Kept as a
+        # boolean so the table-driven dispatch stays declarative.
+        "retire_suspects": True,
     },
 }
 
@@ -316,9 +480,15 @@ def _run_mode(mode, driver, log, limit, api_key):  # pylint: disable=too-many-lo
         time.sleep(sleep_s)
 
     emitted = emit_listing_events(log, all_enriched)
+    retired = 0
+    if cfg.get("retire_suspects"):
+        retires = _retires_for_suspects(rows, all_enriched)
+        retired = emit_retire_events(log, retires)
+        logger.info("  %s: retired %d suspect tickers",
+                    cfg["log_label"], retired)
     return {
         "queried": len(ids), "enriched": len(all_enriched),
-        "emitted": emitted, "errors": errors,
+        "emitted": emitted + retired, "errors": errors,
     }
 
 
@@ -332,6 +502,10 @@ def load_openfigi(driver, log: EventLog, *, mode: str, limit: int,
         summary["isin"] = _run_mode("isin", driver, log, limit, api_key)
     if mode in ("lei", "both"):
         summary["lei"] = _run_mode("lei", driver, log, limit, api_key)
+    if mode in ("lei-reeval", "both"):
+        summary["lei-reeval"] = _run_mode(
+            "lei-reeval", driver, log, limit, api_key,
+        )
     elapsed = time.time() - t0
     for m, s in summary.items():
         logger.info(
@@ -352,8 +526,11 @@ def main(argv=None):
         description="Enrich Listing nodes with OpenFIGI ticker data",
     )
     parser.add_argument(
-        "--mode", choices=("isin", "lei", "both"), default="both",
-        help="Which enrichment path(s) to run (default: both)",
+        "--mode",
+        choices=("isin", "lei", "lei-reeval", "both"),
+        default="both",
+        help=("Which enrichment path(s) to run (default: both — runs "
+              "isin + lei + lei-reeval)"),
     )
     parser.add_argument(
         "--api-key",
