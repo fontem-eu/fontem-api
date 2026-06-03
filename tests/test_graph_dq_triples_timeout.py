@@ -139,6 +139,6 @@ def test_triples_stats_predicate_and_class_limit_kwargs_trim_per_graph_lists():
     dq = _make_dq(virtuoso=virtuoso)
     result = dq.get_triples_stats(predicate_limit=2, class_limit=1)
 
-    [graph] = result["graphs"]
+    [graph] = result["graphs"]  # pylint: disable=unbalanced-tuple-unpacking
     assert len(graph["top_predicates"]) == 2
     assert len(graph["classes"]) == 1

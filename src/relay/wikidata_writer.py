@@ -45,8 +45,11 @@ from src.relay.eu_languages import EU_LANGUAGES
 logger = logging.getLogger(__name__)
 
 WIKIDATA_GRAPH = "https://fontem.eu/graph/wikidata"
-WIKIDATA_ENTITY_PREFIX = "http://www.wikidata.org/entity/"
-GEO_WKT_DATATYPE = "http://www.opengis.net/ont/geosparql#wktLiteral"
+# Both constants below are RDF IRIs (Wikidata entity namespace + OGC
+# GeoSPARQL datatype) — not network endpoints. Schemes are spec-
+# defined.
+WIKIDATA_ENTITY_PREFIX = "http://www.wikidata.org/entity/"  # NOSONAR
+GEO_WKT_DATATYPE = "http://www.opengis.net/ont/geosparql#wktLiteral"  # NOSONAR
 
 # Max triples per INSERT DATA call. Each triple expands to a handful
 # of SQL lines in Virtuoso; 500 stays comfortably under the SP031

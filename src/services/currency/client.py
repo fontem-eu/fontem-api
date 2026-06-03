@@ -34,7 +34,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = os.environ.get(
     "CURRENCY_SERVICE_URL",
-    "http://fontem-currency.currency-service.svc.cluster.local",
+    # In-cluster service-to-service traffic is mTLS-secured at the
+    # linkerd sidecar layer; the in-cluster scheme is `http` because
+    # the encryption happens transparently below the app socket.
+    "http://fontem-currency.currency-service.svc.cluster.local",  # NOSONAR
 )
 DEFAULT_TIMEOUT_S = float(os.environ.get("CURRENCY_SERVICE_TIMEOUT_S", "10"))
 

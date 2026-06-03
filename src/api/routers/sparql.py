@@ -165,21 +165,24 @@ def _envelope_for(value) -> dict:
     int/float; this rebuilds the envelope so the in-app editor + any
     standard SPARQL client can render the response uniformly.
     """
+    # The XSD datatype URIs below are SPARQL 1.1 spec-defined IRIs,
+    # not endpoints we connect to. The W3C registers them as `http://`
+    # — changing the scheme would break every standard SPARQL client.
     if isinstance(value, bool):
         return {
             "type": "literal",
             "value": "true" if value else "false",
-            "datatype": "http://www.w3.org/2001/XMLSchema#boolean",
+            "datatype": "http://www.w3.org/2001/XMLSchema#boolean",  # NOSONAR
         }
     if isinstance(value, int):
         return {
             "type": "literal", "value": str(value),
-            "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+            "datatype": "http://www.w3.org/2001/XMLSchema#integer",  # NOSONAR
         }
     if isinstance(value, float):
         return {
             "type": "literal", "value": str(value),
-            "datatype": "http://www.w3.org/2001/XMLSchema#decimal",
+            "datatype": "http://www.w3.org/2001/XMLSchema#decimal",  # NOSONAR
         }
     if isinstance(value, str) and "://" in value:
         return {"type": "uri", "value": value}

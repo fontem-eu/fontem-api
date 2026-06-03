@@ -116,8 +116,12 @@ def _node_to_panel(cls: str, node: dict[str, Any]) -> dict[str, Any]:  # pylint:
         or ""
     )
 
+    # `iri` is the canonical RDF identifier for the entity in the
+    # knowledge graph — a stable IRI, not a URL we fetch. The W3C-
+    # recommended scheme for entity IRIs is `http://`.
+    iri = f"http://data.fontem.eu/id/{cls}/{node.get('gmr_id', '')}"  # NOSONAR
     return {
-        "iri": f"http://data.fontem.eu/id/{cls}/{node.get('gmr_id', '')}",
+        "iri": iri,
         "class": cls,
         "label": label,
         "facts": facts,

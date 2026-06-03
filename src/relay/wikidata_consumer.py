@@ -248,7 +248,7 @@ def run_batch(database_url: str, sparql_url: str,  # pylint: disable=too-many-lo
     return counts
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=unused-argument
+def main() -> int:
     """Entry point for the CronJob pod. Exits 0 even on per-entity
     failures so Kubernetes doesn't escalate to backoff — the next
     cron tick will retry the leftover rows."""

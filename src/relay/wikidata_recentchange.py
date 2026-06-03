@@ -220,7 +220,84 @@ def advance_cursor(
     conn.commit()
 
 
-def stream_loop(database_url: str) -> None:  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
+@dataclass
+class _BatchCounters:
+    """Per-batch outcome counters between cursor advances."""
+
+    pending_n: int = 0
+    dirty_n: int = 0
+    deleted_n: int = 0
+    ignored_n: int = 0
+
+    def bump(self, outcome: str) -> None:
+        self.pending_n += 1
+        if outcome == "dirty":
+            self.dirty_n += 1
+        elif outcome == "deleted":
+            self.deleted_n += 1
+        else:
+            self.ignored_n += 1
+
+    def reset(self) -> None:
+        self.pending_n = 0
+        self.dirty_n = 0
+        self.deleted_n = 0
+        self.ignored_n = 0
+
+
+def _apply_event(ev: StreamEvent, conn) -> str:
+    """Apply one parsed event and return its outcome label.
+
+    The cursor advances on every wikidatawiki event, even ignored —
+    an ignore-decision is a positive verdict, not an absence of one."""
+    if ev.entity_id is None:
+        return "ignored"
+    if ev.action is EventAction.DELETED:
+        mark_deleted(conn, ev.entity_id, ev.event_ts)
+        return "deleted"
+    if ev.action is EventAction.DIRTY:
+        mark_dirty(conn, ev.entity_id, ev.event_ts, ev.comment_kind)
+        return "dirty"
+    return "ignored"
+
+
+def _drain_stream(conn, resp: httpx.Response) -> None:
+    """Drain SSE events from `resp` into `conn` until the stream
+    closes naturally. Checkpoints the cursor every CHECKPOINT_BATCH
+    events; flushes whatever's left on close."""
+    counters = _BatchCounters()
+    pending_id: str | None = None
+    pending_ts: datetime | None = None
+
+    for raw in iter_sse_data_lines(resp.iter_lines()):
+        ev = parse_event(raw)
+        if ev is None:
+            continue
+
+        pending_id = ev.event_id
+        pending_ts = ev.event_ts
+        outcome = _apply_event(ev, conn)
+        metrics.EVENTS_TOTAL.labels(outcome=outcome).inc()
+        counters.bump(outcome)
+
+        if counters.pending_n >= CHECKPOINT_BATCH:
+            assert pending_ts is not None
+            advance_cursor(conn, pending_id, pending_ts, counters.pending_n)
+            logger.info(
+                "checkpoint: total=%d dirty=%d deleted=%d ignored=%d cursor=%s",
+                counters.pending_n, counters.dirty_n,
+                counters.deleted_n, counters.ignored_n,
+                pending_ts.isoformat(),
+            )
+            pending_id = None
+            pending_ts = None
+            counters.reset()
+
+    if counters.pending_n and pending_ts is not None:
+        advance_cursor(conn, pending_id, pending_ts, counters.pending_n)
+
+
+def stream_loop(database_url: str) -> None:
     """Outer loop: open Postgres, read cursor, open SSE stream, drain.
     Reconnects with exponential backoff on any transient error."""
     headers = {
@@ -237,74 +314,15 @@ def stream_loop(database_url: str) -> None:  # pylint: disable=too-many-locals,t
                 )
                 logger.info("Streaming since %s", since_str)
 
-                params = {"since": since_str}
                 timeout = httpx.Timeout(connect=10.0, read=60.0,
                                         write=10.0, pool=10.0)
                 with httpx.stream(
-                    "GET", STREAM_URL, params=params,
+                    "GET", STREAM_URL, params={"since": since_str},
                     headers=headers, timeout=timeout,
                 ) as resp:
                     resp.raise_for_status()
                     backoff = 5
-                    pending_id: str | None = None
-                    pending_ts: datetime | None = None
-                    pending_n = 0
-                    dirty_n = 0
-                    deleted_n = 0
-                    ignored_n = 0
-                    for raw in iter_sse_data_lines(resp.iter_lines()):
-                        ev = parse_event(raw)
-                        if ev is None:
-                            continue
-
-                        # Cursor advances on every wikidatawiki event,
-                        # even ignored — an ignore-decision is a
-                        # positive verdict, not an absence of one.
-                        pending_id = ev.event_id
-                        pending_ts = ev.event_ts
-                        pending_n += 1
-
-                        if ev.entity_id is not None:
-                            if ev.action is EventAction.DELETED:
-                                mark_deleted(conn, ev.entity_id, ev.event_ts)
-                                deleted_n += 1
-                                metrics.EVENTS_TOTAL.labels(
-                                    outcome="deleted").inc()
-                            elif ev.action is EventAction.DIRTY:
-                                mark_dirty(conn, ev.entity_id, ev.event_ts,
-                                           ev.comment_kind)
-                                dirty_n += 1
-                                metrics.EVENTS_TOTAL.labels(
-                                    outcome="dirty").inc()
-                            else:
-                                ignored_n += 1
-                                metrics.EVENTS_TOTAL.labels(
-                                    outcome="ignored").inc()
-                        else:
-                            ignored_n += 1
-                            metrics.EVENTS_TOTAL.labels(
-                                outcome="ignored").inc()
-
-                        if pending_n >= CHECKPOINT_BATCH:
-                            assert pending_ts is not None
-                            advance_cursor(
-                                conn, pending_id, pending_ts, pending_n,
-                            )
-                            logger.info(
-                                "checkpoint: total=%d dirty=%d deleted=%d ignored=%d cursor=%s",
-                                pending_n, dirty_n, deleted_n, ignored_n,
-                                pending_ts.isoformat(),
-                            )
-                            pending_id = None
-                            pending_ts = None
-                            pending_n = 0
-                            dirty_n = 0
-                            deleted_n = 0
-                            ignored_n = 0
-                    if pending_n and pending_ts is not None:
-                        advance_cursor(
-                            conn, pending_id, pending_ts, pending_n,
-                        )
+                    _drain_stream(conn, resp)
         except (httpx.HTTPError, OSError, psycopg.OperationalError) as exc:
             logger.warning(
                 "relay loop error: %s; sleeping %ds before reconnect",
