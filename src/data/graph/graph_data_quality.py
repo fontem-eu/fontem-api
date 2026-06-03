@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 
 from ...analysis.data_quality_source import DataQualitySource
-from ..sparql.virtuoso_client import VirtuosoClient
+from ..sparql.virtuoso_client import SparqlTimeout, VirtuosoClient
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -1163,56 +1163,80 @@ class GraphDataQualitySource(DataQualitySource):
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
 
-        # 1. Total triples across all data graphs (the
-        # http://data.fontem.eu/graph/* prefix filter excludes
-        # Virtuoso's own system graphs).
-        total_rows = self._virtuoso.query(
-            """
-            SELECT (COUNT(*) AS ?n) WHERE {
-                GRAPH ?g { ?s ?p ?o }
-                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+        # All four queries below scan the entire data partition. On a
+        # full-sized store the first COUNT(*) reliably blows past the
+        # default httpx 10s timeout; the client now defaults to 60s
+        # but we still catch SparqlTimeout here so the dashboard gets
+        # a degraded-but-renderable response instead of a 500.
+        try:
+            # 1. Total triples across all data graphs (the
+            # http://data.fontem.eu/graph/* prefix filter excludes
+            # Virtuoso's own system graphs).
+            total_rows = self._virtuoso.query(
+                """
+                SELECT (COUNT(*) AS ?n) WHERE {
+                    GRAPH ?g { ?s ?p ?o }
+                    FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+                }
+                """
+            )
+            total = int(total_rows[0]["n"]) if total_rows else 0
+
+            # 2. Per-graph triple counts.
+            graph_rows = self._virtuoso.query(
+                """
+                SELECT ?g (COUNT(*) AS ?n) WHERE {
+                    GRAPH ?g { ?s ?p ?o }
+                    FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+                } GROUP BY ?g ORDER BY DESC(?n)
+                """
+            )
+
+            # 3. Per-graph predicate frequency, then trimmed to top-N
+            # per graph in Python (LIMIT inside a GROUP BY-by-graph
+            # query is not portable). One query for everything is much
+            # cheaper than N queries per-graph.
+            pred_rows = self._virtuoso.query(
+                """
+                SELECT ?g ?p (COUNT(*) AS ?n) WHERE {
+                    GRAPH ?g { ?s ?p ?o }
+                    FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+                } GROUP BY ?g ?p ORDER BY ?g DESC(?n)
+                """
+            )
+        except SparqlTimeout as exc:
+            logger.warning("triples_stats: SPARQL query timed out: %s", exc)
+            return {
+                "available": True,
+                "total_triples": 0,
+                "graphs": [],
+                "error": str(exc),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
             }
-            """
-        )
-        total = int(total_rows[0]["n"]) if total_rows else 0
-
-        # 2. Per-graph triple counts.
-        graph_rows = self._virtuoso.query(
-            """
-            SELECT ?g (COUNT(*) AS ?n) WHERE {
-                GRAPH ?g { ?s ?p ?o }
-                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
-            } GROUP BY ?g ORDER BY DESC(?n)
-            """
-        )
-
-        # 3. Per-graph predicate frequency, then trimmed to top-N
-        # per graph in Python (LIMIT inside a GROUP BY-by-graph
-        # query is not portable). One query for everything is much
-        # cheaper than N queries per-graph.
-        pred_rows = self._virtuoso.query(
-            """
-            SELECT ?g ?p (COUNT(*) AS ?n) WHERE {
-                GRAPH ?g { ?s ?p ?o }
-                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
-            } GROUP BY ?g ?p ORDER BY ?g DESC(?n)
-            """
-        )
         preds_by_graph: dict[str, list[dict]] = {}
         for row in pred_rows:
             preds_by_graph.setdefault(row["g"], []).append(
                 {"predicate": row["p"], "n": int(row["n"])},
             )
 
-        # 4. Per-graph class counts (rdf:type → counts).
-        class_rows = self._virtuoso.query(
-            """
-            SELECT ?g ?type (COUNT(*) AS ?n) WHERE {
-                GRAPH ?g { ?s a ?type }
-                FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
-            } GROUP BY ?g ?type ORDER BY ?g DESC(?n)
-            """
-        )
+        # 4. Per-graph class counts (rdf:type → counts). Kept in its
+        # own try block so a slow `?s a ?type` doesn't take the whole
+        # response down — we'd rather render predicates + counts +
+        # graphs and silently drop the class breakdown than 500.
+        try:
+            class_rows = self._virtuoso.query(
+                """
+                SELECT ?g ?type (COUNT(*) AS ?n) WHERE {
+                    GRAPH ?g { ?s a ?type }
+                    FILTER(STRSTARTS(STR(?g), "http://data.fontem.eu/graph/"))
+                } GROUP BY ?g ?type ORDER BY ?g DESC(?n)
+                """
+            )
+        except SparqlTimeout as exc:
+            logger.warning(
+                "triples_stats: class breakdown query timed out: %s", exc,
+            )
+            class_rows = []
         classes_by_graph: dict[str, list[dict]] = {}
         for row in class_rows:
             classes_by_graph.setdefault(row["g"], []).append(

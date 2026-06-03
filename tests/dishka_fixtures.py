@@ -18,6 +18,7 @@ from src.analysis.person_data_source import PersonDataSource
 from src.api.app import app
 from src.data.graph.neo4j_client import Neo4jClient
 from src.data.graph.graph_recommendations_source import GraphRecommendationsSource
+from src.data.sparql.virtuoso_client import VirtuosoClient
 from src.services.ip_to_country import IpToCountryService
 
 
@@ -102,6 +103,12 @@ class FlexibleMockProvider(Provider):
             "recommendations_source",
             GraphRecommendationsSource(_FakeNeo4jClient()),
         )
+
+    @provide(scope=Scope.APP)
+    def virtuoso_client(self) -> VirtuosoClient | None:
+        # Default: no client (matches the testing env). Tests that need
+        # one can pass `virtuoso=FakeClient` to make_test_client.
+        return self._mocks.get("virtuoso", None)
 
     @provide(scope=Scope.APP)
     def ip_to_country(self) -> IpToCountryService:
