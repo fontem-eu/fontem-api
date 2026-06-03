@@ -190,7 +190,7 @@ def test_run_mode_uses_anonymous_batch_size_when_no_key(monkeypatch):
     driver.session.return_value.__enter__ = MagicMock(
         return_value=MagicMock(
             run=lambda *a, **kw: [
-                {"lei": f"LEI{i:08d}", "company_gmr_id": f"g{i}"}
+                {"isin": f"ISIN{i:08d}", "company_gmr_id": f"g{i}"}
                 for i in range(25)
             ],
         ),
@@ -198,7 +198,7 @@ def test_run_mode_uses_anonymous_batch_size_when_no_key(monkeypatch):
     driver.session.return_value.__exit__ = MagicMock(return_value=False)
     log, _emit = _mock_log()
 
-    summary = load_openfigi._run_mode("lei", driver, log, limit=25, api_key=None)
+    summary = load_openfigi._run_mode("isin", driver, log, limit=25, api_key=None)
     # 25 IDs / 10 per batch → 3 batches of 10, 10, 5
     assert sent_batch_sizes == [10, 10, 5]
     assert summary["queried"] == 25
@@ -315,10 +315,274 @@ def test_emit_retire_events_skips_same_as_when_replacement_unknown():
 
 def test_lei_reeval_mode_runs_retire_step():
     # End-to-end shape check: the lei-reeval mode's _MODES entry
-    # carries the retire_suspects marker and uses the suspect-Listing
-    # selector. Prevents the wiring from regressing if someone
-    # restructures _MODES.
+    # carries the retire_suspects marker, the via_lei dispatch flag,
+    # and uses the suspect-Listing selector.
     cfg = load_openfigi._MODES["lei-reeval"]
     assert cfg["fetch"] is load_openfigi.fetch_leis_with_suspect_listings
     assert cfg["retire_suspects"] is True
-    assert cfg["id_type"] == "ID_LEI"
+    assert cfg["via_lei"] is True
+    # The broken ID_LEI path must not come back — assert the field
+    # is absent so a future refactor doesn't silently reintroduce it.
+    assert "id_type" not in cfg
+
+
+def test_lei_mode_routes_through_via_lei_path():
+    # Same guard for the LEI-no-Listing mode. Used to query ID_LEI
+    # directly which OpenFIGI rejects with body
+    # `[{"error":"Invalid value for idType."}]` — see memory:
+    # openfigi-no-id-lei.
+    cfg = load_openfigi._MODES["lei"]
+    assert cfg["fetch"] is load_openfigi.fetch_leis_no_listing
+    assert cfg["via_lei"] is True
+    assert "id_type" not in cfg
+
+
+# ── GLEIF helper ──────────────────────────────────────────────────
+
+
+def test_gleif_get_isins_returns_attribute_values():
+    """GLEIF returns ``{data: [{attributes: {isin: ...}}, ...]}``;
+    the helper just walks that and strips the wrapper."""
+    fake = MagicMock(spec=httpx.Response)
+    fake.status_code = 200
+    fake.raise_for_status.return_value = None
+    fake.json.return_value = {
+        "data": [
+            {"attributes": {"isin": "PTMENYOM0005"}},
+            {"attributes": {"isin": "PTMENZOM0004"}},
+            {"attributes": {}},
+        ],
+    }
+    with patch.object(load_openfigi.httpx, "get", return_value=fake):
+        out = load_openfigi.gleif_get_isins("549300L6RR1203WN9F57")
+    assert out == ["PTMENYOM0005", "PTMENZOM0004"]
+
+
+def test_gleif_get_isins_returns_empty_on_404():
+    fake = MagicMock(spec=httpx.Response)
+    fake.status_code = 404
+    fake.raise_for_status.side_effect = AssertionError(
+        "should not raise on 404",
+    )
+    with patch.object(load_openfigi.httpx, "get", return_value=fake):
+        out = load_openfigi.gleif_get_isins("UNKNOWN")
+    assert out == []
+
+
+def test_gleif_get_isins_returns_empty_on_http_error():
+    with patch.object(
+        load_openfigi.httpx, "get",
+        side_effect=httpx.HTTPError("boom"),
+    ):
+        out = load_openfigi.gleif_get_isins("L1")
+    assert out == []
+
+
+# ── equity reshape ────────────────────────────────────────────────
+
+
+def test_equity_canonicals_filters_bonds_and_attaches_isin():
+    # OpenFIGI returns the input ISIN positionally — the reshape must
+    # zip(response, isins) to preserve the binding. Only equity-sector
+    # instruments pass through.
+    response = [
+        {"data": [
+            {"ticker": "EGL", "exchCode": "PL",
+             "marketSector": "Equity", "micCode": "XLIS",
+             "figi": "BBG000BV96Y8"},
+        ]},
+        {"data": [
+            {"ticker": "EGLPL 4.25 12/02/26",
+             "exchCode": "EURONEXT-LISBON",
+             "marketSector": "Corp", "figi": "BBG013KN1016"},
+        ]},
+    ]
+    out = load_openfigi._equity_canonicals_from_response(
+        response, ["PTMEN0AE0005", "PTMENYOM0005"],
+        lei="LEI", company_gmr_id="gid",
+    )
+    assert len(out) == 1
+    assert out[0]["ticker"] == "EGL"
+    assert out[0]["exchange_code"] == "PL"
+    assert out[0]["isin"] == "PTMEN0AE0005"
+    assert out[0]["lei"] == "LEI"
+    assert out[0]["company_gmr_id"] == "gid"
+
+
+def test_equity_canonicals_dedupes_across_isins_of_same_lei():
+    response = [
+        {"data": [
+            {"ticker": "EGL", "exchCode": "PL",
+             "marketSector": "Equity", "figi": "F1"},
+        ]},
+        {"data": [
+            {"ticker": "EGL", "exchCode": "PL",
+             "marketSector": "Equity", "figi": "F2"},
+        ]},
+    ]
+    out = load_openfigi._equity_canonicals_from_response(
+        response, ["ISIN1", "ISIN2"],
+        lei="LEI", company_gmr_id="gid",
+    )
+    assert len(out) == 1
+    assert out[0]["isin"] == "ISIN1"
+
+
+# ── _resolve_lei_to_canonicals: witness vs gleif ──────────────────
+
+
+def test_resolve_uses_witness_isins_when_present(monkeypatch):
+    calls = {"openfigi": 0, "gleif": 0}
+
+    def fake_query_openfigi(_payload, _api_key):
+        calls["openfigi"] += 1
+        return [{"data": [{"ticker": "EGL", "exchCode": "PL",
+                           "marketSector": "Equity"}]}]
+
+    def fake_gleif(_lei, client=None):  # pragma: no cover  # pylint: disable=unused-argument
+        calls["gleif"] += 1
+        return []
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins", fake_gleif)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+
+    row = {"lei": "L1", "company_gmr_id": "g1",
+           "witness_isins": ["PTMEN0AE0005"], "suspect_tickers": []}
+    canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+        row, batch_size=10, api_key=None,
+    )
+    assert source == "witness"
+    assert calls["gleif"] == 0
+    assert len(canonicals) == 1
+    assert canonicals[0]["ticker"] == "EGL"
+
+
+def test_resolve_falls_back_to_gleif_when_no_witness(monkeypatch):
+    calls = {"openfigi": 0, "gleif": 0}
+
+    def fake_query_openfigi(_payload, _api_key):
+        calls["openfigi"] += 1
+        return [{"data": [{"ticker": "ACME", "exchCode": "XX",
+                           "marketSector": "Equity"}]}]
+
+    def fake_gleif(_lei, client=None):  # pylint: disable=unused-argument
+        calls["gleif"] += 1
+        return ["FAKEISIN1"]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins", fake_gleif)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+
+    row = {"lei": "L1", "company_gmr_id": "g1",
+           "witness_isins": [], "suspect_tickers": []}
+    canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+        row, batch_size=10, api_key=None,
+    )
+    assert source == "gleif"
+    assert calls["gleif"] == 1
+    assert len(canonicals) == 1
+
+
+def test_resolve_returns_none_source_when_no_isins(monkeypatch):
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins",
+                        lambda _lei, client=None: [])
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    row = {"lei": "L1", "company_gmr_id": "g1",
+           "witness_isins": [], "suspect_tickers": []}
+    canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+        row, batch_size=10, api_key=None,
+    )
+    assert not canonicals
+    assert source == "none"
+
+
+def test_resolve_chunks_large_isin_sets(monkeypatch):
+    # Mota's LEI returned 15 ISINs from GLEIF. Anonymous tier batch
+    # is 10 — the resolver must split into 2 OpenFIGI calls (10 + 5),
+    # not one call of 15 (which would 413).
+    sent_batch_sizes: list[int] = []
+
+    def fake_query_openfigi(payload, _api_key):
+        sent_batch_sizes.append(len(payload))
+        return [{"data": []}] * len(payload)
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+
+    row = {"lei": "L1", "company_gmr_id": "g1",
+           "witness_isins": [f"ISIN{i:04d}" for i in range(15)],
+           "suspect_tickers": []}
+    load_openfigi._resolve_lei_to_canonicals(
+        row, batch_size=10, api_key=None,
+    )
+    assert sent_batch_sizes == [10, 5]
+
+
+# ── _run_mode_via_lei end-to-end ──────────────────────────────────
+
+
+def test_run_mode_via_lei_emits_canonicals_and_retires_suspect(monkeypatch):
+    # Mota-style happy path: one Company has a fabricated MOTA.LS
+    # Listing AND a sibling FIRDS-emitted ISIN (the witness). OpenFIGI
+    # returns EGL on the Lisbon venue. Expect one canonical
+    # UpsertListing (EGL), one retire UpsertListing(MOTA.LS,
+    # active=False), and one AssertSameAs(MOTA.LS -> EGL).
+    rows = [{
+        "lei": "549300L6RR1203WN9F57",
+        "company_gmr_id": "g1",
+        "suspect_tickers": ["MOTA.LS"],
+        "witness_isins": ["PTMEN0AE0005"],
+    }]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei-reeval"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+
+    def fake_query_openfigi(_payload, _api_key):
+        return [{"data": [
+            {"ticker": "EGL", "exchCode": "LS",
+             "marketSector": "Equity", "micCode": "XLIS"},
+        ]}]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins",
+                        lambda _lei, client=None: [])
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+
+    log, emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei-reeval", driver=MagicMock(), log=log,
+        limit=1, api_key=None,
+    )
+    assert summary["queried"] == 1
+    assert summary["enriched"] == 1
+    # Three emit.upsert envelopes in order: canonical, retire,
+    # AssertSameAs.
+    assert emit.upsert.call_count == 3
+    call_types = [c.args[0] for c in emit.upsert.call_args_list]
+    assert call_types == [
+        "UpsertListing", "UpsertListing", "AssertSameAs",
+    ]
+
+
+def test_run_mode_via_lei_no_isins_no_emissions(monkeypatch):
+    # Company with LEI but no witness, GLEIF empty (private). Should
+    # produce zero canonicals and not retire anything. Better a stale
+    # Listing than a wrongly-deactivated one when we have no evidence.
+    rows = [{"lei": "L1", "company_gmr_id": "g1",
+             "suspect_tickers": ["WEIRD.XX"], "witness_isins": []}]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei-reeval"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins",
+                        lambda _lei, client=None: [])
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei-reeval", driver=MagicMock(), log=log,
+        limit=1, api_key=None,
+    )
+    assert summary["enriched"] == 0
+    assert emit.upsert.call_count == 0
