@@ -356,6 +356,8 @@ def _retires_for_suspects(
             if suspect in canon_tickers:
                 continue  # already canonical, leave alone
             replacement = _pick_replacement(suspect, canon)
+            if replacement is None:
+                continue
             retires.append({
                 "ticker": suspect,
                 "company_gmr_id": row["company_gmr_id"],

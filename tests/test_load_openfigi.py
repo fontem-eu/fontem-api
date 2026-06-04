@@ -281,33 +281,36 @@ def test_retires_for_suspects_falls_back_to_sole_canonical():
     assert retires[0]["replacement_ticker"] == "ACME.YY"
 
 
-def test_retires_for_suspects_no_replacement_when_ambiguous():
-    # Multiple canonicals, none on the suspect's suffix → we don't
-    # invent a redirect. The bad Listing is deactivated, but no
-    # AssertSameAs fires.
+def test_retires_for_suspects_skips_when_no_replacement():
+    # ASHTEAD.L observed case: OpenFIGI returned only US ADRs and
+    # German listings for the FTSE 100 issuer, no London entry.
+    # The legitimate suspect ASHTEAD.L has no bare-symbol match
+    # (canonicals are ASHGY, ASHTY, ...) and no suffix match
+    # (no canonical on LN). We have no evidence the suspect is
+    # wrong — conservatively leave it alone, do not emit a retire
+    # record at all.
     rows = [{"lei": "L1", "company_gmr_id": "g1",
-             "suspect_tickers": ["WEIRD.XX"]}]
+             "suspect_tickers": ["ASHTEAD.L"]}]
     enriched = [
-        {"lei": "L1", "ticker": "A.YY", "exchange_code": "YY",
+        {"lei": "L1", "ticker": "ASHGY", "exchange_code": "US",
          "company_gmr_id": "g1"},
-        {"lei": "L1", "ticker": "B.ZZ", "exchange_code": "ZZ",
+        {"lei": "L1", "ticker": "ASHTY", "exchange_code": "UV",
          "company_gmr_id": "g1"},
     ]
     retires = load_openfigi._retires_for_suspects(rows, enriched)
-    assert retires[0]["replacement_ticker"] is None
+    assert not retires
 
 
 def test_retires_for_suspects_no_canonicals_means_no_retire_records():
     # OpenFIGI returned nothing for this LEI (private company, rate
     # limit, lookup miss). Don't touch existing Listings — we have
-    # no evidence they're wrong.
+    # no evidence they're wrong. Empty `retires` list is the
+    # whole-batch safety net inside _retires_for_suspects when
+    # canon == [].
     rows = [{"lei": "L1", "company_gmr_id": "g1",
              "suspect_tickers": ["SOMETHING.LS"]}]
     retires = load_openfigi._retires_for_suspects(rows, enriched=[])
-    # Still emit a retire for the suspect — wait, no: with no
-    # canonical we have no evidence it's wrong. Keep it.
-    assert all(r["replacement_ticker"] is None for r in retires)
-    # And the retire's replacement is None so AssertSameAs is skipped.
+    assert not retires
 
 
 def test_emit_retire_events_emits_upsert_inactive_plus_same_as():
