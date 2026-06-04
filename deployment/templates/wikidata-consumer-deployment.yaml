@@ -88,8 +88,17 @@ spec:
             # can return rdflib Graphs sized in the tens of MBs).
             - name: WIKIDATA_CONSUMER_BATCH
               value: "500"
+            # Concurrency = number of worker threads in the per-batch
+            # ThreadPoolExecutor. Each thread shares the single
+            # connection-pooled httpx.Client (MAX_INFLIGHT=5 in
+            # wikidata_fetcher), so going above 5 just queues threads
+            # on the conn-pool semaphore. 5 matches the pool ceiling
+            # so we use every available connection without contention.
+            # Wikimedia tolerates this rate cleanly — 429s show up in
+            # logs as "rate-limited" warnings on the rare burst and
+            # back off via Retry-After per RFC 9110.
             - name: WIKIDATA_CONSUMER_CONCURRENCY
-              value: "3"
+              value: "5"
             - name: WIKIDATA_CONSUMER_SLEEP_BUSY_S
               value: "5"
             - name: WIKIDATA_CONSUMER_SLEEP_IDLE_S
