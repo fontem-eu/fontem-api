@@ -364,24 +364,68 @@ def _retires_for_suspects(
     return retires
 
 
+# OpenFIGI exchCode -> Yahoo-style suffix. Ported from
+# esef-data-fetcher/src/exchange_map.py so the retire matcher can
+# treat "GSK on LN" and "GSK.L" as the same venue. Without this,
+# every legitimate Yahoo-notation ticker for a Company OpenFIGI
+# knows about gets retired with no AssertSameAs redirect (the
+# suspect's ".L" suffix never matches the raw exchCode "LN").
+_EXCH_ALIASES: dict[str, str] = {
+    "GY": "DE", "GF": "DE",
+    "SM": "MC", "SQ": "MC",
+    "IM": "MI",
+    "NA": "AS",
+    "FP": "PA",
+    "LN": "L",
+    "NO": "OL",
+    "SS": "ST",
+    "DC": "CO",
+    "FH": "HE",
+    "ID": "IR",
+    "PW": "WA",
+    "PL": "LS",
+}
+
+
+def _canon_suffixes(c: dict) -> set[str]:
+    """Yahoo-style suffixes a canonical listing can stand in for.
+    Both the raw OpenFIGI ``exchCode`` and the aliased form."""
+    raw = (c.get("exchange_code") or "").strip()
+    return {s for s in (raw, _EXCH_ALIASES.get(raw, raw)) if s}
+
+
 def _pick_replacement(suspect_ticker: str,
                       canon: list[dict]) -> str | None:
     """Pick the canonical ticker to AssertSameAs the suspect to.
 
-    Suspect tickers from the legacy fallback always look like
-    ``SYMBOL.SUFFIX`` where SUFFIX is our COUNTRY_TO_EXCHANGE suffix
-    (e.g. ".LS" for Portugal). When OpenFIGI returns a canonical
-    listing on the same exchange code, that's almost certainly the
-    same instrument. With no exchange match but a single canonical,
-    return that one (still a strong guess for the typical
-    one-Listing-per-Company case). Otherwise return None — we don't
-    invent a redirect across venues."""
+    Matches, in order of confidence:
+
+      1. Suspect's bare symbol == canonical's ticker. Covers the
+         GSK.L / RIO.L case — Yahoo-style notation against
+         OpenFIGI's bare ``GSK``/``RIO`` for the same Company.
+         This is the most common shape: the legacy fabricator's
+         "first word + country suffix" output where the first
+         word happened to be the real ticker.
+      2. Suspect's suffix matches a canonical's exchange code,
+         directly or via ``_EXCH_ALIASES``. Pins the venue when
+         the symbol differs.
+      3. Exactly one canonical exists -> return it. Best guess
+         for the one-Listing-per-Company case.
+      4. Otherwise None — we don't invent a cross-venue redirect.
+    """
     if not canon:
         return None
-    suffix = suspect_ticker.rsplit(".", 1)[-1] if "." in suspect_ticker else ""
+    bare = (suspect_ticker.rsplit(".", 1)[0]
+            if "." in suspect_ticker else suspect_ticker)
     for c in canon:
-        if suffix and c.get("exchange_code") == suffix:
+        if c.get("ticker") == bare:
             return c["ticker"]
+    suffix = (suspect_ticker.rsplit(".", 1)[-1]
+              if "." in suspect_ticker else "")
+    if suffix:
+        for c in canon:
+            if suffix in _canon_suffixes(c):
+                return c["ticker"]
     if len(canon) == 1:
         return canon[0]["ticker"]
     return None

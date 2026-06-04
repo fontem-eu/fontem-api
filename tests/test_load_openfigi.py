@@ -238,6 +238,38 @@ def test_retires_for_suspects_picks_replacement_by_exchange_suffix():
     }
 
 
+def test_pick_replacement_matches_bare_symbol_against_canonical():
+    # The GSK.L case: legacy fabricator minted "GSK.L" because the
+    # first word of "GLAXOSMITHKLINE PLC" happened to be GSK; OpenFIGI
+    # returns ticker="GSK" exchCode="LN" for the same Company. The
+    # bare-symbol match must produce an AssertSameAs(GSK.L -> GSK)
+    # rather than retiring GSK.L with no replacement.
+    canon = [
+        {"ticker": "GSK", "exchange_code": "LN"},
+        {"ticker": "GS71", "exchange_code": "GR"},
+        {"ticker": "GLAXF", "exchange_code": "US"},
+    ]
+    assert load_openfigi._pick_replacement("GSK.L", canon) == "GSK"
+
+
+def test_pick_replacement_uses_alias_when_bare_misses():
+    # Suspect "ACME.L" doesn't match a bare canonical, but the
+    # exchange-code alias does: "LN" -> "L" via _EXCH_ALIASES.
+    canon = [{"ticker": "GSK", "exchange_code": "LN"}]
+    assert load_openfigi._pick_replacement("ACME.L", canon) == "GSK"
+
+
+def test_pick_replacement_uses_alias_for_lisbon_pl_to_ls():
+    # The Mota-Engil case once witness ISIN arrives: suspect
+    # "MOTA.LS" against canonical "EGL" on exchCode "PL". The alias
+    # "PL" -> "LS" should pin the venue and emit AssertSameAs.
+    canon = [
+        {"ticker": "EGL", "exchange_code": "PL"},
+        {"ticker": "M09", "exchange_code": "GR"},
+    ]
+    assert load_openfigi._pick_replacement("MOTA.LS", canon) == "EGL"
+
+
 def test_retires_for_suspects_falls_back_to_sole_canonical():
     # No exchange-suffix match but only one canonical exists — that's
     # still our best guess, so the AssertSameAs should target it.
