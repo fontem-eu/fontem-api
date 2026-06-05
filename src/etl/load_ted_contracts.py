@@ -360,8 +360,8 @@ def main(argv=None):
 
         # CPV bootstrap: emits UpsertTaxonomyCode events. Idempotent;
         # re-runs are MERGE on (system='cpv', code) at the sink.
-        from .load_cpv import load_cpv_divisions  # pylint: disable=import-outside-toplevel
-        load_cpv_divisions(log)
+        from .load_cpv import load_cpv  # pylint: disable=import-outside-toplevel
+        load_cpv(log, lang="en")
 
         load_contracts(
             driver, log, archive, currency_svc=currency_svc,

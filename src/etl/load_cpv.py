@@ -1,22 +1,47 @@
-"""Load CPV (Common Procurement Vocabulary) reference taxonomy
-into the event log as ``UpsertTaxonomyCode`` events.
+"""Load CPV (Common Procurement Vocabulary) reference taxonomy into
+the event log as ``UpsertTaxonomyCode`` events.
 
-The CPV codelist is published by the EU as part of the eForms SDK.
-We embed the top-level divisions (~45 codes) directly and load
-detailed codes from TED data as we encounter them. Each code emits
-one event keyed by (system='cpv', code=<8-digit>); sinks materialise
-:CPV nodes and skos:broader / CHILD_OF edges from parent_code.
+The complete taxonomy with multilingual labels is committed alongside
+this script at ``data/cpv_2008_core.gc.gz``, sourced from the OP-TED
+eForms-SDK distribution -- the official OASIS Genericode XML the
+Publications Office of the European Union ships for procurement
+software. It carries:
 
-Usage:
-    python -m src.etl.load_cpv
+  * ~9,500 codes (top-level divisions + every published detail level)
+  * Parent/child relationships via the ``parentCode`` column
+  * Labels in all 24 EU official languages
+
+The previous incarnation of this loader hand-curated a Python dict of
+~115 codes; contracts whose CPV wasn't in that list rendered as a
+bare 8-digit number in the UI. This version emits one event per
+(code, language), so the full taxonomy materialises across the data
+tier and ``graph_contract_source`` resolves every code to a label.
+
+Run modes:
+
+  * default          -- emit every code in every language
+  * ``--lang en``    -- emit one ISO 639-1 language only (~9.5K events)
+  * ``--download``   -- refresh ``cpv_2008_core.gc.gz`` from OP-TED.
+                        Run yearly when the EU publishes an amendment.
+
+Usage::
+
+    python -m src.etl.load_cpv                 # all 24 langs
+    python -m src.etl.load_cpv --lang en       # English only
+    python -m src.etl.load_cpv --download      # refresh source data
 """
 from __future__ import annotations
 
 import argparse
+import gzip
 import logging
+import shutil
 import time
 import uuid
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
+import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
@@ -24,169 +49,139 @@ logger = logging.getLogger(__name__)
 
 SYSTEM = "cpv"
 
-# Top-level CPV divisions (2-digit codes)
-CPV_DIVISIONS = {
-    "03": "Agricultural, farming, fishing, forestry products",
-    "09": "Petroleum products, fuel, electricity, energy",
-    "14": "Mining, basic metals, related products",
-    "15": "Food, beverages, tobacco, related products",
-    "16": "Agricultural machinery",
-    "18": "Clothing, footwear, luggage, accessories",
-    "19": "Leather and textile fabrics",
-    "22": "Printed matter, related products",
-    "24": "Chemical products",
-    "30": "Office and computing machinery, equipment",
-    "31": "Electrical machinery, apparatus, equipment",
-    "32": "Radio, television, communication equipment",
-    "33": "Medical equipments, pharmaceuticals",
-    "34": "Transport equipment and related products",
-    "35": "Security, fire-fighting, police equipment",
-    "37": "Musical instruments, sport goods, games",
-    "38": "Laboratory, optical, precision equipments",
-    "39": "Furniture, furnishings, domestic appliances",
-    "41": "Collected and purified water",
-    "42": "Industrial machinery",
-    "43": "Machinery for mining, quarrying, construction",
-    "44": "Construction structures and materials",
-    "45": "Construction work",
-    "48": "Software package and information systems",
-    "50": "Repair and maintenance services",
-    "51": "Installation services",
-    "55": "Hotel, restaurant and retail trade services",
-    "60": "Transport services",
-    "63": "Supporting and auxiliary transport services",
-    "64": "Postal and telecommunications services",
-    "65": "Public utilities",
-    "66": "Financial and insurance services",
-    "70": "Real estate services",
-    "71": "Architectural, construction, engineering services",
-    "72": "IT services: consulting, software, internet",
-    "73": "Research and development services",
-    "75": "Administration, defence, social security",
-    "76": "Services related to oil and gas industry",
-    "77": "Agricultural, forestry, horticultural services",
-    "79": "Business services: law, marketing, consulting",
-    "80": "Education and training services",
-    "85": "Health and social work services",
-    "90": "Sewage, refuse, cleaning, environmental services",
-    "92": "Recreational, cultural, sporting services",
-    "98": "Other community, social, personal services",
+DATA_DIR = Path(__file__).parent / "data"
+GC_FILE = DATA_DIR / "cpv_2008_core.gc.gz"
+GC_SOURCE_URL = (
+    "https://raw.githubusercontent.com/OP-TED/eForms-SDK/main/"
+    "codelists/cpv.gc"
+)
+
+# Genericode uses ISO 639-3 ("eng", "fra", ...) in the ColumnSet
+# ("<lang>_label" per language). Our event schema keys labels by
+# ISO 639-1 ("en", "fr", ...) to match the UI's BCP-47 tags. This
+# map covers the 24 EU official languages the OP-TED file ships.
+ISO3_TO_ISO1 = {
+    "bul": "bg", "spa": "es", "ces": "cs", "dan": "da",
+    "deu": "de", "est": "et", "ell": "el", "eng": "en",
+    "fra": "fr", "gle": "ga", "hrv": "hr", "ita": "it",
+    "lav": "lv", "lit": "lt", "hun": "hu", "mlt": "mt",
+    "nld": "nl", "pol": "pl", "por": "pt", "ron": "ro",
+    "slk": "sk", "slv": "sl", "fin": "fi", "swe": "sv",
 }
 
 
-# Detailed CPV codes that frequently appear in EU procurement data
-# without descriptions. Sourced from the official CPV 2008 taxonomy.
-CPV_DETAILED = {
-    "09310000": "Electricity",
-    "09320000": "Steam, hot water and associated products",
-    "14210000": "Gravel, sand, crusite stone and aggregates",
-    "15300000": "Fruit, vegetables and related products",
-    "15800000": "Miscellaneous food products",
-    "15900000": "Beverages, tobacco and related products",
-    "22100000": "Printed books, brochures and leaflets",
-    "30200000": "Computer equipment and supplies",
-    "30210000": "Data-processing machines (hardware)",
-    "33100000": "Medical equipments",
-    "33140000": "Medical consumables",
-    "33600000": "Pharmaceutical products",
-    "33690000": "Various medicinal products",
-    "33700000": "Personal care products",
-    "34100000": "Motor vehicles",
-    "34110000": "Passenger cars",
-    "34140000": "Heavy-duty motor vehicles",
-    "34300000": "Parts and accessories for vehicles",
-    "34900000": "Miscellaneous transport equipment and spare parts",
-    "35100000": "Emergency and security equipment",
-    "38000000": "Laboratory, optical and precision equipments",
-    "39100000": "Furniture",
-    "39200000": "Furnishing",
-    "42400000": "Lifting and handling equipment",
-    "44100000": "Construction materials and associated items",
-    "44200000": "Structural products",
-    "45100000": "Site preparation work",
-    "45200000": "Works for complete or part construction",
-    "45230000": "Construction of pipelines, communication, power lines and highways",
-    "45233000": "Construction, foundation and surface works for highways",
-    "45234100": "Railway construction works",
-    "45300000": "Building installation work",
-    "45400000": "Building completion work",
-    "48000000": "Software package and information systems",
-    "48800000": "Information systems and servers",
-    "50000000": "Repair and maintenance services",
-    "50100000": "Repair, maintenance and associated services of vehicles",
-    "55000000": "Hotel, restaurant and retail trade services",
-    "60000000": "Transport services (excl. waste transport)",
-    "60100000": "Road transport services",
-    "63500000": "Travel agency, tour operator, tourist assistance",
-    "66000000": "Financial and insurance services",
-    "66500000": "Insurance and pension services",
-    "66510000": "Insurance services",
-    "71300000": "Hydraulic engineering services",
-    "71500000": "Construction-related services",
-    "73000000": "Research and development services and related consultancy services",
-    "77300000": "Horticultural services",
-    "79000000": "Business services: law, marketing, consulting, recruitment",
-    "79200000": "Accounting, auditing and fiscal services",
-    "79300000": "Market and economic research; polling and statistics",
-    "79400000": "Business and management consultancy services",
-    "79500000": "Office-support services",
-    "79600000": "Recruitment services",
-    "79700000": "Investigation and security services",
-    "79800000": "Printing and related services",
-    "79900000": "Miscellaneous business and business-related services",
-    "80500000": "Training services",
-    "85100000": "Health services",
-    "85300000": "Social work and related services",
-    "90500000": "Refuse and waste related services",
-    "90600000": "Cleaning services for urban/rural areas",
-    "90900000": "Cleaning and sanitation services",
-    "92500000": "Library, archives, museums and other cultural services",
-}
+def _row_values(row) -> dict[str, str]:
+    """Pull the ColumnRef -> SimpleValue map out of one Genericode
+    <Row>."""
+    out: dict[str, str] = {}
+    for value in row:
+        if not value.tag.endswith("Value"):
+            continue
+        simple = next(
+            (c for c in value if c.tag.endswith("SimpleValue")), None,
+        )
+        if simple is None or simple.text is None:
+            continue
+        out[value.attrib.get("ColumnRef", "")] = simple.text
+    return out
 
 
-def load_cpv_divisions(log: EventLog) -> int:
-    """Emit UpsertTaxonomyCode events for the embedded CPV catalogue.
+def _level_from_code(code: str) -> int:
+    """Depth of a CPV 8-digit code: how many leading non-zero digits
+    run before the trailing zeros. ``45000000`` -> 2 (division
+    "45"), ``45200000`` -> 3, ``45234100`` -> 6, ``45234110`` -> 7.
+    Used for hierarchical UI grouping; the UpsertTaxonomyCode schema
+    already carries this field."""
+    trimmed = code.rstrip("0")
+    return max(len(trimmed), 1)
 
-    Returns the number of codes emitted (~100). Idempotent — re-running
-    re-emits the same (system, code) keys; sinks MERGE.
-    """
+
+def parse_genericode(path: Path):
+    """Yield ``(code, parent_code, label_lang, label, level)`` tuples
+    for every (code, language) pair in the Genericode file.
+
+    Streams via ``ET.iterparse`` so peak memory stays small on the
+    30 MiB-uncompressed input."""
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rb") as fh:
+        for _event, row in ET.iterparse(fh, events=("end",)):
+            if not row.tag.endswith("Row"):
+                continue
+            vals = _row_values(row)
+            code = vals.get("code") or ""
+            if not code:
+                row.clear()
+                continue
+            parent = vals.get("parentCode") or None
+            level = _level_from_code(code)
+            for col, text in vals.items():
+                if not col.endswith("_label"):
+                    continue
+                iso3 = col[:-len("_label")]
+                iso1 = ISO3_TO_ISO1.get(iso3)
+                if iso1 is None or not text:
+                    continue
+                yield code, parent, iso1, text, level
+            row.clear()
+
+
+def download_genericode(dest: Path = GC_FILE,
+                        url: str = GC_SOURCE_URL) -> int:
+    """Fetch the upstream Genericode file and overwrite the committed
+    copy. Compressed on-the-fly to keep the repo footprint at ~3 MiB.
+    Returns the compressed byte count."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("downloading %s -> %s", url, dest)
+    with httpx.stream("GET", url, follow_redirects=True,
+                      timeout=60) as resp:
+        resp.raise_for_status()
+        with gzip.open(dest, "wb") as out:
+            for chunk in resp.iter_bytes():
+                out.write(chunk)
+    size = dest.stat().st_size
+    logger.info("wrote %s (%.1f MiB)", dest, size / 1024 / 1024)
+    return size
+
+
+def load_cpv(log: EventLog, *, gc_path: Path = GC_FILE,
+             lang: str | None = None) -> int:
+    """Emit one UpsertTaxonomyCode event per (code, language) parsed
+    from the Genericode file. Idempotent at the (system, code,
+    label_lang) level -- re-running upserts the same payloads.
+
+    ``lang`` is an ISO 639-1 filter (e.g. ``"en"``); when None, all
+    24 EU languages are emitted."""
+    if not gc_path.exists():
+        raise FileNotFoundError(
+            f"{gc_path} missing. Run with --download to fetch it."
+        )
+
     batch_id = uuid.uuid4()
     total = 0
     t0 = time.time()
     with log.batch(batch_id, producer="load_cpv") as emit:
-        # Top-level divisions: emit as 8-digit codes (eg "45000000") so
-        # they share the same key namespace as detailed codes.
-        for code, desc in CPV_DIVISIONS.items():
-            full = code + "000000"
-            emit.upsert(
-                "UpsertTaxonomyCode",
-                iri=f"http://data.fontem.eu/id/Cpv/{full}",
-                domain="cpv",
-                payload=builders.upsert_taxonomy_code(
-                    system=SYSTEM, code=full,
-                    label=desc, label_lang="en",
-                    level=0,
-                ),
-            )
-            total += 1
-        # Detailed codes: parent_code = first 2 digits + "000000".
-        for code, desc in CPV_DETAILED.items():
+        for code, parent, label_lang, label, level in parse_genericode(
+            gc_path,
+        ):
+            if lang is not None and label_lang != lang:
+                continue
             emit.upsert(
                 "UpsertTaxonomyCode",
                 iri=f"http://data.fontem.eu/id/Cpv/{code}",
                 domain="cpv",
                 payload=builders.upsert_taxonomy_code(
                     system=SYSTEM, code=code,
-                    label=desc, label_lang="en",
-                    parent_code=code[:2] + "000000",
-                    level=1,
+                    label=label, label_lang=label_lang,
+                    parent_code=parent, level=level,
                 ),
             )
             total += 1
+            if total % 25000 == 0:
+                logger.info("  %d events emitted", total)
     elapsed = time.time() - t0
     logger.info(
-        "Done: %d CPV codes (%d divisions + %d detailed) in %.1fs",
-        total, len(CPV_DIVISIONS), len(CPV_DETAILED), elapsed,
+        "Done: %d CPV events in %.1fs (%s langs)",
+        total, elapsed, lang or "all 24 EU",
     )
     return total
 
@@ -196,14 +191,38 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Emit UpsertTaxonomyCode events for the CPV catalogue",
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--download", action="store_true",
+        help="Fetch the upstream Genericode file from OP-TED, "
+             "overwrite the committed copy, and exit.",
+    )
+    parser.add_argument(
+        "--lang", default=None,
+        help="ISO 639-1 language to emit (default: emit all 24 "
+             "EU official languages).",
+    )
+    parser.add_argument(
+        "--gc-file", default=str(GC_FILE),
+        help=f"Path to the Genericode source file "
+             f"(default: {GC_FILE}).",
+    )
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if args.download:
+        download_genericode(Path(args.gc_file))
+        return
+
+    src = Path(args.gc_file)
+    if src.resolve() != GC_FILE.resolve():
+        logger.info("using non-default source file %s", src)
+        shutil.copyfile(src, GC_FILE)
     log = EventLog.from_env()
     try:
-        load_cpv_divisions(log)
+        load_cpv(log, gc_path=GC_FILE, lang=args.lang)
     finally:
         log.close()
 
