@@ -14,6 +14,16 @@ fontemStats:
   database: fontem_stats
   secretName: fontem-stats-credentials
 
+# Wikidata mirror infrastructure — relay (SSE consumer that fills
+# wikidata.dirty_entities) + consumer (drains the set into Virtuoso).
+# The mirror lives in fontem-prod and runs there by default; non-prod
+# environments don't have the wikidata graph in their Virtuoso (or use
+# the shared one cross-namespace), and there's no point in spending
+# Wikimedia rate-limit budget on duplicate drains. Non-prod gitops
+# values files override this to `enabled: false`.
+wikidata:
+  enabled: true
+
 # Virtuoso SPARQL endpoint surfaced to the API for read-only sanctions
 # panels. Disabled by default — non-prod consumes the shared Virtuoso
 # at fontem-shared via cluster DNS, prod its own.

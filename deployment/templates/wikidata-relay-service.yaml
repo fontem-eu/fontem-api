@@ -3,6 +3,7 @@ ClusterIP Service in front of the relay pod, used only to give the
 ServiceMonitor below a stable selector target. Prometheus scrapes
 :9100/metrics; no other consumer of this Service exists.
 */}}
+{{- if .Values.wikidata.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -46,3 +47,4 @@ spec:
     - port: metrics
       path: /metrics
       interval: 30s
+{{- end }}
