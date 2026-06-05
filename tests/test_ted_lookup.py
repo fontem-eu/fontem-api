@@ -6,12 +6,18 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from src.services import ted_lookup
 from src.services.ted_lookup import (
     TedLookupError,
     detail_url_for,
     resolve_publication_number,
 )
+
+# We don't import _TED_SEARCH_URL from the module under test because
+# it's a private attribute and pylint flags the cross-module access.
+# The exact URL is irrelevant for the test — httpx.Request just needs
+# *some* URL string; the response is constructed in-process and never
+# actually sent.
+_FAKE_REQ_URL = "https://api.ted.europa.eu/v3/notices/search"
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +44,7 @@ def _mock_post(payload, status=200):
     """Return a context-mgr-compatible httpx.Client whose post() yields
     the given response."""
     resp = httpx.Response(status, json=payload, request=httpx.Request(
-        "POST", ted_lookup._TED_SEARCH_URL,
+        "POST", _FAKE_REQ_URL,
     ))
 
     class _Client:
@@ -48,7 +54,7 @@ def _mock_post(payload, status=200):
         def __exit__(self, *args):
             return False
 
-        def post(self, _url, json=None):  # noqa: ARG002
+        def post(self, _url, json=None):  # pylint: disable=unused-argument
             return resp
 
     return _Client()

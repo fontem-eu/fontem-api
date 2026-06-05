@@ -7,7 +7,10 @@
 # pylint: disable=protected-access,unused-argument
 from unittest.mock import MagicMock
 
+import httpx
 
+from src.services import ted_lookup
+from src.services.ted_lookup import TedLookupError
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 
@@ -294,7 +297,6 @@ class TestTedLink:
         endpoint 302s to https://ted.europa.eu/en/notice/-/detail/<pub>.
         Pin both the status and Location header so a regression in
         either is loud."""
-        from src.services import ted_lookup
         ted_lookup.resolve_publication_number.cache_clear()
         monkeypatch.setattr(
             "src.api.routers.contracts.resolve_publication_number",
@@ -314,7 +316,6 @@ class TestTedLink:
     def test_returns_404_when_ted_has_no_match(self, monkeypatch):
         """TedLookupError → 404 with the lookup message verbatim. Pre-
         publication notices and bad UUIDs both hit this path."""
-        from src.services.ted_lookup import TedLookupError
 
         def _raise(_uuid):
             raise TedLookupError("TED has no published notice for X")
@@ -334,7 +335,6 @@ class TestTedLink:
         """httpx transport errors (TED outage, DNS, timeout) bubble up
         to the router which maps them to 502 so downstream callers
         can distinguish "TED is down" from "no such notice"."""
-        import httpx
 
         def _raise(_uuid):
             raise httpx.ConnectError("backend down")
