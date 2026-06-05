@@ -20,6 +20,7 @@ parallelise: add `FOR UPDATE SKIP LOCKED` and bump replicas.
 Image source: same fontem-api image as the relay; ENTRYPOINT is
 overridden to the consumer module.
 */}}
+{{- if .Values.wikidata.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -118,3 +119,4 @@ spec:
           # batch then exit), so allow up to ~one full BATCH
           # duration for the loop to drain.
           terminationGracePeriodSeconds: 300
+{{- end }}

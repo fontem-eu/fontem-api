@@ -17,6 +17,7 @@ Image source: shares the fontem-api image because the relay code lives
 under src/relay/ alongside the ETL loaders. ENTRYPOINT is overridden
 because the image's default CMD runs the FastAPI server.
 */}}
+{{- if .Values.wikidata.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -74,3 +75,4 @@ spec:
             # has it seeded with the truthy-dump snapshot timestamp.
             - name: WIKIDATA_RELAY_SINCE
               value: "2026-05-15T23:17:36Z"
+{{- end }}

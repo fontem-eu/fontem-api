@@ -9,6 +9,7 @@ sum by (state) so that pod restarts (each restart creates a new
 retention window expires) don't multiply the lines on the chart.
 The "total" lines are simple sum() with no `by`.
 */}}
+{{- if .Values.wikidata.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -253,3 +254,4 @@ data:
         }
       ]
     }
+{{- end }}
