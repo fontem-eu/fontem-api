@@ -7,7 +7,10 @@
 # pylint: disable=protected-access,unused-argument
 from unittest.mock import MagicMock
 
+import httpx
 
+from src.services import ted_lookup
+from src.services.ted_lookup import TedLookupError
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
 
 
@@ -282,3 +285,67 @@ class TestSectorSummary:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["division"] == "72"
+
+
+class TestTedLink:
+    """Tests for GET /contracts/{notice_id}/ted-link — the 302
+    redirector that translates our eForms UUID to TED's canonical
+    publication-number URL."""
+
+    def test_redirects_302_to_canonical_ted_url(self, monkeypatch):
+        """Happy path: TED resolves the UUID → publication-number, the
+        endpoint 302s to https://ted.europa.eu/en/notice/-/detail/<pub>.
+        Pin both the status and Location header so a regression in
+        either is loud."""
+        ted_lookup.resolve_publication_number.cache_clear()
+        monkeypatch.setattr(
+            "src.api.routers.contracts.resolve_publication_number",
+            lambda _uuid: "295342-2026",
+        )
+        mock = _mock_contract_source()
+        client = make_test_client(contract_source=mock)
+        resp = client.get(
+            "/contracts/912f1717-1ace-413d-aa61-cd21cd6b95e7/ted-link",
+            follow_redirects=False,
+        )
+        cleanup_dishka()
+        assert resp.status_code == 302
+        assert resp.headers["location"] == \
+            "https://ted.europa.eu/en/notice/-/detail/295342-2026"
+
+    def test_returns_404_when_ted_has_no_match(self, monkeypatch):
+        """TedLookupError → 404 with the lookup message verbatim. Pre-
+        publication notices and bad UUIDs both hit this path."""
+
+        def _raise(_uuid):
+            raise TedLookupError("TED has no published notice for X")
+        monkeypatch.setattr(
+            "src.api.routers.contracts.resolve_publication_number", _raise,
+        )
+        mock = _mock_contract_source()
+        client = make_test_client(contract_source=mock)
+        resp = client.get(
+            "/contracts/X/ted-link", follow_redirects=False,
+        )
+        cleanup_dishka()
+        assert resp.status_code == 404
+        assert "no published notice" in resp.json()["detail"]
+
+    def test_returns_502_when_ted_api_errors(self, monkeypatch):
+        """httpx transport errors (TED outage, DNS, timeout) bubble up
+        to the router which maps them to 502 so downstream callers
+        can distinguish "TED is down" from "no such notice"."""
+
+        def _raise(_uuid):
+            raise httpx.ConnectError("backend down")
+        monkeypatch.setattr(
+            "src.api.routers.contracts.resolve_publication_number", _raise,
+        )
+        mock = _mock_contract_source()
+        client = make_test_client(contract_source=mock)
+        resp = client.get(
+            "/contracts/X/ted-link", follow_redirects=False,
+        )
+        cleanup_dishka()
+        assert resp.status_code == 502
+        assert "TED search API error" in resp.json()["detail"]
