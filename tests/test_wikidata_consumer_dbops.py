@@ -112,6 +112,32 @@ def test_clear_dirty_batch_executemany_with_pairs():
     assert conn.commits == 1
 
 
+def test_clear_dirty_batch_sorts_pairs_by_entity_id():
+    """Regression: prod hit a relay/consumer deadlock when the
+    consumer's executemany acquired row locks in submitted order and
+    the relay's multi-event transaction acquired them in SSE-arrival
+    order — overlapping sets crossed the lock orders. Sorting here
+    makes the consumer's lock-acquisition order monotonic so it can
+    never form the second leg of a cycle, even if the relay regresses
+    out of autocommit or a second consumer process appears."""
+    cur = _FakeCursor()
+    conn = _FakeConn(cur)
+    # Submit in reverse-alphabetic order; expect monotonic-ascending
+    # delivery to executemany.
+    pairs = [
+        ("Q99", "2026-01-09"),
+        ("Q42", "2026-01-05"),
+        ("Q1",  "2026-01-01"),
+        ("Q42", "2026-01-07"),  # second observation of Q42 in batch
+    ]
+    clear_dirty_batch(conn, pairs)
+    _sql, seq = cur.executemany_calls[0]
+    assert [p[0] for p in seq] == ["Q1", "Q42", "Q42", "Q99"], (
+        f"executemany received {seq!r} — must be entity_id-sorted to "
+        "preserve deterministic lock order"
+    )
+
+
 # ── log_run ─────────────────────────────────────────────────────
 
 
