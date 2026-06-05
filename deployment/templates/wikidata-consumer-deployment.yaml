@@ -94,15 +94,22 @@ spec:
             # wikidata_fetcher); above 5 just queues threads on the
             # conn-pool semaphore.
             #
-            # Settled at 4 after babysit on 2026-06-04:
-            #   * 3 → ~7 entities/s, 0–3 rate-limited warnings/min
-            #   * 5 → climbed to 15+ rate-limited warnings/min and the
-            #     extra 429 Retry-After sleeps cancelled out the extra
-            #     thread, so net throughput didn't improve.
-            #   * 4 is the sweet spot: more drain headroom than 3, no
-            #     meaningful rise in 429s.
+            # Stay at 3. Babysit on 2026-06-04 covered three settings:
+            #
+            #   value | rate-limited/min | batch time | throughput
+            #   ------+------------------+------------+-----------
+            #     3   |     0–3          |   ~68 s    |  7.4 ent/s   ← best
+            #     4   |     0–12 (avg 6) |   ~76 s    |  6.6 ent/s
+            #     5   |    5–15+         |   not measured (regressed quickly)
+            #
+            # We're rate-budget-limited by Wikimedia's per-IP throttle,
+            # not by worker count: above 3 threads the 429 Retry-After
+            # sleeps cost more wall-clock than the extra parallelism
+            # buys back. The only meaningful drain-rate lever is more
+            # replicas (distinct source IPs); a single replica is best
+            # tuned at 3.
             - name: WIKIDATA_CONSUMER_CONCURRENCY
-              value: "4"
+              value: "3"
             - name: WIKIDATA_CONSUMER_SLEEP_BUSY_S
               value: "5"
             - name: WIKIDATA_CONSUMER_SLEEP_IDLE_S
