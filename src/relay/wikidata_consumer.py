@@ -171,16 +171,28 @@ def clear_dirty_batch(conn, pairs: list[tuple[str, object]]) -> None:
     """Optimistic-batched-delete the dirty-rows whose
     ``(entity_id, last_changed_at)`` is still what we observed at
     lease time. Rows whose timestamp moved (relay bumped them mid-
-    batch) are simply not matched and stay for the next run."""
+    batch) are simply not matched and stay for the next run.
+
+    Pairs are sorted by ``entity_id`` before executing so the batched
+    DELETE acquires row locks in a deterministic, monotonic order.
+    Without this — combined with the relay's pre-fix multi-event
+    transactions — the two could deadlock in prod: relay's
+    INSERT-ON-CONFLICT upserts locked rows in SSE-arrival order, this
+    function's executemany locked rows in submitted order, and any
+    overlap inverted the lock orders. The relay is now autocommit
+    (one row lock at a time, never a deadlock party), but sorting
+    here is belt + braces and future-proofs against multi-row relay
+    batches or a second consumer process."""
     if not pairs:
         return
+    sorted_pairs = sorted(pairs, key=lambda pair: pair[0])
     with conn.cursor() as cur:
         cur.executemany(
             """
             DELETE FROM wikidata.dirty_entities
              WHERE entity_id = %s AND last_changed_at = %s
             """,
-            pairs,
+            sorted_pairs,
         )
     conn.commit()
 

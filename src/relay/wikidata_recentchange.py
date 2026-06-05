@@ -307,7 +307,19 @@ def stream_loop(database_url: str) -> None:
     backoff = 5
     while True:
         try:
-            with psycopg.connect(database_url) as conn:
+            # autocommit=True so each dirty_entities INSERT commits
+            # independently. Without it, the relay accumulates ~100
+            # row locks per CHECKPOINT_BATCH (~30s window) and
+            # deadlocks against the consumer's batched DELETE — the
+            # consumer's executemany() locks rows in submitted order,
+            # the relay's per-event upserts hold locks in
+            # SSE-arrival order, and when the sets overlap a
+            # lock-order inversion cycle forms. autocommit makes the
+            # relay never hold more than one row lock at a time, so
+            # it can no longer be a deadlock party. Cost: ~100x more
+            # commits/sec; at ~3 events/sec sustained that's still
+            # well within Postgres budget.
+            with psycopg.connect(database_url, autocommit=True) as conn:
                 since = get_resume_cursor(conn)
                 since_str = since.astimezone(timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
