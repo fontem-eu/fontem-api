@@ -6,13 +6,20 @@ contract detail, sector summary, and unified search.
 """
 from __future__ import annotations
 
+import httpx
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import RedirectResponse
 
 from src.analysis.contract_data_source import ContractDataSource
 from src.analysis.person_data_source import PersonDataSource
 from src.api.lang import authority_name_expr, safe_lang
 from src.data.graph.neo4j_client import Neo4jClient
+from src.services.ted_lookup import (
+    TedLookupError,
+    detail_url_for,
+    resolve_publication_number,
+)
 
 
 router = APIRouter(tags=["contracts"])
@@ -164,6 +171,37 @@ def contract_detail(
     if result is None:
         raise HTTPException(status_code=404, detail="Contract not found")
     return result
+
+
+@router.get(
+    "/contracts/{notice_id}/ted-link",
+    responses={
+        302: {"description": "redirect to the canonical TED detail URL"},
+        404: {"description": "TED has no published notice for this UUID"},
+        502: {"description": "TED search API unavailable or errored"},
+    },
+)
+def contract_ted_link(notice_id: str) -> RedirectResponse:
+    """302 to the canonical TED notice detail page for ``notice_id``.
+
+    Our DB stores ``ted_notice_id`` as the eForms internal UUID, but
+    TED's public detail URL is keyed by the human-readable
+    publication-number (e.g. ``295342-2026``) that TED assigns at
+    publication time. Looking it up at click-time keeps the frontend
+    URL-builder simple and the data model unchanged.
+
+    Resolved publication-numbers are LRU-cached in-process, so
+    repeat clicks are O(1) and we don't hammer TED's API.
+    """
+    try:
+        pub_num = resolve_publication_number(notice_id)
+    except TedLookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"TED search API error: {exc}",
+        ) from exc
+    return RedirectResponse(url=detail_url_for(pub_num), status_code=302)
 
 
 @router.get("/search")
