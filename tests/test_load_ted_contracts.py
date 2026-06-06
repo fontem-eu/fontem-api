@@ -1,8 +1,23 @@
 """Tests for the TED contract loader (post-event-log)."""
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.etl import load_ted_contracts
 from src.etl.load_ted_contracts import load_contracts
+
+
+@pytest.fixture(autouse=True)
+def _stub_ted_lookup(monkeypatch):
+    """The ETL now resolves the publication-number via TED's v3 search
+    on every iteration; pin the helper to a stable value so tests
+    don't hit the network. The default — "295342-2026" — mirrors the
+    real shape; individual tests can re-patch for None or exception
+    paths."""
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts._resolve_pub_num_or_none",
+        lambda _uuid: "295342-2026",
+    )
 
 
 def _mock_driver_and_session():
@@ -50,8 +65,12 @@ def _stub_award(currency="EUR", value=1000.0, contractor_org_id="O1"):
 
 def _stub_notice(*, awards, organizations):
     notice = MagicMock()
-    notice.publication_number = "2025-OJS123-456789"
-    notice.notice_id = "BT701/2025"
+    # Match real eForms parsing: publication_number is never populated
+    # by the parser (TED assigns it post-ingest), only notice_id is.
+    # The ETL now uses notice_id directly as ted_notice_id and
+    # resolves publication-number out-of-band via TED's v3 search API.
+    notice.publication_number = None
+    notice.notice_id = "912f1717-1ace-413d-aa61-cd21cd6b95e7"
     notice.title = "Some contract"
     notice.description = "Procurement of stuff"
     notice.issue_date = "2025-09-01"
@@ -172,13 +191,156 @@ def test_contract_payload_carries_authority_and_company_links(
     payload = contract_call.kwargs["payload"]
     assert payload["authority_id"] == "auth-1"
     assert payload["company_gmr_id"] == "company-1"
-    assert payload["ted_notice_id"] == "2025-OJS123-456789"
+    assert payload["ted_notice_id"] == "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+    assert payload["ted_publication_number"] == "295342-2026"
     assert payload["cpv"] == "45000000"
     # The acquirer (buyer.country = "FR") cascades onto the Contract
     # as alpha-3 "FRA". Before this fix, Contract had no country at
     # all — the dashboard's "contracts by country" panel was empty
     # for 56k staging contracts.
     assert payload["country"] == "FRA"
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_contract_iri_keyed_on_uuid_not_publication_number(
+    mock_matcher_cls, mock_stream,
+):
+    """The Contract IRI is built from ted_notice_id (the stable UUID),
+    NOT from the publication-number. Why: TED publishes the pub-num
+    after the eForms XML appears in the daily archive, and may revise
+    it on re-publication. Keying RDF identifiers on a value that can
+    change after first ingest breaks downstream consumers that have
+    already cached the IRI."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1",
+        stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    mock_stream.return_value = iter([
+        _stub_notice(
+            awards=[_stub_award()],
+            organizations={"O1": contractor},
+        ),
+    ])
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    load_contracts(driver, log, "/fake/path.tar.gz")
+
+    contract_call = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    )
+    iri = contract_call.kwargs["iri"]
+    assert iri.endswith("/912f1717-1ace-413d-aa61-cd21cd6b95e7"), iri
+    # The pub-num value is still on the payload — just not in the IRI.
+    assert contract_call.kwargs["payload"]["ted_publication_number"] == \
+        "295342-2026"
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_contract_publication_number_null_when_lookup_returns_none(
+    mock_matcher_cls, mock_stream, monkeypatch,
+):
+    """Notices whose TED publication-number can't be resolved at ETL
+    time — TED hasn't assigned one yet, or the search API returned
+    no match — emit the Contract with ``ted_publication_number=None``.
+    The builder strips None values, so the field is just absent from
+    the payload (not the empty string). The runtime /ted-link
+    redirector then falls back to its own live lookup on click."""
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts._resolve_pub_num_or_none",
+        lambda _uuid: None,
+    )
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1",
+        stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    mock_stream.return_value = iter([
+        _stub_notice(
+            awards=[_stub_award()],
+            organizations={"O1": contractor},
+        ),
+    ])
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    load_contracts(driver, log, "/fake/path.tar.gz")
+
+    contract_call = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    )
+    payload = contract_call.kwargs["payload"]
+    assert "ted_publication_number" not in payload, (
+        "builder must elide None — leaving the field absent so the "
+        f"sink doesn't write a null property; got payload keys "
+        f"{list(payload)}"
+    )
+
+
+def test_resolve_pub_num_or_none_swallows_transport_errors(
+    monkeypatch,
+):
+    """ETL must never fail a contract row because TED's search API
+    is unreachable — the deeper fontem-events transaction would
+    rollback the whole batch. Wrapper returns None on httpx errors
+    so the row persists with no pub-num and the runtime redirector
+    picks up the slack."""
+    import httpx  # pylint: disable=import-outside-toplevel
+    import importlib  # pylint: disable=import-outside-toplevel
+    from src.services import ted_lookup  # pylint: disable=import-outside-toplevel
+    ted_lookup.resolve_publication_number.cache_clear()
+
+    # The autouse fixture stubs _resolve_pub_num_or_none itself —
+    # undo it on this module attribute so we exercise the real
+    # wrapper below.
+    monkeypatch.undo()
+    importlib.reload(load_ted_contracts)
+
+    def _explode(_uuid):
+        raise httpx.ConnectError("TED is down")
+
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts.resolve_publication_number",
+        _explode,
+    )
+    out = load_ted_contracts._resolve_pub_num_or_none(  # pylint: disable=protected-access
+        "912f1717-1ace-413d-aa61-cd21cd6b95e7",
+    )
+    assert out is None
+
+
+def test_resolve_pub_num_or_none_returns_none_on_no_match(monkeypatch):
+    """TedLookupError (TED has no record of the UUID) → None, same as
+    the transport-error path. The row persists; the redirector
+    surfaces the 404 from its own lookup on click."""
+    import importlib  # pylint: disable=import-outside-toplevel
+    from src.services import ted_lookup  # pylint: disable=import-outside-toplevel
+    from src.services.ted_lookup import TedLookupError  # pylint: disable=import-outside-toplevel
+    ted_lookup.resolve_publication_number.cache_clear()
+
+    monkeypatch.undo()
+    importlib.reload(load_ted_contracts)
+
+    def _no_match(_uuid):
+        raise TedLookupError("TED has no published notice for X")
+
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts.resolve_publication_number",
+        _no_match,
+    )
+    out = load_ted_contracts._resolve_pub_num_or_none(  # pylint: disable=protected-access
+        "912f1717-1ace-413d-aa61-cd21cd6b95e7",
+    )
+    assert out is None
 
 
 @patch("src.etl.load_ted_contracts.stream_notices")

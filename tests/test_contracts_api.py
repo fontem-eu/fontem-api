@@ -64,6 +64,7 @@ def _mock_contract_source(company_contracts=None, search_companies=None,
         "contract_count": 1,
         "contracts": [],
     }
+    source.get_stored_publication_number.return_value = None
     source.get_sector_summary.return_value = [
         {"division": "72", "description": "IT services",
          "total_value": 500000, "contract_count": 1},
@@ -349,3 +350,62 @@ class TestTedLink:
         cleanup_dishka()
         assert resp.status_code == 502
         assert "TED search API error" in resp.json()["detail"]
+
+
+    def test_uses_stored_pub_num_and_skips_live_lookup(self, monkeypatch):
+        """When the Contract row already carries a publication-number
+        (ETL captured it at ingest time, or backfill landed it),
+        the router 302s directly with the stored value and never
+        hits TED's search API. Critical for cold-pod performance and
+        to keep TED out of the click-path."""
+        ted_lookup.resolve_publication_number.cache_clear()
+        live_calls = {"n": 0}
+
+        def _live_should_not_run(_uuid):
+            live_calls["n"] += 1
+            return "live-99999-2026"
+        monkeypatch.setattr(
+            "src.api.routers.contracts.resolve_publication_number",
+            _live_should_not_run,
+        )
+        mock = _mock_contract_source()
+        mock.get_stored_publication_number.return_value = "295342-2026"
+        client = make_test_client(contract_source=mock)
+        resp = client.get(
+            "/contracts/912f1717-1ace-413d-aa61-cd21cd6b95e7/ted-link",
+            follow_redirects=False,
+        )
+        cleanup_dishka()
+        assert resp.status_code == 302
+        assert resp.headers["location"] == \
+            "https://ted.europa.eu/en/notice/-/detail/295342-2026"
+        assert live_calls["n"] == 0, (
+            "stored pub-num must fully short-circuit the TED v3 search "
+            "call — found "
+            f"{live_calls['n']} live lookup(s)"
+        )
+
+    def test_falls_through_to_live_when_stored_is_empty_string(
+        self, monkeypatch,
+    ):
+        """An empty string is treated the same as None — fall through
+        to the live lookup. Prevents a backfill or ETL bug that
+        wrote '' instead of leaving the property unset from
+        silently breaking the redirect path."""
+        ted_lookup.resolve_publication_number.cache_clear()
+        monkeypatch.setattr(
+            "src.api.routers.contracts.resolve_publication_number",
+            lambda _uuid: "295342-2026",
+        )
+        mock = _mock_contract_source()
+        # Defense in depth: even though get_stored_publication_number
+        # in the GraphContractSource normalises '' → None, exercise
+        # the router's own guard too.
+        mock.get_stored_publication_number.return_value = ""
+        client = make_test_client(contract_source=mock)
+        resp = client.get(
+            "/contracts/X/ted-link", follow_redirects=False,
+        )
+        cleanup_dishka()
+        assert resp.status_code == 302
+        assert resp.headers["location"].endswith("/295342-2026")

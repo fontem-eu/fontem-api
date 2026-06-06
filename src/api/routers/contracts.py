@@ -181,18 +181,37 @@ def contract_detail(
         502: {"description": "TED search API unavailable or errored"},
     },
 )
-def contract_ted_link(notice_id: str) -> RedirectResponse:
+@inject
+def contract_ted_link(
+    notice_id: str,
+    source: FromDishka[ContractDataSource],
+) -> RedirectResponse:
     """302 to the canonical TED notice detail page for ``notice_id``.
 
-    Our DB stores ``ted_notice_id`` as the eForms internal UUID, but
-    TED's public detail URL is keyed by the human-readable
-    publication-number (e.g. ``295342-2026``) that TED assigns at
-    publication time. Looking it up at click-time keeps the frontend
-    URL-builder simple and the data model unchanged.
+    Two paths to a publication-number:
 
-    Resolved publication-numbers are LRU-cached in-process, so
-    repeat clicks are O(1) and we don't hammer TED's API.
+    1. **Stored on the Contract row** — the TED ETL resolves
+       publication-numbers via TED's v3 search API at ingest time and
+       persists them as ``ted_publication_number`` on the Contract
+       node. When present, the redirect is O(1): one Neo4j read, no
+       TED traffic, cold-pod-friendly.
+    2. **Looked up live** — for contracts ingested before the ETL
+       captured the field, or whose publication-number wasn't yet
+       assigned at ingest (queued / not-yet-published), fall back to
+       the live TED v3 search call. LRU-cached process-locally so
+       repeat clicks are still O(1).
+
+    Errors:
+    - ``404`` — TED has no record of the UUID (notice never published
+      or never existed). Surfaced from the lookup so the message
+      doesn't drift between the ETL and the runtime path.
+    - ``502`` — TED search transport error (DNS, timeout, 5xx).
+      Distinct from 404 so clients can retry the rare "TED is down"
+      case without retrying the permanent "no such notice" case.
     """
+    stored = source.get_stored_publication_number(notice_id)
+    if stored:
+        return RedirectResponse(url=detail_url_for(stored), status_code=302)
     try:
         pub_num = resolve_publication_number(notice_id)
     except TedLookupError as exc:
