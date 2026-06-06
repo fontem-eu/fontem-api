@@ -549,13 +549,41 @@ def _release_claim(driver: Driver, uuid: str) -> None:
 
 
 def _ensure_schema(driver: Driver) -> None:
+    """Both objects are best-effort. The shared Neo4j may already
+    carry a standalone RANGE index on ``Contract.ted_notice_id`` from
+    an earlier schema; converting that to a unique constraint requires
+    dropping the index first, which is a destructive op that doesn't
+    belong inside a backfill startup. Swallow ``IndexAlreadyExists``
+    and log it instead — the script's correctness depends on the
+    WHERE clauses, not on the constraint."""
+    from neo4j.exceptions import ClientError  # pylint: disable=import-outside-toplevel
     with driver.session(database="neo4j") as session:
-        session.execute_write(
-            lambda tx: tx.run(UNIQUENESS_CYPHER).consume(),
-        )
-        session.execute_write(
-            lambda tx: tx.run(INDEX_CYPHER).consume(),
-        )
+        try:
+            session.execute_write(
+                lambda tx: tx.run(UNIQUENESS_CYPHER).consume(),
+            )
+        except ClientError as exc:
+            code = getattr(exc, "code", "") or ""
+            if "IndexAlreadyExists" in code:
+                logger.info(
+                    "ensure_schema constraint skipped — pre-existing "
+                    "index on Contract.ted_notice_id (%s)", code,
+                )
+            else:
+                raise
+        try:
+            session.execute_write(
+                lambda tx: tx.run(INDEX_CYPHER).consume(),
+            )
+        except ClientError as exc:
+            code = getattr(exc, "code", "") or ""
+            if "IndexAlreadyExists" in code or "EquivalentIndexAlreadyExists" in code:
+                logger.info(
+                    "ensure_schema lookup-state index already exists (%s)",
+                    code,
+                )
+            else:
+                raise
 
 
 def _validation_gate(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
