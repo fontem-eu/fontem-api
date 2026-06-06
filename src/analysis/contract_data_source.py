@@ -40,3 +40,11 @@ class ContractDataSource(ABC):
         self, country: str | None = None, year: int | None = None,
     ) -> list[dict]:
         """Return aggregated contract values by CPV division."""
+
+    @abstractmethod
+    def get_stored_publication_number(self, notice_id: str) -> str | None:
+        """Return the TED publication-number stored on the Contract row
+        keyed by ``notice_id`` (the eForms UUID), or ``None`` if the
+        contract has no stored pub-num. Used by the /ted-link
+        redirector to skip the runtime TED v3 search when the value
+        has already been resolved at ETL time."""

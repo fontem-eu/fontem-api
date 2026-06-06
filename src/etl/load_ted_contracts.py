@@ -39,11 +39,42 @@ from eforms.stream import stream_notices
 
 from ..services.currency.client import CurrencyClient
 from ..services.location_service import LocationService
+from ..services.ted_lookup import TedLookupError, resolve_publication_number
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .ted_matcher import TedMatcher
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_pub_num_or_none(notice_uuid: str) -> str | None:
+    """Resolve UUID → TED publication-number, returning None on any
+    miss instead of raising. Notices that are queued but not yet
+    published — or that TED's search returns no match for — get a
+    ``None`` so the row persists without a stored pub-num. A later
+    ETL pass (or the backfill) can refill it once TED has the data.
+
+    Transport-level errors (TED API down, DNS, timeout) are also
+    swallowed to None and logged at WARNING so a TED outage doesn't
+    poison the whole ETL run; the contracts still land with a null
+    pub-num and the runtime /api/contracts/<id>/ted-link redirector
+    becomes the path of last resort.
+
+    ``resolve_publication_number`` is LRU-cached, so this is O(1) for
+    notice UUIDs already resolved this run (multi-award notices
+    inside a single batch don't pay extra TED calls)."""
+    try:
+        return resolve_publication_number(notice_uuid)
+    except TedLookupError as exc:
+        logger.debug("no TED publication-number for %s: %s", notice_uuid, exc)
+        return None
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "TED search lookup transport error for %s (%s) — "
+            "storing null pub-num, runtime redirector will retry",
+            notice_uuid, exc,
+        )
+        return None
 
 
 def _coalesce_date(award, notice) -> tuple[str | None, str]:
@@ -180,7 +211,14 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
                     contractor.name, contractor.country, raw_vat,
                 )
 
-                pub_num = notice.publication_number or notice.notice_id
+                # The eForms parser only ever fills `notice_id` (the
+                # cbc:ID UUID); `publication_number` stays None. Resolve
+                # the TED-assigned publication-number out-of-band via
+                # the v3 search API so the Contract row carries both
+                # identifiers and downstream readers can build the
+                # canonical detail URL without a per-click lookup.
+                ted_notice_id = notice.notice_id
+                ted_publication_number = _resolve_pub_num_or_none(ted_notice_id)
                 declared_currency = award.currency or notice.currency
                 raw_value = award.value or notice.total_value
                 effective_date, _date_source = _coalesce_date(award, notice)
@@ -244,10 +282,14 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
 
                 emit.upsert(
                     "UpsertContract",
-                    iri=f"http://data.fontem.eu/id/Contract/{pub_num}",
+                    # IRI keyed by the stable UUID (notice_id) so it
+                    # doesn't change once TED assigns / revises a
+                    # publication-number after first ingest.
+                    iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
                     domain="contract",
                     payload=builders.upsert_contract(
-                        ted_notice_id=pub_num,
+                        ted_notice_id=ted_notice_id,
+                        ted_publication_number=ted_publication_number,
                         title=notice.title or None,
                         authority_id=authority_id,
                         company_gmr_id=str(match.gmr_id),

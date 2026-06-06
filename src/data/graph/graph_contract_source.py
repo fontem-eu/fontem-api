@@ -49,6 +49,12 @@ class GraphContractSource(ContractDataSource):
                 "-[:AWARDED_TO]->(c:Company {gmr_id: $gid}) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN ct.ted_notice_id AS notice_id, "
+                # ted_publication_number is the human-readable TED ID
+                # ("295342-2026"); the UI uses it to short-circuit the
+                # /api/contracts/<id>/ted-link redirector and link
+                # straight to TED. May be null on rows ingested before
+                # the publication-number capture landed (see backfill).
+                "  ct.ted_publication_number AS publication_number, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
                 "  ct.procedure_type AS procedure_type, "
@@ -79,6 +85,7 @@ class GraphContractSource(ContractDataSource):
                 cpv_label = f"{r['cpv']} - {r['cpv_description']}"
             contracts.append({
                 "ted_notice_id": r["notice_id"],
+                "ted_publication_number": r.get("publication_number"),
                 "title": r["title"],
                 "value_eur": r["value_eur"],
                 "award_date": r["award_date"],
@@ -122,6 +129,7 @@ class GraphContractSource(ContractDataSource):
                 "-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN ct.ted_notice_id AS notice_id, "
+                "  ct.ted_publication_number AS publication_number, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
                 "  ct.procedure_type AS procedure_type, "
@@ -147,6 +155,7 @@ class GraphContractSource(ContractDataSource):
                 cpv_label = f"{r['cpv']} - {r['cpv_description']}"
             contracts.append({
                 "ted_notice_id": r["notice_id"],
+                "ted_publication_number": r.get("publication_number"),
                 "title": r["title"],
                 "value_eur": r["value_eur"],
                 "award_date": r["award_date"],
@@ -202,6 +211,7 @@ class GraphContractSource(ContractDataSource):
         #     `publication_date` (no separate award date in the TED XML).
         return {
             "ted_notice_id": ct["ted_notice_id"],
+            "ted_publication_number": ct.get("ted_publication_number"),
             "ted_url": ct.get("ted_url"),
             "title": title,
             "description": None,
@@ -249,3 +259,29 @@ class GraphContractSource(ContractDataSource):
                 **params,
             ).data()
         return rows
+
+
+    def get_stored_publication_number(self, notice_id: str) -> str | None:
+        """Look up just the pub-num for a contract row, no joins.
+
+        Used by the /ted-link redirector to skip the TED v3 search call
+        when the ETL has already resolved + persisted the value. Returns
+        ``None`` for contracts whose ted_publication_number is null,
+        not yet ingested, or whose ted_notice_id doesn't exist — the
+        caller falls back to the live search lookup in all three cases.
+
+        Tight single-row read because this is on the click-through hot
+        path; the LRU cache in src/services/ted_lookup.py wins again
+        after one hit per pod, but this query keeps cold hits off TED.
+        """
+        with self._neo4j.session() as session:
+            row = session.run(
+                "MATCH (ct:Contract {ted_notice_id: $nid}) "
+                "RETURN ct.ted_publication_number AS pub_num "
+                "LIMIT 1",
+                nid=notice_id,
+            ).single()
+        if row is None:
+            return None
+        pub_num = row["pub_num"]
+        return str(pub_num) if pub_num else None
