@@ -1,0 +1,90 @@
+# One-off backfill that fills Contract.ted_publication_number from
+# TED's v3 search API. See src/etl/backfill_ted_publication_numbers.py
+# for the runbook + state machine.
+#
+# Apply:
+#   kubectl apply -f deploy/jobs/backfill-ted-pubnum.yaml
+# Pause (state survives in the graph):
+#   kubectl -n fontem-shared delete job backfill-ted-pubnum \
+#     --cascade=foreground
+# Resume: re-apply this manifest.
+# Live throttle (no restart):
+#   kubectl -n fontem-shared edit configmap backfill-ted-pubnum-throttle
+#   # set data.rate to e.g. "1.0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backfill-ted-pubnum-throttle
+  namespace: fontem-shared
+data:
+  rate: "3.0"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backfill-ted-pubnum
+  namespace: fontem-shared
+spec:
+  ttlSecondsAfterFinished: 604800   # keep logs visible for a week
+  backoffLimit: 3                   # capped low; circuit breaker handles bad-TED
+  activeDeadlineSeconds: 86400      # 24h cap (ideal ~5h + retries)
+  template:
+    metadata:
+      labels:
+        app: backfill-ted-pubnum
+      annotations:
+        linkerd.io/inject: enabled
+    spec:
+      restartPolicy: OnFailure
+      terminationGracePeriodSeconds: 180
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: backfill
+          image: contribute.void42.internal/fontem/fontem-api:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "src.etl.backfill_ted_publication_numbers"]
+          args:
+            - "--batch-size=200"
+            - "--rate=3.0"
+            - "--log-interval=30"
+            - "--grace-seconds=180"
+          env:
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_URI
+            - name: NEO4J_USER
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_USER
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: BACKFILL_THROTTLE_FILE
+              value: /etc/backfill/rate
+          volumeMounts:
+            - name: throttle
+              mountPath: /etc/backfill
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: throttle
+          configMap:
+            name: backfill-ted-pubnum-throttle
+            items:
+              - key: rate
+                path: rate
