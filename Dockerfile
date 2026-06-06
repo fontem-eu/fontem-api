@@ -5,7 +5,7 @@
 # Run:     docker run -p 8000:8000 edgar-gmr-etl:latest
 # Swagger: http://localhost:8000/docs
 # ──────────────────────────────────────────────────────────────────────────────
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
 
