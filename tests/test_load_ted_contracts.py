@@ -20,6 +20,17 @@ def _stub_ted_lookup(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_already_loaded(monkeypatch):
+    """Idempotency gate: default to "not yet loaded" so existing happy-
+    path tests exercise the emit pipeline. Tests that want to assert the
+    skip path re-patch this to return True."""
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts._already_loaded",
+        lambda _session, _nid: False,
+    )
+
+
 def _mock_driver_and_session():
     """Create a mock Neo4j driver with session (TedMatcher reads
     Neo4j to resolve gmr_ids; the rest of the writes go to events)."""
@@ -117,11 +128,14 @@ def test_emits_authority_company_and_contract(
     log, emit = _mock_log()
     res = load_contracts(driver, log, "/fake/path.tar.gz")
     assert res["total"] == 1
-    assert res["authorities"] == 1
-    assert res["companies"] == 1
+    assert res["skipped"] == 0
 
     types = [c.args[0] for c in emit.upsert.call_args_list]
     assert types == ["UpsertAuthority", "UpsertCompany", "UpsertContract"]
+    # The skipped counter is the path the idempotent-skip operator
+    # exercises; per-notice transactions mean the emit-side counts
+    # are the source of truth for "how many notices were processed",
+    # not the return shape, which only carries totals/skips/elapsed.
 
 
 @patch("src.etl.load_ted_contracts.stream_notices")
@@ -363,14 +377,153 @@ def test_skips_award_with_unknown_contractor(
     driver, _session = _mock_driver_and_session()
     log, emit = _mock_log()
     res = load_contracts(driver, log, "/fake/path.tar.gz")
-    # Authority was emitted (we resolve buyer before iterating awards).
-    assert res["total"] == 0
-    assert res["authorities"] == 1
+    # Per-notice transaction commits the (empty awards) notice — the
+    # Authority emit still goes out because we resolve buyer before
+    # iterating awards, but no Contract is emitted.
+    assert res["total"] == 1
+    auth_emits = [
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertAuthority"
+    ]
+    assert len(auth_emits) == 1
     contract_emits = [
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ]
     assert contract_emits == []
+
+
+# ── idempotency: skip notices already in Neo4j ──────────────────────
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_skips_notice_already_in_neo4j(
+    mock_matcher_cls, mock_stream, monkeypatch,
+):
+    """Idempotent re-run: notices whose ``ted_notice_id`` already
+    exists on a ``Contract`` node in Neo4j are skipped entirely — no
+    TED-search call, no eForms work, no emit. The whole point is
+    that re-running the same month is O(1)-per-notice instead of
+    paying the full per-notice cost again."""
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts._already_loaded",
+        lambda _session, _nid: True,
+    )
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1",
+        stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    mock_stream.return_value = iter([
+        _stub_notice(
+            awards=[_stub_award()],
+            organizations={"O1": contractor},
+        ),
+    ])
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    res = load_contracts(driver, log, "/fake/path.tar.gz")
+
+    assert res["total"] == 0
+    assert res["skipped"] == 1
+    # No emit calls of any kind — the skip is total.
+    assert emit.upsert.call_args_list == []
+    # And no batch was opened — per-notice transactions are not
+    # started for skipped notices, which is the whole win.
+    assert log.batch.call_args_list == []
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_per_notice_transactions_one_batch_per_notice(
+    mock_matcher_cls, mock_stream,
+):
+    """Per-notice transactions: two notices → two ``log.batch(...)``
+    contexts. The old whole-archive batch kept hours of work in one
+    open Postgres transaction; this pins the new commit boundary so
+    a regression to "one batch per archive" trips the suite."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1",
+        stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Vendor"
+    contractor.country = "FR"
+    contractor.legal_id = None
+    notices = [
+        _stub_notice(awards=[_stub_award()], organizations={"O1": contractor}),
+        _stub_notice(awards=[_stub_award()], organizations={"O1": contractor}),
+    ]
+    # Distinct notice_ids so the idempotency stub treats them as
+    # separate notices.
+    notices[0].notice_id = "11111111-1111-1111-1111-111111111111"
+    notices[1].notice_id = "22222222-2222-2222-2222-222222222222"
+    mock_stream.return_value = iter(notices)
+
+    driver, _session = _mock_driver_and_session()
+    log, _emit = _mock_log()
+    load_contracts(driver, log, "/fake/path.tar.gz")
+
+    assert len(log.batch.call_args_list) == 2
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_skip_pub_num_lookup_skips_ted_v3_search(
+    mock_matcher_cls, mock_stream, monkeypatch,
+):
+    """``skip_pub_num_lookup=True`` short-circuits the per-notice TED
+    v3 search and emits Contracts with no ``ted_publication_number``.
+    The builder strips None so the property is absent — the
+    backfill job fills it in later. The bulk historical loader
+    flips this on to avoid paying ~500ms × millions of notices to
+    TED's API for a value that backfill can do in parallel."""
+    called: list[str] = []
+
+    def _should_not_be_called(_uuid):
+        called.append(_uuid)
+        return "should-not-appear"
+
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts._resolve_pub_num_or_none",
+        _should_not_be_called,
+    )
+
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1",
+        stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    mock_stream.return_value = iter([
+        _stub_notice(
+            awards=[_stub_award()],
+            organizations={"O1": contractor},
+        ),
+    ])
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    load_contracts(
+        driver, log, "/fake/path.tar.gz",
+        skip_pub_num_lookup=True,
+    )
+
+    assert not called, (
+        "skip_pub_num_lookup=True must not call _resolve_pub_num_or_none"
+    )
+    contract_call = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    )
+    payload = contract_call.kwargs["payload"]
+    assert "ted_publication_number" not in payload
 
 
 # ── --year/--month default to current calendar month ────────────────

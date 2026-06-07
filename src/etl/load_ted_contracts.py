@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import time
@@ -135,201 +134,275 @@ def _download_monthly(year: int, month: int, dest: Path) -> Path:
     return call_with_retry(_do_download)
 
 
+def _already_loaded(session, ted_notice_id: str) -> bool:
+    """Return True if a Contract with this ``ted_notice_id`` already
+    exists in Neo4j. Cheap O(1) check thanks to the
+    ``Contract.ted_notice_id`` index. Used by ``load_contracts`` to
+    skip notices that were ingested in a prior run — turns a re-run
+    into a no-op for already-loaded notices instead of the previous
+    per-notice TED-search + per-notice transaction cost."""
+    row = session.run(
+        "MATCH (c:Contract {ted_notice_id: $nid}) "
+        "RETURN c.ted_notice_id LIMIT 1",
+        nid=ted_notice_id,
+    ).single()
+    return row is not None
+
+
 def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     driver,
     log: EventLog,
     archive_path: Path,
     currency_svc: CurrencyClient | None = None,
+    skip_pub_num_lookup: bool = False,
 ):
     """Parse a TED archive and emit Authority/Contract/Company events.
 
-    The Neo4j driver is used READ-ONLY by ``TedMatcher`` to resolve
-    each contractor to a stable gmr_id; the actual writes go through
-    the event log."""
-    batch_id = uuid.uuid4()
-    total = 0
-    t0 = time.time()
-    loaded_at = datetime.now().astimezone().isoformat()
+    The Neo4j driver is used by ``TedMatcher`` to resolve each
+    contractor to a stable gmr_id, and by an idempotency check to
+    skip notices already ingested in a prior run; the actual writes
+    go through the event log.
 
-    with driver.session() as session, log.batch(
-        batch_id, producer="load_ted_contracts",
-    ) as emit:
+    Two commit-granularity changes from the previous shape:
+
+    1. **Per-notice transactions.** The whole-archive batch was
+       converted to one ``log.batch(...)`` per notice so committed
+       rows are visible immediately (sinks + dashboards see progress
+       in real time, not at end-of-month). The old shape held a
+       single Postgres transaction open for hours, blocked
+       autovacuum, hid progress from sinks, and lost everything if
+       the pod restarted mid-archive. Each notice is now its own
+       atomic unit, which matches TED's own publish boundary.
+
+    2. **Skip-already-loaded.** Before processing a notice's awards
+       we look up ``Contract.ted_notice_id`` in Neo4j. If the
+       contract exists, the notice was loaded in a prior run and
+       we skip it entirely — no TED-search call, no eForms parse
+       awards loop, no emit. Re-runs of the same archive are O(1)
+       per existing notice.
+
+    ``skip_pub_num_lookup=True`` short-circuits the per-notice
+    TED v3 search call (~500ms each) — useful for bulk historical
+    loads where the publication-number is backfilled later by
+    ``src.etl.backfill_ted_publication_numbers``. Without it, the
+    loader rate is bounded by TED's API; with it, by archive
+    parse + Neo4j sink throughput (~10x faster)."""
+    total = 0
+    skipped = 0
+    t0 = time.time()
+    loaded_at = datetime.now().astimezone().isoformat()  # pylint: disable=unused-variable
+    seen_authorities: set[str] = set()
+    seen_companies: set[str] = set()
+
+    with driver.session() as session:
         matcher = TedMatcher(session)
-        seen_authorities: set[str] = set()
-        seen_companies: set[str] = set()
 
         for notice in awards_only(stream_notices(archive_path)):
-            buyer = notice.buyer()
-            if not buyer:
+            # Idempotency gate — cheap pre-check before any TED
+            # call or event emission. Notices already in Neo4j get
+            # skipped wholesale; re-running an archive is now safe
+            # AND fast.
+            if _already_loaded(session, notice.notice_id):
+                skipped += 1
                 continue
-            buyer_legal_value = (
-                buyer.legal_id.value if buyer.legal_id else None
-            )
-            authority_id = matcher.match_authority(
-                buyer.name, buyer.country, buyer_legal_value,
-            )
 
-            # Emit the Authority once per run, even if it appears on
-            # many notices (the sink would MERGE either way, but this
-            # keeps the event log compact and replay-faster).
-            if authority_id not in seen_authorities:
-                emit.upsert(
-                    "UpsertAuthority",
-                    iri=f"http://data.fontem.eu/id/Authority/{authority_id}",
-                    domain="authority",
-                    payload=builders.upsert_authority(
-                        authority_id=authority_id,
-                        name=buyer.name,
-                        country=LocationService.to_alpha3(buyer.country),
-                        authority_type="contracting",
-                        national_id=buyer_legal_value,
-                    ),
-                )
-                seen_authorities.add(authority_id)
-
-            for award in notice.awards:
-                contractor = notice.organizations.get(
-                    award.contractor_org_id
-                )
-                if not contractor:
-                    continue
-
-                # eforms-parser 0.2.0 returns `legal_id` as a LegalIdentifier.
-                # Same VAT-routing logic as the pre-migration loader.
-                from src.etl.identifiers import canon_vat  # pylint: disable=import-outside-toplevel
-
-                raw_vat: str | None = None
-                if contractor.legal_id is not None:
-                    value = contractor.legal_id.value
-                    scheme = (contractor.legal_id.scheme_name or "").upper()
-                    if scheme == "VAT":
-                        raw_vat = canon_vat(value)
-                    elif scheme in ("NATIONAL", "EORI", ""):
-                        raw_vat = canon_vat(value)
-
-                match = matcher.match_company(
-                    contractor.name, contractor.country, raw_vat,
-                )
-
-                # The eForms parser only ever fills `notice_id` (the
-                # cbc:ID UUID); `publication_number` stays None. Resolve
-                # the TED-assigned publication-number out-of-band via
-                # the v3 search API so the Contract row carries both
-                # identifiers and downstream readers can build the
-                # canonical detail URL without a per-click lookup.
-                ted_notice_id = notice.notice_id
-                ted_publication_number = _resolve_pub_num_or_none(ted_notice_id)
-                declared_currency = award.currency or notice.currency
-                raw_value = award.value or notice.total_value
-                effective_date, _date_source = _coalesce_date(award, notice)
-
-                # Parse + currency-resolve via the currency service.
-                if currency_svc:
-                    parsed_value, _was_sentinel = currency_svc.parse_value(
-                        raw_value,
-                    )
-                else:
-                    parsed_value = (
-                        _Decimal(str(raw_value))
-                        if raw_value is not None else None
-                    )
-                resolved_currency = None
-                value_eur_decimal = None
-                if currency_svc:
-                    rate_date_str = effective_date or notice.issue_date
-                    try:
-                        rate_date_obj = (
-                            _date.fromisoformat(rate_date_str[:10])
-                            if rate_date_str else None
-                        )
-                    except (ValueError, TypeError):
-                        rate_date_obj = None
-                    resolved_currency, _inferred = currency_svc.resolve_currency(
-                        declared_currency,
-                        country=(buyer.country or "").upper(),
-                        on=rate_date_obj,
-                    )
-                    if parsed_value is not None and resolved_currency:
-                        value_eur_decimal = currency_svc.to_eur(
-                            parsed_value, resolved_currency, rate_date_obj,
-                        )
-                else:
-                    resolved_currency = declared_currency
-
-                value_original_float = (
-                    float(parsed_value) if parsed_value is not None else None
-                )
-                value_eur_float = (
-                    float(value_eur_decimal)
-                    if value_eur_decimal is not None else None
-                )
-
-                # Emit Company once per run too.
-                if match.gmr_id not in seen_companies:
-                    emit.upsert(
-                        "UpsertCompany",
-                        iri=f"http://data.fontem.eu/id/Company/{match.gmr_id}",
-                        domain="company",
-                        payload=builders.upsert_company(
-                            gmr_id=str(match.gmr_id),
-                            name=contractor.name or None,
-                            country=LocationService.to_alpha3(contractor.country),
-                            vat=raw_vat,
-                            active=True,
-                        ),
-                    )
-                    seen_companies.add(match.gmr_id)
-
-                emit.upsert(
-                    "UpsertContract",
-                    # IRI keyed by the stable UUID (notice_id) so it
-                    # doesn't change once TED assigns / revises a
-                    # publication-number after first ingest.
-                    iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
-                    domain="contract",
-                    payload=builders.upsert_contract(
-                        ted_notice_id=ted_notice_id,
-                        ted_publication_number=ted_publication_number,
-                        title=notice.title or None,
-                        authority_id=authority_id,
-                        company_gmr_id=str(match.gmr_id),
-                        publication_date=notice.issue_date or None,
-                        value_eur=value_eur_float,
-                        value_currency=resolved_currency,
-                        value_original=value_original_float,
-                        cpv=notice.cpv_main,
-                        nuts=getattr(notice, "place_nuts", None),
-                        language=getattr(notice, "language", None),
-                        # Country of the contracting authority (the buyer /
-                        # acquirer). Cascaded onto the Contract because TED
-                        # contracts are jurisdictionally grouped by the
-                        # procuring entity, not the awarded vendor.
-                        country=LocationService.to_alpha3(buyer.country),
-                    ),
+            # Per-notice transaction: events for THIS notice land
+            # atomically. The whole-archive batch was hiding hours
+            # of work in one open transaction.
+            with log.batch(
+                uuid.uuid4(), producer="load_ted_contracts",
+            ) as emit:
+                _emit_notice(
+                    notice, emit, matcher,
+                    seen_authorities, seen_companies,
+                    currency_svc, skip_pub_num_lookup,
                 )
                 total += 1
-                if total % 2000 == 0:
-                    elapsed = time.time() - t0
-                    rate = total / elapsed if elapsed else 0
-                    logger.info(
-                        "  %d contracts emitted (%.0f/s)", total, rate,
-                    )
+            if total % 200 == 0:
+                elapsed = time.time() - t0
+                rate = total / elapsed if elapsed else 0
+                logger.info(
+                    "  %d notices emitted, %d skipped (%.0f notices/s)",
+                    total, skipped, rate,
+                )
 
     elapsed = time.time() - t0
     logger.info(
-        "Done: %d contracts (%d authorities, %d companies) "
-        "in %.1fs (loaded_at=%s)",
-        total, len(seen_authorities), len(seen_companies),
-        elapsed, loaded_at,
+        "Done: %d notices emitted, %d skipped in %.0fs",
+        total, skipped, elapsed,
     )
-    logger.info("Match stats: %s", json.dumps(matcher.stats.summary()))
-    return {
-        "total": total,
-        "authorities": len(seen_authorities),
-        "companies": len(seen_companies),
-        "elapsed_s": round(elapsed, 1),
-        "match_stats": matcher.stats.summary(),
-    }
+    return {"total": total, "skipped": skipped, "elapsed_s": elapsed}
+
+
+def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
+    notice, emit, matcher, seen_authorities, seen_companies,
+    currency_svc, skip_pub_num_lookup: bool,
+):
+    """Process a single TED notice within an already-open
+    ``log.batch(...)`` context — the caller owns commit semantics.
+
+    Per-call side effects:
+      * Mutates ``seen_authorities`` / ``seen_companies`` for
+        per-run dedup of repeated parents within a single archive.
+      * Calls ``emit.upsert`` zero or more times depending on how
+        many awards the notice has and how many distinct
+        (authority, contractor) pairs are encountered.
+
+    ``skip_pub_num_lookup``: when True, skip the per-notice TED v3
+    search call and emit Contracts with ``ted_publication_number=None``.
+    The backfill (``src.etl.backfill_ted_publication_numbers``) fills
+    it in later, in parallel, in 6–12 hours for the whole graph.
+    Without skip, each notice pays ~500ms in the TED API and the
+    loader is bottlenecked by that.
+    """
+    # pylint: disable=import-outside-toplevel
+    from src.etl.identifiers import canon_vat
+
+    buyer = notice.buyer()
+    if not buyer:
+        return
+    buyer_legal_value = (
+        buyer.legal_id.value if buyer.legal_id else None
+    )
+    authority_id = matcher.match_authority(
+        buyer.name, buyer.country, buyer_legal_value,
+    )
+
+    # Authority dedup is per-archive (the caller threads
+    # ``seen_authorities`` through). Once an authority has appeared in
+    # the archive we skip the redundant UpsertAuthority — the sink
+    # would MERGE either way, but eliding it keeps the event log
+    # compact and replay-faster.
+    if authority_id not in seen_authorities:
+        emit.upsert(
+            "UpsertAuthority",
+            iri=f"http://data.fontem.eu/id/Authority/{authority_id}",
+            domain="authority",
+            payload=builders.upsert_authority(
+                authority_id=authority_id,
+                name=buyer.name,
+                country=LocationService.to_alpha3(buyer.country),
+                authority_type="contracting",
+                national_id=buyer_legal_value,
+            ),
+        )
+        seen_authorities.add(authority_id)
+
+    ted_notice_id = notice.notice_id
+    # Pub-num lookup is per-notice, not per-award — the LRU cache
+    # would coalesce repeated awards anyway, but doing it here also
+    # avoids paying it before the first award when skip_pub_num_lookup
+    # is False. With the flag, this is always None and the backfill
+    # picks it up later.
+    if skip_pub_num_lookup:
+        ted_publication_number = None
+    else:
+        ted_publication_number = _resolve_pub_num_or_none(ted_notice_id)
+
+    for award in notice.awards:
+        contractor = notice.organizations.get(award.contractor_org_id)
+        if not contractor:
+            continue
+
+        # eforms-parser 0.2.0 returns ``legal_id`` as a LegalIdentifier.
+        raw_vat: str | None = None
+        if contractor.legal_id is not None:
+            value = contractor.legal_id.value
+            scheme = (contractor.legal_id.scheme_name or "").upper()
+            if scheme == "VAT":
+                raw_vat = canon_vat(value)
+            elif scheme in ("NATIONAL", "EORI", ""):
+                raw_vat = canon_vat(value)
+
+        match = matcher.match_company(
+            contractor.name, contractor.country, raw_vat,
+        )
+
+        declared_currency = award.currency or notice.currency
+        raw_value = award.value or notice.total_value
+        effective_date, _date_source = _coalesce_date(award, notice)
+
+        # Parse + currency-resolve via the currency service.
+        if currency_svc:
+            parsed_value, _was_sentinel = currency_svc.parse_value(raw_value)
+        else:
+            parsed_value = (
+                _Decimal(str(raw_value)) if raw_value is not None else None
+            )
+        resolved_currency = None
+        value_eur_decimal = None
+        if currency_svc:
+            rate_date_str = effective_date or notice.issue_date
+            try:
+                rate_date_obj = (
+                    _date.fromisoformat(rate_date_str[:10])
+                    if rate_date_str else None
+                )
+            except (ValueError, TypeError):
+                rate_date_obj = None
+            resolved_currency, _inferred = currency_svc.resolve_currency(
+                declared_currency,
+                country=(buyer.country or "").upper(),
+                on=rate_date_obj,
+            )
+            if parsed_value is not None and resolved_currency:
+                value_eur_decimal = currency_svc.to_eur(
+                    parsed_value, resolved_currency, rate_date_obj,
+                )
+        else:
+            resolved_currency = declared_currency
+
+        value_original_float = (
+            float(parsed_value) if parsed_value is not None else None
+        )
+        value_eur_float = (
+            float(value_eur_decimal) if value_eur_decimal is not None else None
+        )
+
+        # Emit Company once per archive (per-run dedup); the sink
+        # would MERGE either way.
+        if match.gmr_id not in seen_companies:
+            emit.upsert(
+                "UpsertCompany",
+                iri=f"http://data.fontem.eu/id/Company/{match.gmr_id}",
+                domain="company",
+                payload=builders.upsert_company(
+                    gmr_id=str(match.gmr_id),
+                    name=contractor.name or None,
+                    country=LocationService.to_alpha3(contractor.country),
+                    vat=raw_vat,
+                    active=True,
+                ),
+            )
+            seen_companies.add(match.gmr_id)
+
+        emit.upsert(
+            "UpsertContract",
+            # IRI keyed by the stable UUID (notice_id) so it doesn't
+            # change once TED assigns / revises a publication-number
+            # after first ingest.
+            iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
+            domain="contract",
+            payload=builders.upsert_contract(
+                ted_notice_id=ted_notice_id,
+                ted_publication_number=ted_publication_number,
+                title=notice.title or None,
+                authority_id=authority_id,
+                company_gmr_id=str(match.gmr_id),
+                publication_date=notice.issue_date or None,
+                value_eur=value_eur_float,
+                value_currency=resolved_currency,
+                value_original=value_original_float,
+                cpv=notice.cpv_main,
+                nuts=getattr(notice, "place_nuts", None),
+                language=getattr(notice, "language", None),
+                # Country of the contracting authority (the buyer /
+                # acquirer). Cascaded onto the Contract because TED
+                # contracts are jurisdictionally grouped by the
+                # procuring entity, not the awarded vendor.
+                country=LocationService.to_alpha3(buyer.country),
+            ),
+        )
 
 
 def main(argv=None):
@@ -359,6 +432,19 @@ def main(argv=None):
             "http://fontem-currency.currency-service.svc.cluster.local",
         ),
         help="Base URL of the fontem-currency HTTP service",
+    )
+    parser.add_argument(
+        "--skip-pub-num-lookup",
+        action="store_true",
+        default=os.environ.get("TED_SKIP_PUB_NUM_LOOKUP", "").lower()
+        in ("1", "true", "yes"),
+        help=(
+            "Skip the per-notice TED v3 search call that resolves "
+            "ted_publication_number. Contracts are emitted with "
+            "ted_publication_number=None; backfill via "
+            "src.etl.backfill_ted_publication_numbers later. ~10x "
+            "faster for bulk historical loads."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -407,6 +493,7 @@ def main(argv=None):
 
         load_contracts(
             driver, log, archive, currency_svc=currency_svc,
+            skip_pub_num_lookup=args.skip_pub_num_lookup,
         )
     finally:
         currency_svc.close()
