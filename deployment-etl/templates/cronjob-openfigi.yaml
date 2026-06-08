@@ -4,12 +4,34 @@ key, just at a lower rate limit. Mark the env's secretKeyRef as
 optional so the cronjob still starts when openfigi-credentials hasn't
 been seeded yet (greenfield environments, etc.).
 */}}
+{{- $openfigi := default (dict) .Values.openfigi }}
 {{- $openfigiEnv := list (dict
       "name" "OPENFIGI_API_KEY"
       "valueFrom" (dict "secretKeyRef" (dict
           "name" "openfigi-credentials"
           "key" "api_key"
           "optional" true))) -}}
+{{- /*
+  HTTP(S) proxy on every node's LAN interface — same per-node tinyproxy
+  used by FIRDS. Routes api.gleif.org and api.openfigi.com out through
+  the modem instead of the wireguard egress so the loader doesn't run
+  into the shared Scaleway IP's rate-limit budget on GLEIF.
+
+  Gated on .Values.openfigi.proxyEnabled. The tinyproxy upstream allow-
+  list must include api.gleif.org and api.openfigi.com (managed in
+  infra/ansible esma-hosts.filter); otherwise tinyproxy will 403 every
+  request even with the env set.
+*/}}
+{{- if $openfigi.proxyEnabled }}
+{{- $proxyHost := default "esma-proxy.fontem-shared.svc.cluster.local" $openfigi.proxyHost }}
+{{- $proxyURL := printf "http://%s:8888" $proxyHost }}
+{{- $openfigiEnv = concat $openfigiEnv (list
+    (dict "name" "HTTPS_PROXY" "value" $proxyURL)
+    (dict "name" "HTTP_PROXY"  "value" $proxyURL)
+    (dict "name" "NO_PROXY"
+          "value" "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,10.0.0.0/8")
+) }}
+{{- end }}
 {{/*
 Optional --limit override. The loader defaults to 10000 IDs per mode;
 non-prod environments set a smaller value (a few hundred) so the cron
