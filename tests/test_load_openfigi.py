@@ -1069,3 +1069,61 @@ def test_run_mode_via_lei_skips_sleep_when_no_openfigi_call(monkeypatch):
     assert sleeps == [3.0], (
         f"expected one sleep for the OpenFIGI-calling LEI, got {sleeps}"
     )
+
+
+def test_resolve_lei_to_canonicals_paces_between_batches(monkeypatch):
+    """A multi-ISIN issuer must pace each OpenFIGI request inside the
+    LEI, not just between LEIs in the outer loop. Mass-issuer LEIs
+    (Mota-Engil: 48 ISINs → 5 anonymous-tier batches) without this
+    inner sleep fire 5 POSTs in <1 s and trip the 25 req/min limit.
+    The pacing is asymmetric: no sleep before the first batch (the
+    outer loop's inter-LEI sleep already covered that gap), then
+    one sleep_s wait before each subsequent batch.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(load_openfigi.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        load_openfigi, "query_openfigi",
+        lambda payload, _api_key: [
+            {"data": [{"ticker": "T", "exchCode": "X",
+                       "marketSector": "Equity"}]}
+            for _ in payload
+        ],
+    )
+    # 25 ISINs / batch_size=10 → 3 batches → 2 inter-batch sleeps
+    bulk = {"MASS_ISSUER": [f"ISIN{i}" for i in range(25)]}
+    _canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+        {"lei": "MASS_ISSUER", "company_gmr_id": "g1",
+         "witness_isins": []},
+        batch_size=10, api_key=None, bulk_isins=bulk,
+        sleep_between_batches=3.0,
+    )
+    assert source == "gleif_bulk"
+    # Exactly 2 inter-batch sleeps for the 3 batches; no leading sleep
+    # before the first batch.
+    assert sleeps == [3.0, 3.0]
+
+
+def test_resolve_lei_to_canonicals_no_inter_batch_sleep_when_disabled(
+    monkeypatch,
+):
+    """Default sleep_between_batches=0 keeps the existing test fixtures
+    sleep-free for callers that don't opt in (mocks, direct invocations).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(load_openfigi.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        load_openfigi, "query_openfigi",
+        lambda payload, _api_key: [
+            {"data": [{"ticker": "T", "exchCode": "X",
+                       "marketSector": "Equity"}]}
+            for _ in payload
+        ],
+    )
+    bulk = {"L1": [f"ISIN{i}" for i in range(25)]}
+    load_openfigi._resolve_lei_to_canonicals(
+        {"lei": "L1", "company_gmr_id": "g1", "witness_isins": []},
+        batch_size=10, api_key=None, bulk_isins=bulk,
+        # sleep_between_batches default = 0
+    )
+    assert not sleeps

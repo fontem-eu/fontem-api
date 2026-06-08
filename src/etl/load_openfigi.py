@@ -575,9 +575,10 @@ def _equity_canonicals_from_response(
     return canonicals
 
 
-def _resolve_lei_to_canonicals(
+def _resolve_lei_to_canonicals(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     row: dict, batch_size: int, api_key: str | None,
     bulk_isins: dict[str, list[str]] | None = None,
+    sleep_between_batches: float = 0.0,
 ) -> tuple[list[dict], str]:
     """Resolve one LEI to its canonical equity Listings.
 
@@ -595,6 +596,14 @@ def _resolve_lei_to_canonicals(
     ``None`` the function falls back to the REST endpoint so callers
     that don't want to download 30 MB of CSV up-front (one-off
     diagnostic runs, narrow CLI invocations) still work.
+
+    ``sleep_between_batches`` paces multiple OpenFIGI calls for the
+    same LEI when the ISIN list exceeds the per-request batch size.
+    A mass-issuer LEI (Mota-Engil has 48 ISINs → 5 anonymous-tier
+    batches) would otherwise fire 5 POSTs in <1 s and trip the
+    25 req/min anonymous limit, losing the whole LEI's enrichment to
+    429s. The outer LEI loop already paces between LEIs; this paces
+    inside one LEI when it spans multiple batches.
     """
     isins = list(row.get("witness_isins") or [])
     source = "witness"
@@ -612,7 +621,13 @@ def _resolve_lei_to_canonicals(
     canonicals: list[dict] = []
     # OpenFIGI batch limit varies by tier — split here so a LEI with
     # many ISINs (15+ for Mota) still respects the per-request cap.
+    # ``sleep_between_batches`` keeps the per-batch cadence inside
+    # this loop, not just between LEIs in the outer loop — without
+    # it a multi-batch issuer fires N POSTs in <1 s and 429s the
+    # whole sequence.
     for i in range(0, len(isins), batch_size):
+        if i > 0 and sleep_between_batches > 0:
+            time.sleep(sleep_between_batches)
         chunk = isins[i:i + batch_size]
         payload = [{"idType": "ID_ISIN", "idValue": v} for v in chunk]
         response = query_openfigi(payload, api_key)
@@ -708,6 +723,7 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
     for i, row in enumerate(rows):
         canonicals, source = _resolve_lei_to_canonicals(
             row, batch_size, api_key, bulk_isins=bulk_isins,
+            sleep_between_batches=sleep_s,
         )
         if source == "witness":
             via_witness += 1
