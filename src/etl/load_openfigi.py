@@ -624,7 +624,7 @@ def _process_batch(cfg, batch, id_to_company, api_key):
     return results
 
 
-def _run_mode_via_lei(  # pylint: disable=too-many-locals
+def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches
     mode: str, driver, log: EventLog, limit: int, api_key: str | None,
 ) -> dict:
     """Runner for LEI-routed modes (``lei`` + ``lei-reeval``).
@@ -633,7 +633,21 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals
     expands to one-or-many ISINs (witness or GLEIF), and each ISIN is
     queried via OpenFIGI ID_ISIN. Per-LEI rate-pacing is the same
     sleep used by the ISIN runner so the keyed-vs-anonymous budgets
-    are honoured."""
+    are honoured.
+
+    **Per-LEI commit boundary** (was: batched-at-end). Each LEI's
+    canonical Listings — and, for ``lei-reeval``, the retire events for
+    that LEI's stale suspect tickers — are emitted in their own
+    ``log.batch(...)`` as soon as ``_resolve_lei_to_canonicals``
+    returns, BEFORE the next LEI is queried. The old shape accumulated
+    everything in memory and emitted at the very end of the LEI loop,
+    which on a 10 000-row bulk run held nine hours of work in one
+    Postgres transaction — invisible to the sinks until the loop
+    finished, and lost entirely on a pod restart. ``_retires_for_suspects``
+    already operates per-row (groups canonicals by LEI internally), so
+    calling it with one row + that row's canonicals returns the same
+    retires it would have for that row in the batched shape.
+    """
     cfg = _MODES[mode]
     rows = cfg["fetch"](driver, limit)
     logger.info("%s mode: %d %s",
@@ -646,10 +660,12 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals
                 "keyed" if api_key else "anonymous",
                 batch_size, sleep_s)
 
-    all_enriched: list[dict] = []
     via_witness = 0
     via_gleif = 0
     via_none = 0
+    enriched_total = 0
+    emitted_total = 0
+    retired_total = 0
     for i, row in enumerate(rows):
         canonicals, source = _resolve_lei_to_canonicals(
             row, batch_size, api_key,
@@ -660,35 +676,53 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals
             via_gleif += 1
         else:
             via_none += 1
-        all_enriched.extend(canonicals)
+        enriched_total += len(canonicals)
+        if canonicals:
+            emitted_total += emit_listing_events(log, canonicals)
+        if cfg.get("retire_suspects"):
+            # Per-row retire computation. Identical result to the
+            # batched call as long as the row is the source-of-truth
+            # for its own suspect_tickers, which it is.
+            retires = _retires_for_suspects([row], canonicals)
+            if retires:
+                retired_total += emit_retire_events(log, retires)
         time.sleep(sleep_s)
         if (i + 1) % 100 == 0:
             logger.info(
                 "  %s: %d / %d processed, %d %s "
                 "(witness=%d gleif=%d none=%d)",
                 cfg["log_label"], i + 1, len(rows),
-                len(all_enriched), cfg["progress_phrase"],
+                enriched_total, cfg["progress_phrase"],
                 via_witness, via_gleif, via_none,
             )
 
-    emitted = emit_listing_events(log, all_enriched)
-    retired = 0
     if cfg.get("retire_suspects"):
-        retires = _retires_for_suspects(rows, all_enriched)
-        retired = emit_retire_events(log, retires)
         logger.info("  %s: retired %d suspect tickers",
-                    cfg["log_label"], retired)
+                    cfg["log_label"], retired_total)
     logger.info("  %s: source mix witness=%d gleif=%d none=%d",
                 cfg["log_label"], via_witness, via_gleif, via_none)
     return {
-        "queried": len(rows), "enriched": len(all_enriched),
-        "emitted": emitted + retired, "errors": 0,
+        "queried": len(rows), "enriched": enriched_total,
+        "emitted": emitted_total + retired_total, "errors": 0,
     }
 
 
 def _run_mode(mode, driver, log, limit, api_key):  # pylint: disable=too-many-locals
     """Run one OpenFIGI mode end-to-end. Mode-specific wiring lives in
-    ``_MODES`` so this body can stay generic."""
+    ``_MODES`` so this body can stay generic.
+
+    **Per-batch commit boundary** (was: batched-at-end). Each OpenFIGI
+    request's enriched rows are emitted in their own ``log.batch(...)``
+    as soon as the response is back, BEFORE the next batch is queried.
+    The old shape held everything in memory until the loop finished;
+    on a multi-hour run that hid all enriched rows from sinks until
+    the end and lost them entirely on a pod restart.
+
+    The ``retire_suspects`` branch is intentionally absent here: it
+    only applies to ``lei-reeval`` mode, which dispatches to
+    ``_run_mode_via_lei`` above. Keeping it out of this function
+    avoids carrying dead code that would also need the per-batch
+    treatment if anything ever flipped its routing."""
     cfg = _MODES[mode]
     if cfg.get("via_lei"):
         return _run_mode_via_lei(mode, driver, log, limit, api_key)
@@ -705,34 +739,30 @@ def _run_mode(mode, driver, log, limit, api_key):  # pylint: disable=too-many-lo
     id_to_company = {r[cfg["id_field"]]: r["company_gmr_id"] for r in rows}
     ids = list(id_to_company.keys())
 
-    all_enriched: list[dict] = []
     errors = 0
+    enriched_total = 0
+    emitted_total = 0
     for i in range(0, len(ids), batch_size):
         batch = ids[i:i + batch_size]
         results = _process_batch(cfg, batch, id_to_company, api_key)
         if results is None:
             errors += 1
         else:
-            all_enriched.extend(results)
+            enriched_total += len(results)
+            if results:
+                emitted_total += emit_listing_events(log, results)
             if (i + batch_size) % 1000 < batch_size:
                 logger.info(
                     "  %s: %d / %d queried, %d %s",
                     cfg["log_label"],
                     min(i + batch_size, len(ids)), len(ids),
-                    len(all_enriched), cfg["progress_phrase"],
+                    enriched_total, cfg["progress_phrase"],
                 )
         time.sleep(sleep_s)
 
-    emitted = emit_listing_events(log, all_enriched)
-    retired = 0
-    if cfg.get("retire_suspects"):
-        retires = _retires_for_suspects(rows, all_enriched)
-        retired = emit_retire_events(log, retires)
-        logger.info("  %s: retired %d suspect tickers",
-                    cfg["log_label"], retired)
     return {
-        "queried": len(ids), "enriched": len(all_enriched),
-        "emitted": emitted + retired, "errors": errors,
+        "queried": len(ids), "enriched": enriched_total,
+        "emitted": emitted_total, "errors": errors,
     }
 
 

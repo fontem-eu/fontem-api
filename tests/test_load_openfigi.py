@@ -621,3 +621,159 @@ def test_run_mode_via_lei_no_isins_no_emissions(monkeypatch):
     )
     assert summary["enriched"] == 0
     assert emit.upsert.call_count == 0
+
+
+# ── Per-LEI / per-batch commit boundary ───────────────────────────
+
+
+def test_run_mode_via_lei_opens_one_batch_per_lei_with_canonicals(monkeypatch):
+    """Per-LEI commit boundary: each LEI whose OpenFIGI lookup yields
+    canonicals gets its OWN ``log.batch(...)`` open + close, so events
+    land in the sinks as soon as the LEI is resolved instead of being
+    held in memory until the end of the LEI loop.
+
+    Two LEIs in, both with canonicals → exactly two batches.
+
+    This pins the same anti-batching property the TED loader needed
+    for the same reason: bulk runs were holding nine hours of in-memory
+    work in one transaction, invisible to sinks and lost on restart."""
+    rows = [
+        {"lei": "L1", "company_gmr_id": "g1", "witness_isins": ["I1"]},
+        {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"]},
+    ]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+
+    def fake_query_openfigi(payload, _api_key):
+        # Distinct ticker per ISIN so each LEI gets a real canonical.
+        out = []
+        for entry in payload:
+            isin = entry["idValue"]
+            out.append({"data": [{
+                "ticker": f"T-{isin}", "exchCode": "LS",
+                "marketSector": "Equity", "micCode": "XLIS",
+            }]})
+        return out
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei", driver=MagicMock(), log=log, limit=2, api_key=None,
+    )
+    assert summary["enriched"] == 2
+    assert summary["emitted"] == 2
+    assert log.batch.call_count == 2, (
+        f"expected 2 per-LEI batches, got {log.batch.call_count}"
+    )
+    assert emit.upsert.call_count == 2
+
+
+def test_run_mode_via_lei_skips_batch_open_for_lei_with_no_canonicals(monkeypatch):
+    """Per-LEI commit boundary: a LEI whose OpenFIGI lookup yields zero
+    canonicals must NOT open a no-op log.batch. Three rows, only the
+    middle one has witness ISINs → exactly one batch (for the canonical
+    that did land)."""
+    rows = [
+        {"lei": "L1", "company_gmr_id": "g1", "witness_isins": []},
+        {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"]},
+        {"lei": "L3", "company_gmr_id": "g3", "witness_isins": []},
+    ]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins",
+                        lambda _lei, client=None: [])
+
+    def fake_query_openfigi(payload, _api_key):
+        return [{"data": [{
+            "ticker": "T-I2", "exchCode": "LS",
+            "marketSector": "Equity", "micCode": "XLIS",
+        }]} for _ in payload]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, _emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei", driver=MagicMock(), log=log, limit=3, api_key=None,
+    )
+    assert summary["enriched"] == 1
+    assert log.batch.call_count == 1
+
+
+def test_run_mode_via_lei_reeval_emits_listing_batch_and_retire_batch_per_lei(
+    monkeypatch,
+):
+    """In lei-reeval mode, each LEI gets up to two batches per row: one
+    for the canonical UpsertListing, one for the retire (UpsertListing
+    inactive + AssertSameAs). Two LEIs each with a canonical and a
+    suspect to retire → 4 batches total (2 listing + 2 retire),
+    interleaved per-LEI (not all-listings-first-then-all-retires)."""
+    rows = [
+        {"lei": "L1", "company_gmr_id": "g1",
+         "suspect_tickers": ["MOTA.LS"], "witness_isins": ["I1"]},
+        {"lei": "L2", "company_gmr_id": "g2",
+         "suspect_tickers": ["ACME.LS"], "witness_isins": ["I2"]},
+    ]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei-reeval"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+
+    def fake_query_openfigi(payload, _api_key):
+        # One canonical per ISIN so each row's retire has a replacement.
+        return [{"data": [{
+            "ticker": f"CANON-{entry['idValue']}", "exchCode": "LS",
+            "marketSector": "Equity", "micCode": "XLIS",
+        }]} for entry in payload]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, _emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei-reeval", driver=MagicMock(), log=log,
+        limit=2, api_key=None,
+    )
+    assert summary["enriched"] == 2
+    # 2 per-LEI listing batches + 2 per-LEI retire batches
+    assert log.batch.call_count == 4
+    # Pin the interleaving order: L1 listing, L1 retire, L2 listing,
+    # L2 retire — proves we're not just emitting all listings first
+    # then all retires (which was the old at-end semantics).
+    producers = [c.kwargs.get("producer") for c in log.batch.call_args_list]
+    assert producers == ["load_openfigi"] * 4
+
+
+def test_run_mode_isin_opens_one_batch_per_openfigi_batch(monkeypatch):
+    """ISIN mode: per-batch commit boundary. With ``batch_size=10``
+    (anonymous tier) and 15 input ISINs, we expect two OpenFIGI requests
+    and therefore two ``log.batch(...)`` opens, NOT one batch over all
+    15 results at the end. (The mock returns one canonical per batch
+    so we can tell the batches apart.)"""
+    rows = [
+        {"isin": f"ISIN{i:03d}", "company_gmr_id": f"g{i}"}
+        for i in range(15)
+    ]
+    monkeypatch.setitem(
+        load_openfigi._MODES["isin"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+
+    def fake_query_openfigi(payload, _api_key):
+        return [{"data": [{
+            "ticker": entry["idValue"], "exchCode": "US",
+            "marketSector": "Equity", "micCode": "XNAS",
+        }]} for entry in payload]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, _emit = _mock_log()
+    summary = load_openfigi._run_mode(
+        "isin", driver=MagicMock(), log=log, limit=15, api_key=None,
+    )
+    assert summary["queried"] == 15
+    # 15 IDs / batch_size=10 = 2 OpenFIGI requests → 2 commits
+    assert log.batch.call_count == 2
