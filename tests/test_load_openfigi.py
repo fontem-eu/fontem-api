@@ -1,4 +1,5 @@
 """Tests for load_openfigi event-log migration."""
+# pylint: disable=too-many-lines
 # Tests reach into the module's mode-specific result shapers (_isin_results,
 # _lei_results); they're underscored only because they're not part of the
 # public CLI surface, not because they're unsafe.
@@ -6,8 +7,24 @@
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
-from src.etl import load_openfigi
+from src.etl import _gleif_isin_bulk, load_openfigi
+
+
+@pytest.fixture(autouse=True)
+def _stub_gleif_bulk(monkeypatch):
+    """Don't hit the GLEIF bulk API during unit tests. Default returns
+    an empty mapping; the LEI-mode runner then falls through to the
+    "no canonicals" branch unless the test explicitly overrides this
+    fixture with a richer mapping (see bulk-path tests below)."""
+    def _empty(target_leis=None, cache_dir=None, http_client=None):
+        # Signature matches load_isin_mapping; we accept and discard.
+        del target_leis, cache_dir, http_client
+        return {}
+    monkeypatch.setattr(
+        _gleif_isin_bulk, "load_isin_mapping", _empty,
+    )
 
 
 def _mock_log():
@@ -777,3 +794,237 @@ def test_run_mode_isin_opens_one_batch_per_openfigi_batch(monkeypatch):
     assert summary["queried"] == 15
     # 15 IDs / batch_size=10 = 2 OpenFIGI requests → 2 commits
     assert log.batch.call_count == 2
+
+
+# ── Bulk-hit happy path (formerly stubbed to empty by autouse fixture) ─
+
+
+def test_run_mode_via_lei_uses_bulk_mapping_no_rest_call(monkeypatch):
+    """Bulk-hit path: when ``bulk_isins`` has the LEI's entry, the
+    OpenFIGI batch must be built from those ISINs WITHOUT touching the
+    per-LEI REST endpoint. Pins the source-label too — a typo like
+    'gleif-bulk' (dash vs underscore) would silently mis-count.
+    """
+    rows = [{"lei": "L1", "company_gmr_id": "g1", "witness_isins": []}]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+    # Force-fail any REST call so the test would explode if the runner
+    # ever bypassed the bulk dict.
+    def _no_rest(_lei, client=None):
+        raise AssertionError("must not call gleif_get_isins")
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins", _no_rest)
+
+    captured = {}
+
+    def fake_query_openfigi(payload, _api_key):
+        captured["payload"] = payload
+        return [{"data": [{
+            "ticker": f"T-{entry['idValue']}", "exchCode": "LS",
+            "marketSector": "Equity", "micCode": "XLIS",
+        }]} for entry in payload]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei", driver=MagicMock(), log=log, limit=1, api_key=None,
+        bulk_isins={"L1": ["I_FROM_BULK"]},
+    )
+    assert summary["enriched"] == 1
+    assert summary["queried"] == 1
+    assert captured["payload"] == [
+        {"idType": "ID_ISIN", "idValue": "I_FROM_BULK"},
+    ]
+    # One emit per LEI's canonicals
+    assert emit.upsert.call_count == 1
+
+
+def test_resolve_lei_to_canonicals_bulk_source_label():
+    """Direct unit test on the resolver: when ``bulk_isins`` is passed
+    AND the row has no witness, the returned source label is the
+    distinct 'gleif_bulk' value (not 'gleif'), so progress logs and
+    the via_gleif counter can be aggregated correctly."""
+    # The function calls query_openfigi which would hit the network;
+    # short-circuit by passing a row with no resolvable ISINs. The
+    # branch that picks the source label is independent of the
+    # OpenFIGI call. Pass a non-empty bulk mapping for the LEI but
+    # mock query_openfigi to return [] so the loop body is empty.
+    with patch.object(
+        load_openfigi, "query_openfigi", return_value=[],
+    ):
+        _canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+            {"lei": "L1", "company_gmr_id": "g1", "witness_isins": []},
+            batch_size=10, api_key=None,
+            bulk_isins={"L1": ["I1"]},
+        )
+        assert source == "gleif_bulk"
+
+
+def test_resolve_lei_to_canonicals_falls_back_to_rest_when_bulk_none(
+    monkeypatch,
+):
+    """``bulk_isins=None`` keeps the legacy REST path for callers
+    (diagnostic scripts, ad-hoc) that opt out of the bulk file."""
+    rest_called = []
+    def _rest(lei, _client=None):
+        rest_called.append(lei)
+        return ["I_FROM_REST"]
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins", _rest)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    with patch.object(
+        load_openfigi, "query_openfigi", return_value=[],
+    ):
+        _canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+            {"lei": "L1", "company_gmr_id": "g1", "witness_isins": []},
+            batch_size=10, api_key=None,
+            bulk_isins=None,
+        )
+        assert source == "gleif"
+        assert rest_called == ["L1"]
+
+
+def test_run_mode_via_lei_bulk_disabled_uses_rest(monkeypatch):
+    """``bulk_isins_enabled=False`` short-circuits the inline build
+    and falls through to the per-LEI REST path. Spies confirm the
+    bulk loader was never called and the REST helper was."""
+    rows = [{"lei": "L1", "company_gmr_id": "g1", "witness_isins": []}]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+    bulk_spy = MagicMock(side_effect=AssertionError("must not build bulk"))
+    monkeypatch.setattr(
+        _gleif_isin_bulk, "load_isin_mapping", bulk_spy,
+    )
+    rest_calls = []
+    def _rest(lei, _client=None):
+        rest_calls.append(lei)
+        return ["I1"]
+    monkeypatch.setattr(load_openfigi, "gleif_get_isins", _rest)
+    monkeypatch.setattr(
+        load_openfigi, "query_openfigi",
+        lambda payload, _api_key: [{"data": []} for _ in payload],
+    )
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, _emit = _mock_log()
+    load_openfigi._run_mode_via_lei(
+        "lei", driver=MagicMock(), log=log, limit=1, api_key=None,
+        bulk_isins_enabled=False,
+    )
+    bulk_spy.assert_not_called()
+    assert rest_calls == ["L1"]
+
+
+def test_load_openfigi_builds_bulk_once_for_mode_both(monkeypatch):
+    """The hoist: ``mode=both`` triggers exactly ONE bulk-file stream
+    across the lei + lei-reeval passes, NOT two."""
+    # Both LEI modes return rows; need at least one row without witness
+    # to trigger the bulk build.
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei"],
+        "fetch", lambda _driver, _limit: [
+            {"lei": "L1", "company_gmr_id": "g1", "witness_isins": []},
+        ],
+    )
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei-reeval"],
+        "fetch", lambda _driver, _limit: [
+            {"lei": "L2", "company_gmr_id": "g2",
+             "witness_isins": [], "suspect_tickers": ["X.LS"]},
+        ],
+    )
+    monkeypatch.setitem(
+        load_openfigi._MODES["isin"],
+        "fetch", lambda _driver, _limit: [],
+    )
+    bulk_calls = []
+    def _bulk(target_leis=None, cache_dir=None, http_client=None):
+        del cache_dir, http_client
+        bulk_calls.append(set(target_leis or set()))
+        return {}
+    monkeypatch.setattr(
+        _gleif_isin_bulk, "load_isin_mapping", _bulk,
+    )
+    monkeypatch.setattr(
+        load_openfigi, "query_openfigi",
+        lambda payload, _api_key: [{"data": []} for _ in payload],
+    )
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, _emit = _mock_log()
+    load_openfigi.load_openfigi(
+        driver=MagicMock(), log=log, mode="both", limit=1, api_key=None,
+    )
+    assert len(bulk_calls) == 1, (
+        f"expected exactly one bulk build, got {len(bulk_calls)}"
+    )
+    # And the target_leis set is the union of both lei modes' cohorts
+    assert bulk_calls[0] == {"L1", "L2"}
+
+
+# ── CLI flag: --bulk-isins / --no-bulk-isins + env var ────────────
+
+
+def _stub_main_deps(monkeypatch):
+    """Stub Neo4j driver + EventLog so main() runs without I/O."""
+    monkeypatch.setattr(
+        load_openfigi.GraphDatabase, "driver",
+        lambda *a, **kw: MagicMock(),
+    )
+    monkeypatch.setattr(
+        load_openfigi.EventLog, "from_env",
+        classmethod(lambda cls: MagicMock()),
+    )
+
+
+def _capture_load_openfigi(monkeypatch):
+    """Capture the kwargs main() passes through. Returns a dict that
+    accumulates the call's kwargs."""
+    captured = {}
+    def _capture(driver, log, **kwargs):
+        del driver, log
+        captured.update(kwargs)
+        return {}
+    monkeypatch.setattr(load_openfigi, "load_openfigi", _capture)
+    return captured
+
+
+def test_cli_default_is_bulk_enabled(monkeypatch):
+    """No flag, no env var → bulk-isins on (the production default)."""
+    monkeypatch.delenv("OPENFIGI_NO_BULK_ISINS", raising=False)
+    _stub_main_deps(monkeypatch)
+    captured = _capture_load_openfigi(monkeypatch)
+    load_openfigi.main([])
+    assert captured["bulk_isins_enabled"] is True
+
+
+def test_cli_no_bulk_isins_flag_disables(monkeypatch):
+    """``--no-bulk-isins`` (paired half of BooleanOptionalAction)
+    flips the default off."""
+    monkeypatch.delenv("OPENFIGI_NO_BULK_ISINS", raising=False)
+    _stub_main_deps(monkeypatch)
+    captured = _capture_load_openfigi(monkeypatch)
+    load_openfigi.main(["--no-bulk-isins"])
+    assert captured["bulk_isins_enabled"] is False
+
+
+def test_cli_env_var_disables(monkeypatch):
+    """OPENFIGI_NO_BULK_ISINS=1 disables the bulk path without any
+    CLI flag — the escape hatch for ops to flip behaviour via env."""
+    monkeypatch.setenv("OPENFIGI_NO_BULK_ISINS", "1")
+    _stub_main_deps(monkeypatch)
+    captured = _capture_load_openfigi(monkeypatch)
+    load_openfigi.main([])
+    assert captured["bulk_isins_enabled"] is False
+
+
+def test_cli_bulk_isins_flag_overrides_disabling_env(monkeypatch):
+    """The whole point of the BooleanOptionalAction refactor: an
+    operator can re-enable bulk from the CLI even when the env var
+    says off. Without the paired flag this scenario was unreachable."""
+    monkeypatch.setenv("OPENFIGI_NO_BULK_ISINS", "true")
+    _stub_main_deps(monkeypatch)
+    captured = _capture_load_openfigi(monkeypatch)
+    load_openfigi.main(["--bulk-isins"])
+    assert captured["bulk_isins_enabled"] is True

@@ -577,6 +577,7 @@ def _equity_canonicals_from_response(
 
 def _resolve_lei_to_canonicals(
     row: dict, batch_size: int, api_key: str | None,
+    bulk_isins: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict], str]:
     """Resolve one LEI to its canonical equity Listings.
 
@@ -586,13 +587,25 @@ def _resolve_lei_to_canonicals(
     bond ISINs for an issuer (Mota-Engil being the canonical example).
     Returns ``(canonicals, source_label)``; the label is used by the
     runner for the progress log.
+
+    ``bulk_isins`` is the LEI→ISINs dict prebuilt from GLEIF's daily
+    bulk file (see ``_gleif_isin_bulk.load_isin_mapping``). When
+    provided, it short-circuits the per-LEI REST call to GLEIF —
+    looking up locally is O(1) and pays no rate-limit budget. When
+    ``None`` the function falls back to the REST endpoint so callers
+    that don't want to download 30 MB of CSV up-front (one-off
+    diagnostic runs, narrow CLI invocations) still work.
     """
     isins = list(row.get("witness_isins") or [])
     source = "witness"
     if not isins:
-        isins = gleif_get_isins(row["lei"])
-        source = "gleif"
-        time.sleep(GLEIF_REQUEST_SLEEP)
+        if bulk_isins is not None:
+            isins = list(bulk_isins.get(row["lei"], []))
+            source = "gleif_bulk"
+        else:
+            isins = gleif_get_isins(row["lei"])
+            source = "gleif"
+            time.sleep(GLEIF_REQUEST_SLEEP)
     if not isins:
         return [], "none"
 
@@ -624,8 +637,10 @@ def _process_batch(cfg, batch, id_to_company, api_key):
     return results
 
 
-def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches
+def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-many-arguments,too-many-positional-arguments
     mode: str, driver, log: EventLog, limit: int, api_key: str | None,
+    bulk_isins_enabled: bool = True,
+    bulk_isins: dict[str, list[str]] | None = None,
 ) -> dict:
     """Runner for LEI-routed modes (``lei`` + ``lei-reeval``).
 
@@ -648,6 +663,9 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches
     calling it with one row + that row's canonicals returns the same
     retires it would have for that row in the batched shape.
     """
+    # pylint: disable=import-outside-toplevel
+    from . import _gleif_isin_bulk
+
     cfg = _MODES[mode]
     rows = cfg["fetch"](driver, limit)
     logger.info("%s mode: %d %s",
@@ -660,6 +678,27 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches
                 "keyed" if api_key else "anonymous",
                 batch_size, sleep_s)
 
+    # Build the GLEIF ISIN→LEI mapping from the daily bulk file
+    # (~30 MB zip → 285 MB CSV → ~96 k LEIs total) so each LEI's ISIN
+    # lookup is an O(1) local dict get instead of an HTTP GET. The
+    # high-level ``load_openfigi`` entry point hoists this build up so
+    # ``mode=both`` only pays for one stream of the file across the
+    # lei + lei-reeval passes; when a caller invokes ``_run_mode_via_lei``
+    # directly (test fixtures, ad-hoc scripts) with ``bulk_isins=None``
+    # we build it inline here.
+    #
+    # Witness ISINs (from a sibling FIRDS-emitted Listing) keep their
+    # precedence — we only consult the bulk mapping when a row has no
+    # witness. So the bulk download only matters when at least one row
+    # lacks witness ISINs.
+    if bulk_isins is None and bulk_isins_enabled and any(
+        not r.get("witness_isins") for r in rows
+    ):
+        target_leis = {
+            r["lei"] for r in rows if not r.get("witness_isins")
+        }
+        bulk_isins = _gleif_isin_bulk.load_isin_mapping(target_leis)
+
     via_witness = 0
     via_gleif = 0
     via_none = 0
@@ -668,11 +707,11 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches
     retired_total = 0
     for i, row in enumerate(rows):
         canonicals, source = _resolve_lei_to_canonicals(
-            row, batch_size, api_key,
+            row, batch_size, api_key, bulk_isins=bulk_isins,
         )
         if source == "witness":
             via_witness += 1
-        elif source == "gleif":
+        elif source in ("gleif", "gleif_bulk"):
             via_gleif += 1
         else:
             via_none += 1
@@ -707,7 +746,11 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches
     }
 
 
-def _run_mode(mode, driver, log, limit, api_key):  # pylint: disable=too-many-locals
+def _run_mode(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+    mode, driver, log, limit, api_key,
+    bulk_isins_enabled: bool = True,
+    bulk_isins: dict[str, list[str]] | None = None,
+):
     """Run one OpenFIGI mode end-to-end. Mode-specific wiring lives in
     ``_MODES`` so this body can stay generic.
 
@@ -725,7 +768,11 @@ def _run_mode(mode, driver, log, limit, api_key):  # pylint: disable=too-many-lo
     treatment if anything ever flipped its routing."""
     cfg = _MODES[mode]
     if cfg.get("via_lei"):
-        return _run_mode_via_lei(mode, driver, log, limit, api_key)
+        return _run_mode_via_lei(
+            mode, driver, log, limit, api_key,
+            bulk_isins_enabled=bulk_isins_enabled,
+            bulk_isins=bulk_isins,
+        )
     rows = cfg["fetch"](driver, limit)
     logger.info("%s mode: %d %s",
                 cfg["log_label"], len(rows), cfg["log_phrase"])
@@ -766,19 +813,57 @@ def _run_mode(mode, driver, log, limit, api_key):  # pylint: disable=too-many-lo
     }
 
 
-def load_openfigi(driver, log: EventLog, *, mode: str, limit: int,
-                  api_key: str | None) -> dict:
+def load_openfigi(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    driver, log: EventLog, *, mode: str, limit: int,
+    api_key: str | None, bulk_isins_enabled: bool = True,
+) -> dict:
     """Run the requested mode(s) end to end. Returns a per-mode
-    summary dict suitable for logging + the Kuma push-line."""
+    summary dict suitable for logging + the Kuma push-line.
+
+    When ``bulk_isins_enabled`` is True (default) and any LEI-routed
+    mode is going to run, we stream GLEIF's daily bulk file ONCE for
+    the union of LEI cohorts across ``lei`` + ``lei-reeval`` and pass
+    the resulting dict down to each ``_run_mode`` call. Before this
+    hoist, ``mode=both`` triggered two independent streams of the
+    285 MB CSV — pure waste because the file is identical across
+    those passes.
+    """
+    # pylint: disable=import-outside-toplevel
+    from . import _gleif_isin_bulk
+
     summary: dict[str, dict] = {}
+    bulk_isins: dict[str, list[str]] | None = None
+    if bulk_isins_enabled and mode in ("lei", "lei-reeval", "both"):
+        union_leis: set[str] = set()
+        for lei_mode in ("lei", "lei-reeval"):
+            if mode in (lei_mode, "both"):
+                rows = _MODES[lei_mode]["fetch"](driver, limit)
+                # Only LEIs without a witness ISIN need GLEIF — witness
+                # rows short-circuit before consulting the bulk mapping.
+                union_leis.update(
+                    r["lei"] for r in rows if not r.get("witness_isins")
+                )
+        if union_leis:
+            bulk_isins = _gleif_isin_bulk.load_isin_mapping(union_leis)
+
     t0 = time.time()
     if mode in ("isin", "both"):
-        summary["isin"] = _run_mode("isin", driver, log, limit, api_key)
+        summary["isin"] = _run_mode(
+            "isin", driver, log, limit, api_key,
+            bulk_isins_enabled=bulk_isins_enabled,
+            bulk_isins=bulk_isins,
+        )
     if mode in ("lei", "both"):
-        summary["lei"] = _run_mode("lei", driver, log, limit, api_key)
+        summary["lei"] = _run_mode(
+            "lei", driver, log, limit, api_key,
+            bulk_isins_enabled=bulk_isins_enabled,
+            bulk_isins=bulk_isins,
+        )
     if mode in ("lei-reeval", "both"):
         summary["lei-reeval"] = _run_mode(
             "lei-reeval", driver, log, limit, api_key,
+            bulk_isins_enabled=bulk_isins_enabled,
+            bulk_isins=bulk_isins,
         )
     elapsed = time.time() - t0
     for m, s in summary.items():
@@ -827,6 +912,24 @@ def main(argv=None):
         "--neo4j-password",
         default=os.environ.get("NEO4J_PASSWORD", ""),
     )
+    # ``--bulk-isins`` / ``--no-bulk-isins`` paired via BooleanOptionalAction
+    # so an operator can override the env in either direction from the CLI.
+    # Default is "bulk on" unless the env var explicitly disables it.
+    parser.add_argument(
+        "--bulk-isins",
+        action=argparse.BooleanOptionalAction,
+        dest="bulk_isins_enabled",
+        default=os.environ.get(
+            "OPENFIGI_NO_BULK_ISINS", "",
+        ).lower() not in ("1", "true", "yes"),
+        help=(
+            "Download GLEIF's daily ISIN-to-LEI bulk file once (default), "
+            "or pass --no-bulk-isins to fall back to the per-LEI REST "
+            "endpoint (rate-limited, only for diagnostics or when the "
+            "bulk endpoint is unreachable). "
+            "OPENFIGI_NO_BULK_ISINS=1 flips the env default to off."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -843,6 +946,7 @@ def main(argv=None):
         load_openfigi(
             driver, log, mode=args.mode, limit=args.limit,
             api_key=args.api_key or None,
+            bulk_isins_enabled=args.bulk_isins_enabled,
         )
     except httpx.HTTPError:
         logger.exception("Fatal HTTP error during OpenFIGI enrichment")
