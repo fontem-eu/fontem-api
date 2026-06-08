@@ -725,7 +725,16 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
             retires = _retires_for_suspects([row], canonicals)
             if retires:
                 retired_total += emit_retire_events(log, retires)
-        time.sleep(sleep_s)
+        # Only pace when we actually called OpenFIGI. With the bulk-file
+        # path most rows resolve to "no ISINs" (~89 % of a 10 k cohort
+        # in prod) and would otherwise burn 3 s of anonymous-tier sleep
+        # each — turning a ~1 h run into a ~7 h one for zero
+        # rate-limit benefit (the sleep paces OpenFIGI; we didn't call
+        # OpenFIGI). The legacy REST path always made a GLEIF call per
+        # LEI so the sleep had its own justification then; with bulk it
+        # only matters when source != "none".
+        if source != "none":
+            time.sleep(sleep_s)
         if (i + 1) % 100 == 0:
             logger.info(
                 "  %s: %d / %d processed, %d %s "

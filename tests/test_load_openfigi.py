@@ -1028,3 +1028,44 @@ def test_cli_bulk_isins_flag_overrides_disabling_env(monkeypatch):
     captured = _capture_load_openfigi(monkeypatch)
     load_openfigi.main(["--bulk-isins"])
     assert captured["bulk_isins_enabled"] is True
+
+
+def test_run_mode_via_lei_skips_sleep_when_no_openfigi_call(monkeypatch):
+    """Pacing-sleep is OpenFIGI's rate-limit budget. With the bulk
+    file most LEIs have no ISINs and we never call OpenFIGI for them
+    — so we must not burn the per-LEI sleep either. Previous shape
+    paid ~3 s × 8 858 non-issuer LEIs = 7.4 h of pure idle on a
+    10 k-LEI bulk run. This test pins the gate.
+    """
+    rows = [
+        {"lei": "L_HAS_ISIN", "company_gmr_id": "g1",
+         "witness_isins": ["W1"]},
+        {"lei": "L_NO_ISIN", "company_gmr_id": "g2",
+         "witness_isins": []},
+        {"lei": "L_NO_ISIN_2", "company_gmr_id": "g3",
+         "witness_isins": []},
+    ]
+    monkeypatch.setitem(
+        load_openfigi._MODES["lei"],
+        "fetch", lambda _driver, _limit: rows,
+    )
+    monkeypatch.setattr(
+        load_openfigi, "query_openfigi",
+        lambda payload, _api_key: [{"data": []} for _ in payload],
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        load_openfigi.time, "sleep", sleeps.append,
+    )
+    log, _emit = _mock_log()
+    # Bulk dict has the witness-having row's LEI only — irrelevant,
+    # witness path takes precedence anyway. The two "no_isin" rows
+    # land in source="none" and must NOT sleep.
+    load_openfigi._run_mode_via_lei(
+        "lei", driver=MagicMock(), log=log, limit=3, api_key=None,
+        bulk_isins={},
+    )
+    # Exactly one sleep, for the witness-having LEI.
+    assert sleeps == [3.0], (
+        f"expected one sleep for the OpenFIGI-calling LEI, got {sleeps}"
+    )
