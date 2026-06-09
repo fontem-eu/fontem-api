@@ -110,6 +110,18 @@ def cmd_register_seed(args: argparse.Namespace) -> int:
             logger.warning("--from-file %s missing; registering all seeds",
                            args.from_file)
             codes_filter = None
+        if codes_filter is not None and not codes_filter:
+            # File exists but is empty (or only blanks / # comments).
+            # The CronJob "prod posture" relies on an empty file
+            # meaning "register the full SEED_DATASETS catalog";
+            # without this collapse an empty set would skip every
+            # seed (none match) and disable_datasets_not_in(set())
+            # would flip the whole catalog off. The visible symptom
+            # was the prod stats sync reporting "0 synced" with
+            # every dataset "enabled": false in the DQ endpoint.
+            logger.info("--from-file %s contains no codes; "
+                        "registering all seeds", args.from_file)
+            codes_filter = None
 
     registered = 0
     skipped = 0

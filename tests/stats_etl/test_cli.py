@@ -167,3 +167,34 @@ def test_cli_register_seed_missing_file_falls_back_to_all(tmp_path):
     from src.stats_etl.datasets import SEED_DATASETS
     assert fake_db.upsert_dataset.call_count == len(SEED_DATASETS)
     fake_db.disable_datasets_not_in.assert_not_called()
+
+
+def test_cli_register_seed_empty_file_registers_all_seeds(tmp_path, capsys):
+    """A ``--from-file`` path that exists but contains zero codes
+    (e.g. a ConfigMap whose only content is a comment line) must
+    register the full SEED_DATASETS catalog and NOT disable anything.
+
+    Regression: prod was deployed with a ``datasets.txt`` ConfigMap
+    that read::
+
+        # Empty file → register-seed registers every SEED_DATASETS entry.
+
+    Pre-fix the code treated that as an empty filter set: every seed
+    was skipped (none matched) and ``disable_datasets_not_in(set())``
+    flipped the whole catalog off. The prod stats-sync cron then
+    reported ``0 synced`` for weeks and the DQ ``/eurostat`` endpoint
+    showed ``enabled: 0 of 40`` despite 202 M observations sitting in
+    the store.
+    """
+    f = tmp_path / "datasets.txt"
+    f.write_text("# only a comment\n\n\n# another comment\n")
+
+    fake_db = MagicMock()
+    with patch("src.stats_etl.cli.StatsDatabase", return_value=fake_db):
+        rc = main(["register-seed", "--from-file", str(f)])
+    assert rc == 0
+    from src.stats_etl.datasets import SEED_DATASETS  # pylint: disable=import-outside-toplevel
+    assert fake_db.upsert_dataset.call_count == len(SEED_DATASETS)
+    fake_db.disable_datasets_not_in.assert_not_called()
+    out = capsys.readouterr().out
+    assert f"registered {len(SEED_DATASETS)} seed datasets" in out
