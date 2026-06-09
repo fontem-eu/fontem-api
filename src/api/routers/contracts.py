@@ -65,7 +65,7 @@ def company_profile(
         group_data = session.run(
             "MATCH (member:Company {gmr_id: $gid}) "
             "OPTIONAL MATCH (member)-[:SUBSIDIARY_OF*1..5]->(ancestor) "
-            "WHERE NOT (ancestor)-[:SUBSIDIARY_OF]->() "
+            "WHERE NOT EXISTS { (ancestor)-[:SUBSIDIARY_OF]->() } "
             "WITH COALESCE(ancestor, member) AS root "
             "MATCH (root)<-[:SUBSIDIARY_OF*0..5]-(child) "
             "OPTIONAL MATCH (ct:Contract)-[:AWARDED_TO]->(child) "

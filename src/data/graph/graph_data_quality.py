@@ -146,7 +146,7 @@ class GraphDataQualitySource(DataQualitySource):
             # Procurement-only companies (have contracts but no listing)
             procurement_only = session.run(
                 "MATCH (ct:Contract)-[:AWARDED_TO]->(c:Company) "
-                "WHERE NOT (c)-[:LISTED_AS]->() "
+                "WHERE NOT EXISTS { (c)-[:LISTED_AS]->() } "
                 "RETURN count(DISTINCT c) AS n"
             ).single()["n"]
 
@@ -307,7 +307,7 @@ class GraphDataQualitySource(DataQualitySource):
             ).single()["n"]
             orphan_subs = session.run(
                 "MATCH (c:Company)-[r:SUBSIDIARY_OF]->(p) "
-                "WHERE NOT exists((p)-[:LISTED_AS]->()) AND p.lei IS NULL "
+                "WHERE NOT EXISTS { (p)-[:LISTED_AS]->() } AND p.lei IS NULL "
                 "RETURN count(r) AS n"
             ).single()["n"]
             by_country = session.run(
