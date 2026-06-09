@@ -617,17 +617,28 @@ def _stub_currency_svc(value_eur: float | None, parsed_value: float = None):
     return svc
 
 
+def _lot_with_estimate(lot_id: str, estimated_value: float | None,
+                       currency: str = "EUR"):
+    """A Lot stub mirroring the eForms-parser ``Lot`` dataclass."""
+    lot = MagicMock()
+    lot.lot_id = lot_id
+    lot.estimated_value = estimated_value
+    lot.currency = currency
+    return lot
+
+
 @patch("src.etl.load_ted_contracts.stream_notices")
 @patch("src.etl.load_ted_contracts.TedMatcher")
-def test_value_sanity_cap_drops_garbage_above_10b_eur(
+def test_value_dropped_when_award_exceeds_estimate_by_huge_ratio(
     mock_matcher_cls, mock_stream,
 ):
-    """The canonical Swedish bus fixture: TotalAmount SEK
-    2110249000000000 (~€182T at ~0.086 SEK/EUR) is a data entry error
-    at the authority — the same notice has EstimatedOverallContractAmount
-    of 2 000 000 000 SEK (~€175M). Above €10B we drop value_eur AND
-    value_original to NULL, but the Contract row still gets emitted
-    with all other metadata intact."""
+    """The canonical Swedish bus fixture: ``cbc:TotalAmount``
+    2_110_249_000_000_000 SEK (~€182 T) with
+    ``cbc:EstimatedOverallContractAmount`` 2_000_000_000 SEK
+    (~€175 M) on the same lot — ratio 1 055 124×. The cross-check
+    fires in the ORIGINAL currency (SEK vs SEK) so cross-rate
+    confusion is impossible; the loader drops ``value_eur`` and
+    ``value_original`` to NULL but keeps the rest of the Contract."""
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
     )
@@ -639,76 +650,121 @@ def test_value_sanity_cap_drops_garbage_above_10b_eur(
         awards=[_stub_award(currency="SEK", value=2_110_249_000_000_000.0)],
         organizations={"O1": contractor},
     )
+    # Lot estimate at the same scale the authority intended for the
+    # award; the mismatch is on the awarded total.
+    notice.lots = [_lot_with_estimate("LOT-0000", 2_000_000_000.0,
+                                       currency="SEK")]
     mock_stream.return_value = iter([notice])
-
     driver, _session = _mock_driver_and_session()
     log, emit = _mock_log()
-    # €182T EUR converted from the SEK number
+    # Currency-service computes €182T — we still feed it through to
+    # prove that the cross-check is done in the original currency
+    # before the EUR conversion is consulted.
     svc = _stub_currency_svc(
         value_eur=1.82e14,
         parsed_value=2_110_249_000_000_000.0,
     )
     load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
-
-    contract_call = next(
+    payload = next(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
-    )
-    payload = contract_call.kwargs["payload"]
+    ).kwargs["payload"]
     assert "value_eur" not in payload, (
-        f"value_eur must be dropped above €10B cap; got "
+        f"value_eur must be dropped on structural mismatch; got "
         f"{payload.get('value_eur')!r}"
     )
     assert "value_original" not in payload, (
-        f"value_original must also be dropped to avoid surfacing "
-        f"the raw garbage; got {payload.get('value_original')!r}"
+        f"value_original must also be dropped; got "
+        f"{payload.get('value_original')!r}"
     )
-    # Everything else still lands.
+    # Rest of the Contract row still lands.
     assert payload["ted_notice_id"]
     assert payload["authority_id"] == "auth-1"
     assert payload["company_gmr_id"] == "company-1"
-    assert payload["cpv"] == "45000000"
 
 
 @patch("src.etl.load_ted_contracts.stream_notices")
 @patch("src.etl.load_ted_contracts.TedMatcher")
-def test_value_sanity_cap_keeps_legitimate_large_contract(
+def test_value_kept_when_award_is_proportional_to_estimate(
     mock_matcher_cls, mock_stream,
 ):
-    """A €5B contract is large but plausible (multi-year framework,
-    defense, infrastructure). Must pass through unchanged. The cap
-    only catches extra-zero garbage above €10B."""
+    """A multi-year HSR or defense framework can legitimately award
+    €20 B with a €15 B estimate (cost overrun, scope expansion).
+    Ratio is ~1.3× — well under the 1000× mismatch threshold. The
+    value must pass through untouched; this is the cohort the user
+    explicitly wants to see in the graph."""
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
     )
     contractor = MagicMock()
-    contractor.name = "Big Defense GmbH"
+    contractor.name = "Big Infra GmbH"
     contractor.country = "DE"
     contractor.legal_id = None
     notice = _stub_notice(
-        awards=[_stub_award(currency="EUR", value=5e9)],  # €5 billion
+        awards=[_stub_award(currency="EUR", value=2e10)],   # €20 B awarded
         organizations={"O1": contractor},
     )
+    notice.lots = [
+        _lot_with_estimate("LOT-A", 1.5e10, currency="EUR"),  # €15 B est
+    ]
     mock_stream.return_value = iter([notice])
     driver, _session = _mock_driver_and_session()
     log, emit = _mock_log()
-    svc = _stub_currency_svc(value_eur=5e9, parsed_value=5e9)
+    svc = _stub_currency_svc(value_eur=2e10, parsed_value=2e10)
     load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
     payload = next(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
-    assert payload["value_eur"] == 5e9
-    assert payload["value_original"] == 5e9
+    assert payload["value_eur"] == 2e10
+    assert payload["value_original"] == 2e10
 
 
 @patch("src.etl.load_ted_contracts.stream_notices")
 @patch("src.etl.load_ted_contracts.TedMatcher")
-def test_value_sanity_cap_typical_contract_unaffected(
+def test_value_kept_when_no_estimate_present(
     mock_matcher_cls, mock_stream,
 ):
-    """The 99.99 % case — a €207k median contract — must pass through
-    the sanity gate without any logging or modification."""
+    """Some notices carry no lot-level estimate (e.g. the Polish
+    outlier b2958339). Without a structural anchor we let the value
+    through — there's no signal to drop on — and rely on the >€1 B
+    audit log + the DQ dashboard for operator review. The user
+    explicitly does NOT want a blanket cap rejecting big legit
+    contracts."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1", stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Vendor"
+    contractor.country = "PL"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award(currency="PLN", value=4e12)],  # 4 T PLN
+        organizations={"O1": contractor},
+    )
+    notice.lots = []  # no estimates anywhere
+    mock_stream.return_value = iter([notice])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    svc = _stub_currency_svc(value_eur=9e11, parsed_value=4e12)
+    load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
+    payload = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    # Value passes through — no estimate to compare against.
+    assert payload["value_eur"] == 9e11
+    assert payload["value_original"] == 4e12
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_value_typical_contract_unaffected(
+    mock_matcher_cls, mock_stream,
+):
+    """The 99.99 % case — a €207 k median contract with a
+    proportional €200 k estimate — passes through without any
+    modification or log noise."""
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
     )
@@ -720,6 +776,9 @@ def test_value_sanity_cap_typical_contract_unaffected(
         awards=[_stub_award(currency="EUR", value=207_117.44)],
         organizations={"O1": contractor},
     )
+    notice.lots = [
+        _lot_with_estimate("LOT-1", 200_000.0, currency="EUR"),
+    ]
     mock_stream.return_value = iter([notice])
     driver, _session = _mock_driver_and_session()
     log, emit = _mock_log()

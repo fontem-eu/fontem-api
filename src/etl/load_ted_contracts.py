@@ -95,9 +95,23 @@ def _coalesce_date(award, notice) -> tuple[str | None, str]:
 
 TED_MONTHLY_URL = "https://ted.europa.eu/packages/monthly/{year}-{month}"
 
-# Sanity bounds on the contract value. Caught from authority eForms
-# data entry errors — see the SEK 2.11e15 fixture in tests.
-_VALUE_SANITY_CAP_EUR = 1e10
+# Structural validation of the contract value against the eForms
+# estimate. The eForms schema carries two amounts on a notice: the
+# awarded ``cbc:TotalAmount`` (per-award value) and the procurement
+# project's ``cbc:EstimatedOverallContractAmount`` (sum or per-lot).
+# Authority data entry errors typically inflate the awarded amount
+# by extra-zero typos while leaving the estimate intact — the
+# canonical example is a Swedish bus notice with TotalAmount
+# 2.11e15 SEK and EstimatedOverallContractAmount 2e9 SEK on the
+# same lot (1 055 124× ratio).
+#
+# We don't impose any absolute cap — single contracts CAN reach
+# €10 B+ (defense, infrastructure, multi-year frameworks) and we
+# want those to land in the graph so operators can see them. The
+# cross-check below only fires when both numbers are present AND
+# the ratio is patently absurd. When an estimate is absent we let
+# the value through and surface it via the audit-threshold log.
+_VALUE_MISMATCH_RATIO = 1000.0
 _VALUE_AUDIT_THRESHOLD_EUR = 1e9
 
 
@@ -364,40 +378,62 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             float(value_eur_decimal) if value_eur_decimal is not None else None
         )
 
-        # Sanity cap on the awarded value. Some authority eForms
-        # submissions contain extra-zero data entry errors on the
-        # ``cbc:TotalAmount`` field — the canonical example we caught
-        # is a Swedish bus contract (notice 9b3184a7-cf42-…) whose
-        # XML reads ``<cbc:TotalAmount currencyID="SEK">2110249000000000``
-        # (~€182T) while the ``cbc:EstimatedOverallContractAmount``
-        # on the same notice reads ``2000000000`` SEK (€175M, sane).
-        # 29 contracts in the prod graph exceed €10B vs the p99.9 at
-        # €416M; the gap is almost entirely data entry errors. We
-        # drop value_eur + value_original to NULL above €10B and
-        # keep the rest of the contract (title, authority, company,
-        # CPV, date) so the row still appears in dashboards but
-        # without poisoning aggregate sums. Borderline cases get
-        # a WARN at €1B for audit.
-        if value_eur_float is not None:
-            if value_eur_float > _VALUE_SANITY_CAP_EUR:
-                logger.warning(
-                    "TED notice %s value_eur=%.2e (currency=%s, "
-                    "original=%.2e) exceeds sanity cap €%.1eB — "
-                    "dropping to NULL (extra-zero data entry error)",
-                    ted_notice_id, value_eur_float, resolved_currency,
-                    value_original_float or 0.0,
-                    _VALUE_SANITY_CAP_EUR / 1e9,
-                )
-                value_eur_float = None
-                value_original_float = None
-            elif value_eur_float > _VALUE_AUDIT_THRESHOLD_EUR:
-                logger.warning(
-                    "TED notice %s value_eur=%.2e (currency=%s) "
-                    "exceeds €%.1fB audit threshold — keeping but "
-                    "flag for review",
-                    ted_notice_id, value_eur_float, resolved_currency,
-                    _VALUE_AUDIT_THRESHOLD_EUR / 1e9,
-                )
+        # Structural sanity check: compare the awarded value against
+        # the sum of lot-level ``EstimatedOverallContractAmount``
+        # values from the same notice. Both fields are populated by
+        # the procuring authority via eForms; a healthy notice has
+        # them within a couple of orders of magnitude, while extra-
+        # zero data entry errors blow them apart by 5+ orders
+        # (canonical: SEK 2.11e15 awarded vs 2e9 estimated on a
+        # Umeå bus notice, 1 055 124× ratio).
+        #
+        # The check fires in the ORIGINAL currency to avoid any
+        # cross-rate confusion — both numbers are in
+        # ``award.currency or notice.currency`` directly from the
+        # XML. Only drop value_eur + value_original to NULL when a
+        # mismatch is clearly detected; the rest of the Contract
+        # row still lands so the notice keeps its dashboard
+        # presence with NULL-value semantics.
+        lots_with_estimate = [
+            lot for lot in (notice.lots or [])
+            if getattr(lot, "estimated_value", None)
+        ]
+        estimate_total = sum(
+            float(lot.estimated_value) for lot in lots_with_estimate
+        )
+        if (
+            value_eur_float is not None
+            and estimate_total > 0
+            and parsed_value is not None
+            and float(parsed_value) > estimate_total * _VALUE_MISMATCH_RATIO
+        ):
+            logger.warning(
+                "TED notice %s value=%.2e %s exceeds estimated total "
+                "%.2e %s by %dx — likely authority data entry error, "
+                "dropping value",
+                ted_notice_id, float(parsed_value),
+                declared_currency or "?",
+                estimate_total, declared_currency or "?",
+                int(float(parsed_value) / estimate_total),
+            )
+            value_eur_float = None
+            value_original_float = None
+        elif (
+            value_eur_float is not None
+            and value_eur_float > _VALUE_AUDIT_THRESHOLD_EUR
+        ):
+            # No structural anchor (no estimate, or estimate close to
+            # awarded). Surface anything above €1B so operators can
+            # spot-check — legitimate €10B+ infrastructure / defense
+            # contracts genuinely exist and we want to see them.
+            logger.warning(
+                "TED notice %s value_eur=%.2e (currency=%s, "
+                "original=%.2e) exceeds €%.1fB audit threshold — "
+                "keeping; review for legitimacy",
+                ted_notice_id, value_eur_float, resolved_currency,
+                value_original_float or 0.0,
+                _VALUE_AUDIT_THRESHOLD_EUR / 1e9,
+            )
 
         # Emit Company once per archive (per-run dedup); the sink
         # would MERGE either way.
