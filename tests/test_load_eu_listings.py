@@ -36,6 +36,7 @@ def test_emit_listings_companies_and_listings():
             "name": "Adyen N.V.",
             "country": "NL",
             "ticker": "ADYEN",
+            "isin": "NL0012969182",
             "exchange": "AMS",
         },
         "NOTICKER": {
@@ -59,7 +60,7 @@ def test_emit_listings_currency_from_country():
         "GB1": {
             "lei": "724500973ODKK3IFQ44A",
             "name": "Brit Plc", "country": "GB",
-            "ticker": "BRIT", "exchange": "LSE",
+            "ticker": "BRIT", "exchange": "LSE", "isin": "GB0030913577",
         },
     }
     emit_listings(emit, entities)
@@ -151,7 +152,7 @@ def test_load_eu_listings_one_batch_for_listings_and_filings(tmp_path: Path):
         "X": {
             "lei": "724500973ODKK3IFQ447",
             "name": "Adyen N.V.", "country": "NL",
-            "ticker": "ADYEN", "exchange": "AMS",
+            "ticker": "ADYEN", "exchange": "AMS", "isin": "NL0012969182",
         },
     }
     (esef_dir / "eu_entities.json").write_text(json.dumps(entities))
@@ -164,3 +165,58 @@ def test_load_eu_listings_one_batch_for_listings_and_filings(tmp_path: Path):
     assert log.batch.call_count == 1
     # Begin + End around the financials block.
     assert emit.control.call_count == 2
+
+
+def test_emit_listings_skips_ticker_without_isin():
+    """Pin the new contract: an entity carrying a ticker but no ISIN
+    must NOT produce an ``UpsertListing``. Such Listings used to land
+    as suspect (``isin=NULL`` on EU exchanges, ticker shape matching
+    the legacy fabricator), and the OpenFIGI ``lei-reeval`` pass had
+    to retire them on every cron run. The ``Company`` row still gets
+    emitted so a later ISIN-carrying loader (OpenFIGI ``lei`` mode
+    via the GLEIF bulk file) can attach the canonical Listing."""
+    _log, emit = _mock_log()
+    entities = {
+        "ABC": {
+            "lei": "LEI" + "0" * 17,
+            "name": "Some Holding",
+            "country": "DE",
+            "ticker": "ABC",
+            "exchange": "DE",
+            "isin": None,        # ← the previously-buggy case
+        },
+    }
+    companies, listings = emit_listings(emit, entities)
+    assert companies == 1, "Company must still be emitted"
+    assert listings == 0, (
+        "Listing must NOT be emitted without an ISIN"
+    )
+    # Sanity: only the UpsertCompany call landed, no UpsertListing.
+    call_types = [c.args[0] for c in emit.upsert.call_args_list]
+    assert call_types == ["UpsertCompany"]
+
+
+def test_emit_listings_isin_lands_on_the_payload():
+    """When ISIN IS present, it must be passed through to the
+    ``UpsertListing`` payload so the consolidator can key the
+    Listing by ISIN downstream and ``lei-reeval`` doesn't flag it
+    as a suspect ticker."""
+    _log, emit = _mock_log()
+    entities = {
+        "ADYEN": {
+            "lei": "724500973ODKK3IFQ447",
+            "name": "Adyen N.V.",
+            "country": "NL",
+            "ticker": "ADYEN",
+            "exchange": "AS",
+            "isin": "NL0012969182",
+        },
+    }
+    emit_listings(emit, entities)
+    listing_call = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertListing"
+    )
+    payload = listing_call.kwargs["payload"]
+    assert payload["isin"] == "NL0012969182"
+    assert payload["ticker"] == "ADYEN"

@@ -97,7 +97,16 @@ def emit_listings(emit, entities: dict) -> tuple[int, int]:
         companies += 1
 
         ticker = meta.get("ticker")
-        if ticker is None:
+        isin = meta.get("isin")
+        # Require BOTH ticker and ISIN. Skipping ISIN-less rows lets
+        # the OpenFIGI ``lei`` mode pick the company up later via its
+        # bulk-file path (which always carries ISIN) instead of us
+        # emitting a suspect Listing here that the consolidator's
+        # lei-reeval pass has to retire on every cron run. The
+        # ``Company`` row is still emitted above so the consolidator
+        # has a target to attach a future Listing to; only the
+        # ISIN-less Listing is skipped.
+        if not ticker or not isin:
             continue
         emit.upsert(
             "UpsertListing",
@@ -107,6 +116,7 @@ def emit_listings(emit, entities: dict) -> tuple[int, int]:
                 ticker=str(ticker),
                 company_gmr_id=gid,
                 exchange=meta.get("exchange") or None,
+                isin=isin,
                 currency=COUNTRY_CURRENCY.get(meta.get("country") or "", "EUR"),
                 active=True,
             ),
