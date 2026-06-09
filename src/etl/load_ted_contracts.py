@@ -100,18 +100,32 @@ TED_MONTHLY_URL = "https://ted.europa.eu/packages/monthly/{year}-{month}"
 # awarded ``cbc:TotalAmount`` (per-award value) and the procurement
 # project's ``cbc:EstimatedOverallContractAmount`` (sum or per-lot).
 # Authority data entry errors typically inflate the awarded amount
-# by extra-zero typos while leaving the estimate intact — the
-# canonical example is a Swedish bus notice with TotalAmount
-# 2.11e15 SEK and EstimatedOverallContractAmount 2e9 SEK on the
-# same lot (1 055 124× ratio).
+# by extra-zero typos while leaving the estimate intact — canonical
+# example is a Swedish bus notice with TotalAmount 2.11e15 SEK and
+# EstimatedOverallContractAmount 2e9 SEK on the same lot (~1M×
+# ratio).
 #
-# We don't impose any absolute cap — single contracts CAN reach
-# €10 B+ (defense, infrastructure, multi-year frameworks) and we
-# want those to land in the graph so operators can see them. The
-# cross-check below only fires when both numbers are present AND
-# the ratio is patently absurd. When an estimate is absent we let
-# the value through and surface it via the audit-threshold log.
-_VALUE_MISMATCH_RATIO = 1000.0
+# Three guards, listed strongest signal first:
+#
+# 1. ``_VALUE_MISMATCH_RATIO`` (100×) — when both amounts exist, the
+#    awarded must not exceed the sum of per-lot estimates by 100×.
+#    Real cost overruns hit 1.5–3×; even severely overrun framework
+#    contracts top out an order of magnitude above estimate. 100×
+#    is comfortably above legitimate scope expansion.
+#
+# 2. ``_VALUE_SANITY_CAP_EUR`` (€100 B) — absolute hard cap. Above
+#    this no single contract is realistic; the largest historical
+#    Polish road framework was ~€10 B (over 7 years) and even mega
+#    defense programmes cap around €50 B per single award. Catches
+#    the no-estimate case (e.g. the Polish 4 T PLN outlier) where
+#    the mismatch check has no anchor.
+#
+# 3. ``_VALUE_AUDIT_THRESHOLD_EUR`` (€1 B) — log-only. Operators
+#    see every contract above €1 B in the WARN stream so they can
+#    spot-check the legitimate cohort; we don't want the cap to
+#    silently swallow real big infrastructure awards.
+_VALUE_MISMATCH_RATIO = 100.0
+_VALUE_SANITY_CAP_EUR = 1e11
 _VALUE_AUDIT_THRESHOLD_EUR = 1e9
 
 
@@ -402,6 +416,25 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             float(lot.estimated_value) for lot in lots_with_estimate
         )
         if (
+            value_eur_float is not None
+            and value_eur_float > _VALUE_SANITY_CAP_EUR
+        ):
+            # Absolute hard cap. No single contract should exceed
+            # €100 B; even the largest historical defense and rail
+            # frameworks come in below this. Catches the no-estimate
+            # garbage case where the structural check can't fire.
+            logger.warning(
+                "TED notice %s value_eur=%.2e (currency=%s, "
+                "original=%.2e) exceeds €%.0fB sanity cap — "
+                "dropping value (no realistic single contract "
+                "approaches this scale; treat as data entry error)",
+                ted_notice_id, value_eur_float, resolved_currency,
+                value_original_float or 0.0,
+                _VALUE_SANITY_CAP_EUR / 1e9,
+            )
+            value_eur_float = None
+            value_original_float = None
+        elif (
             value_eur_float is not None
             and estimate_total > 0
             and parsed_value is not None
