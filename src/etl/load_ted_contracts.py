@@ -95,6 +95,11 @@ def _coalesce_date(award, notice) -> tuple[str | None, str]:
 
 TED_MONTHLY_URL = "https://ted.europa.eu/packages/monthly/{year}-{month}"
 
+# Sanity bounds on the contract value. Caught from authority eForms
+# data entry errors — see the SEK 2.11e15 fixture in tests.
+_VALUE_SANITY_CAP_EUR = 1e10
+_VALUE_AUDIT_THRESHOLD_EUR = 1e9
+
 
 def _download_monthly(year: int, month: int, dest: Path) -> Path:
     """Download a TED monthly package."""
@@ -358,6 +363,41 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         value_eur_float = (
             float(value_eur_decimal) if value_eur_decimal is not None else None
         )
+
+        # Sanity cap on the awarded value. Some authority eForms
+        # submissions contain extra-zero data entry errors on the
+        # ``cbc:TotalAmount`` field — the canonical example we caught
+        # is a Swedish bus contract (notice 9b3184a7-cf42-…) whose
+        # XML reads ``<cbc:TotalAmount currencyID="SEK">2110249000000000``
+        # (~€182T) while the ``cbc:EstimatedOverallContractAmount``
+        # on the same notice reads ``2000000000`` SEK (€175M, sane).
+        # 29 contracts in the prod graph exceed €10B vs the p99.9 at
+        # €416M; the gap is almost entirely data entry errors. We
+        # drop value_eur + value_original to NULL above €10B and
+        # keep the rest of the contract (title, authority, company,
+        # CPV, date) so the row still appears in dashboards but
+        # without poisoning aggregate sums. Borderline cases get
+        # a WARN at €1B for audit.
+        if value_eur_float is not None:
+            if value_eur_float > _VALUE_SANITY_CAP_EUR:
+                logger.warning(
+                    "TED notice %s value_eur=%.2e (currency=%s, "
+                    "original=%.2e) exceeds sanity cap €%.1eB — "
+                    "dropping to NULL (extra-zero data entry error)",
+                    ted_notice_id, value_eur_float, resolved_currency,
+                    value_original_float or 0.0,
+                    _VALUE_SANITY_CAP_EUR / 1e9,
+                )
+                value_eur_float = None
+                value_original_float = None
+            elif value_eur_float > _VALUE_AUDIT_THRESHOLD_EUR:
+                logger.warning(
+                    "TED notice %s value_eur=%.2e (currency=%s) "
+                    "exceeds €%.1fB audit threshold — keeping but "
+                    "flag for review",
+                    ted_notice_id, value_eur_float, resolved_currency,
+                    _VALUE_AUDIT_THRESHOLD_EUR / 1e9,
+                )
 
         # Emit Company once per archive (per-run dedup); the sink
         # would MERGE either way.

@@ -593,3 +593,140 @@ def test_main_overrides_year_month_when_explicit(monkeypatch):
 
     assert captured["year"] == 2024
     assert captured["month"] == 6
+
+
+# ── Value-sanity cap (extra-zero authority eForms data entry errors) ─
+
+
+def _stub_currency_svc(value_eur: float | None, parsed_value: float = None):
+    """A currency-service mock that returns the requested EUR amount
+    so we can exercise the sanity-cap branch deterministically.
+    Resolution + conversion happen inside the loader; here we short
+    circuit both."""
+    from decimal import Decimal  # pylint: disable=import-outside-toplevel
+    svc = MagicMock()
+    svc.parse_value.return_value = (
+        Decimal(str(parsed_value if parsed_value is not None
+                    else value_eur or 0)),
+        False,
+    )
+    svc.resolve_currency.return_value = ("EUR", False)
+    svc.to_eur.return_value = (
+        Decimal(str(value_eur)) if value_eur is not None else None
+    )
+    return svc
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_value_sanity_cap_drops_garbage_above_10b_eur(
+    mock_matcher_cls, mock_stream,
+):
+    """The canonical Swedish bus fixture: TotalAmount SEK
+    2110249000000000 (~€182T at ~0.086 SEK/EUR) is a data entry error
+    at the authority — the same notice has EstimatedOverallContractAmount
+    of 2 000 000 000 SEK (~€175M). Above €10B we drop value_eur AND
+    value_original to NULL, but the Contract row still gets emitted
+    with all other metadata intact."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1", stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Nobina Sverige AB"
+    contractor.country = "SWE"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award(currency="SEK", value=2_110_249_000_000_000.0)],
+        organizations={"O1": contractor},
+    )
+    mock_stream.return_value = iter([notice])
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    # €182T EUR converted from the SEK number
+    svc = _stub_currency_svc(
+        value_eur=1.82e14,
+        parsed_value=2_110_249_000_000_000.0,
+    )
+    load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
+
+    contract_call = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    )
+    payload = contract_call.kwargs["payload"]
+    assert "value_eur" not in payload, (
+        f"value_eur must be dropped above €10B cap; got "
+        f"{payload.get('value_eur')!r}"
+    )
+    assert "value_original" not in payload, (
+        f"value_original must also be dropped to avoid surfacing "
+        f"the raw garbage; got {payload.get('value_original')!r}"
+    )
+    # Everything else still lands.
+    assert payload["ted_notice_id"]
+    assert payload["authority_id"] == "auth-1"
+    assert payload["company_gmr_id"] == "company-1"
+    assert payload["cpv"] == "45000000"
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_value_sanity_cap_keeps_legitimate_large_contract(
+    mock_matcher_cls, mock_stream,
+):
+    """A €5B contract is large but plausible (multi-year framework,
+    defense, infrastructure). Must pass through unchanged. The cap
+    only catches extra-zero garbage above €10B."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1", stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Big Defense GmbH"
+    contractor.country = "DE"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award(currency="EUR", value=5e9)],  # €5 billion
+        organizations={"O1": contractor},
+    )
+    mock_stream.return_value = iter([notice])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    svc = _stub_currency_svc(value_eur=5e9, parsed_value=5e9)
+    load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
+    payload = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["value_eur"] == 5e9
+    assert payload["value_original"] == 5e9
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_value_sanity_cap_typical_contract_unaffected(
+    mock_matcher_cls, mock_stream,
+):
+    """The 99.99 % case — a €207k median contract — must pass through
+    the sanity gate without any logging or modification."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1", stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Small Vendor SARL"
+    contractor.country = "FR"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award(currency="EUR", value=207_117.44)],
+        organizations={"O1": contractor},
+    )
+    mock_stream.return_value = iter([notice])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    svc = _stub_currency_svc(value_eur=207_117.44, parsed_value=207_117.44)
+    load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
+    payload = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["value_eur"] == 207_117.44
