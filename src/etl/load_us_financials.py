@@ -2,19 +2,25 @@
 US EDGAR Financials → events.entity_events
 ==========================================
 Reads ``companyfacts/*.json`` and emits one ``UpsertFiling`` event
-per (company, year) into the event log, bracketed by
-``BeginGraphReplace`` / ``EndGraphReplace`` against the EDGAR
-financials graph (``http://data.fontem.eu/graph/financials/edgar``).
-The bracket gives the Virtuoso sink PUT-replace semantics — the
-graph is wiped and rebuilt to exactly the events between Begin
-and End — and lets the Neo4j sink DETACH-DELETE the FinancialYear
-label before MERGE-ing the new batch.
+per (company, year) into the event log. The Filing IRI is
+deterministic on (gmr_id, year, source), so re-runs land on the
+same subject and the sinks idempotently overwrite.
 
-Per-source graphs (vs a single ``…/graph/financials``) are
-deliberate: EDGAR and ESEF run on different schedules, so a shared
-graph PUT would have one source wipe the other. With separate
-graphs each source owns its side; data-quality SPARQL queries
-union them.
+We used to bracket the stream with ``BeginGraphReplace`` /
+``EndGraphReplace``, giving Virtuoso PUT-replace semantics and the
+Neo4j sink a DETACH-DELETE/MERGE flow. That pattern collapsed
+under its own weight in prod 2026-06-07: the Neo4j sink
+accumulates the whole bracket in memory before flushing, 130k
+filings ≈ 650 MiB on a 1 Gi pod = OOMKilled mid-bracket, and the
+EndGraphReplace landed in a fresh process with no Begin to match,
+silently no-op'd. EDGAR + ESEF also share the FinancialYear label,
+so even on a clean flush each loader's DETACH would wipe the
+other source's data. Per-event MERGE has neither problem.
+
+Trade-off: filings retracted upstream linger in the graph until a
+follow-up cleanup pass removes them. For EDGAR retractions this is
+rare and tolerable; the next iteration of an ETL refresh job can
+prune stale (gmr_id, year, source) rows.
 
 Usage:
     python -m src.etl.load_us_financials --edgar-dir /edgar-data/full
@@ -35,7 +41,6 @@ from fontem_events import EventLog
 
 logger = logging.getLogger(__name__)
 
-GRAPH_IRI = "http://data.fontem.eu/graph/financials/edgar"
 SOURCE = "edgar"
 
 _ANNUAL_FORMS = {"10-K", "20-F", "40-F"}
@@ -132,8 +137,9 @@ def _extract_annual(facts_json: dict) -> list[dict]:  # pylint: disable=too-many
 def load_us_financials(  # pylint: disable=too-many-locals
     log: EventLog, edgar_dir: Path,
 ) -> dict:
-    """Iterate companyfacts/*.json and emit UpsertFiling events
-    bracketed by Begin/EndGraphReplace against the EDGAR graph.
+    """Iterate companyfacts/*.json and emit one UpsertFiling event
+    per (company, year). Each event is independently MERGEable in
+    the sinks — no Begin/End bracket.
 
     Bad rows (year out of schema range, missing mandatory fields, junk
     XBRL values) are logged and skipped per-record — see the comment on
@@ -165,15 +171,6 @@ def load_us_financials(  # pylint: disable=too-many-locals
     t0 = time.time()
 
     with log.batch(batch_id, producer="load_us_financials") as emit:
-        emit.control(
-            "BeginGraphReplace",
-            builders.begin_graph_replace(
-                graph_iri=GRAPH_IRI,
-                label="FinancialYear",
-                domain="financials/edgar",
-            ),
-        )
-
         for filename in sorted(facts_dir.glob("CIK*.json")):
             cik_str = filename.stem.replace("CIK", "").lstrip("0").zfill(10)
             company_gmr = cik_to_gmr.get(cik_str)
@@ -210,9 +207,8 @@ def load_us_financials(  # pylint: disable=too-many-locals
                     # record (year out of range, NaN values, etc — we
                     # saw 2113 in the wild from a botched 10-K). The
                     # schema rejects them at emit time; without this
-                    # try/except a single bad CIK aborts the entire
-                    # 19k-company sweep with the bracketed event log
-                    # already open.
+                    # try/except a single bad CIK aborts the whole
+                    # 19k-company sweep.
                     skipped_validation += 1
                     logger.warning(
                         "skipping bad filing CIK=%s year=%s: %s",
@@ -226,14 +222,6 @@ def load_us_financials(  # pylint: disable=too-many-locals
                     companies_loaded, filings_emitted,
                     companies_loaded / elapsed if elapsed else 0,
                 )
-
-        emit.control(
-            "EndGraphReplace",
-            builders.end_graph_replace(
-                graph_iri=GRAPH_IRI,
-                domain="financials/edgar",
-            ),
-        )
 
     elapsed = time.time() - t0
     logger.info(
