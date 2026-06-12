@@ -6,11 +6,19 @@ data directory and emits events into the canonical log:
 
   * ``eu_entities.json`` → UpsertCompany (incremental upsert) plus
     UpsertListing per ticker (LISTED_AS edge materialised by sinks).
-  * ``summaries/*.json`` → BeginGraphReplace + UpsertFiling × N +
-    EndGraphReplace against the ESEF financials graph.
+  * ``summaries/*.json`` → one UpsertFiling per (company, year).
+    Idempotent on the deterministic Filing IRI; no Begin/End.
 
 The two phases share one event-log batch so the run is atomic in
 the log.
+
+The ESEF path used to bracket itself with Begin/EndGraphReplace
+against ``financials/esef`` for PUT-replace semantics. That pattern
+turned out to be unsafe in prod (Neo4j sink OOMed accumulating the
+whole bracket on 2026-06-06, also EDGAR + ESEF share the
+FinancialYear label so a bracket flush on one wipes the other). We
+emit incremental upserts now; stale retracted filings can be
+cleaned up by a follow-up sweep if it ever becomes a problem.
 
 Usage:
     python -m src.etl.load_eu_listings --esef-dir /esef-data/esef
@@ -126,30 +134,15 @@ def emit_listings(emit, entities: dict) -> tuple[int, int]:
 
 
 def emit_financials(emit, summaries_dir: Path) -> int:
-    """Emit Begin/End-bracketed UpsertFiling events against the ESEF
-    graph. Each summary file may contribute multiple Filing events
-    (one per fiscal year). Returns total filing events emitted.
+    """Emit one UpsertFiling event per (company, fiscal year) found
+    in ``summaries_dir``. Returns the total filing events emitted.
 
-    The bracket gives PUT-replace semantics: the ESEF financials
-    graph is rebuilt to exactly the events between Begin and End.
+    Each event is independently MERGEable in the sinks. The Filing
+    IRI is deterministic on (gmr_id, year, source), so re-runs are
+    idempotent.
     """
     if not summaries_dir.exists():
         logger.warning("Summaries dir not found: %s", summaries_dir)
-        emit.control(
-            "BeginGraphReplace",
-            builders.begin_graph_replace(
-                graph_iri=ESEF_FINANCIALS_GRAPH,
-                label="FinancialYear",
-                domain="financials/esef",
-            ),
-        )
-        emit.control(
-            "EndGraphReplace",
-            builders.end_graph_replace(
-                graph_iri=ESEF_FINANCIALS_GRAPH,
-                domain="financials/esef",
-            ),
-        )
         return 0
 
     summaries = sorted(summaries_dir.glob("*.json"))
@@ -164,15 +157,6 @@ def emit_financials(emit, summaries_dir: Path) -> int:
         if not lei or len(lei) != 20:
             continue
         docs.append(doc)
-
-    emit.control(
-        "BeginGraphReplace",
-        builders.begin_graph_replace(
-            graph_iri=ESEF_FINANCIALS_GRAPH,
-            label="FinancialYear",
-            domain="financials/esef",
-        ),
-    )
 
     filings = 0
     files_processed = 0
@@ -209,13 +193,6 @@ def emit_financials(emit, summaries_dir: Path) -> int:
                 files_processed, filings,
             )
 
-    emit.control(
-        "EndGraphReplace",
-        builders.end_graph_replace(
-            graph_iri=ESEF_FINANCIALS_GRAPH,
-            domain="financials/esef",
-        ),
-    )
     logger.info(
         "ESEF: %d filings emitted from %d files (%d entities had "
         "no LEI / unparseable summary)",
