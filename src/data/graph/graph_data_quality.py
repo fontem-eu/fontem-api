@@ -481,33 +481,56 @@ class GraphDataQualitySource(DataQualitySource):
         }
 
     def get_lobbying_stats(self) -> dict:
-        """EU Transparency Register stats."""
+        """EU Transparency Register stats.
+
+        Reads from ``(:Disclosure {system: 'eu-lobbying'})`` nodes
+        with ``detail_*``-prefixed properties — the shape the sink
+        actually writes. The legacy code queried ``:Lobbyist`` with
+        bare property names like ``l.country`` / ``l.cost_max``;
+        neither label nor property exists, so the endpoint returned
+        valid-200 zeros while 17k+ disclosures sat in the graph.
+        """
         with self._neo4j.session() as session:
-            total = session.run("MATCH (l:Lobbyist) RETURN count(l) AS n").single()["n"]
-            with_ep = session.run(
-                "MATCH (l:Lobbyist) WHERE l.ep_passes > 0 RETURN count(l) AS n"
+            total = session.run(
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "RETURN count(d) AS n"
             ).single()["n"]
+            with_ep = session.run(
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "WHERE d.detail_ep_passes > 0 RETURN count(d) AS n"
+            ).single()["n"]
+            # REPRESENTS edges to Company don't materialise in Neo4j
+            # today (item #7 in DATA_QUALITY_BACKLOG.md — sink silently
+            # drops typed-relationship events whose endpoint isn't
+            # resolvable). When that lands, this surfaces matches
+            # automatically; until then it's an honest 0.
             matched = session.run(
-                "MATCH (l:Lobbyist)-[:REPRESENTS]->() RETURN count(DISTINCT l) AS n"
+                "MATCH (d:Disclosure {system: 'eu-lobbying'})"
+                "-[:REPRESENTS]->() "
+                "RETURN count(DISTINCT d) AS n"
             ).single()["n"]
             by_country = session.run(
-                "MATCH (l:Lobbyist) WHERE l.country IS NOT NULL "
-                "RETURN l.country AS country, count(l) AS count "
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "WHERE d.detail_country IS NOT NULL "
+                "RETURN d.detail_country AS country, count(d) AS count "
                 "ORDER BY count DESC LIMIT 20"
             ).data()
             registrations = session.run(
-                "MATCH (l:Lobbyist) "
-                "WHERE l.registration_date IS NOT NULL AND size(l.registration_date) >= 7 "
-                "RETURN left(l.registration_date, 7) + '-01' AS date, count(l) AS value "
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "WHERE d.detail_registration_date IS NOT NULL "
+                "  AND size(d.detail_registration_date) >= 7 "
+                "RETURN left(d.detail_registration_date, 7) + '-01' "
+                "         AS date, count(d) AS value "
                 "ORDER BY date"
             ).data()
             cost_ranges = session.run(
-                "MATCH (l:Lobbyist) WHERE l.cost_max IS NOT NULL "
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "WHERE d.detail_cost_max IS NOT NULL "
                 "RETURN CASE "
-                "  WHEN l.cost_max < 10000 THEN '<10K' "
-                "  WHEN l.cost_max < 100000 THEN '10K-100K' "
-                "  WHEN l.cost_max < 1000000 THEN '100K-1M' "
-                "  ELSE '>1M' END AS bucket, count(l) AS count "
+                "  WHEN d.detail_cost_max < 10000 THEN '<10K' "
+                "  WHEN d.detail_cost_max < 100000 THEN '10K-100K' "
+                "  WHEN d.detail_cost_max < 1000000 THEN '100K-1M' "
+                "  ELSE '>1M' END AS bucket, count(d) AS count "
                 "ORDER BY count DESC"
             ).data()
             return {
@@ -700,20 +723,32 @@ class GraphDataQualitySource(DataQualitySource):
         }
 
     def get_cdp_stats(self) -> dict:
-        """CDP climate disclosure stats."""
+        """CDP climate disclosure stats.
+
+        Reads from ``(:Disclosure {system: 'cdp'})``. The legacy code
+        looked at ``c.cdp_score`` / ``c.cdp_reporting_year`` directly
+        on Company nodes — neither property is written by any loader,
+        so the endpoint returned valid-200 zeros. The CDP ETL has
+        also never emitted any events (item #19), so this still
+        returns zeros today — but now honestly, scoped to the right
+        node shape so a future cdp loader is wired in correctly.
+        """
         with self._neo4j.session() as session:
             with_score = session.run(
-                "MATCH (c:Company) WHERE c.cdp_score IS NOT NULL "
-                "RETURN count(c) AS n"
+                "MATCH (d:Disclosure {system: 'cdp'}) "
+                "WHERE d.detail_score IS NOT NULL "
+                "RETURN count(d) AS n"
             ).single()["n"]
             distribution = session.run(
-                "MATCH (c:Company) WHERE c.cdp_score IS NOT NULL "
-                "RETURN c.cdp_score AS score, count(c) AS count "
+                "MATCH (d:Disclosure {system: 'cdp'}) "
+                "WHERE d.detail_score IS NOT NULL "
+                "RETURN d.detail_score AS score, count(d) AS count "
                 "ORDER BY score"
             ).data()
             by_year = session.run(
-                "MATCH (c:Company) WHERE c.cdp_reporting_year IS NOT NULL "
-                "RETURN toString(c.cdp_reporting_year) AS year, count(c) AS count "
+                "MATCH (d:Disclosure {system: 'cdp'}) "
+                "WHERE d.year IS NOT NULL "
+                "RETURN toString(d.year) AS year, count(d) AS count "
                 "ORDER BY year DESC LIMIT 10"
             ).data()
         return {
@@ -761,38 +796,54 @@ class GraphDataQualitySource(DataQualitySource):
         }
 
     def get_eu_knowledge_graph_stats(self) -> dict:
-        """EU Knowledge Graph cohesion project stats."""
+        """EU Knowledge Graph cohesion project stats.
+
+        Reads from ``(:Disclosure {system: 'eu-cohesion'})`` nodes
+        with ``detail_*`` properties. The legacy code queried
+        ``:CohesionProject`` with bare property names like
+        ``p.total_budget``; neither exists in the graph, so the
+        endpoint returned zeros while 43k+ disclosures sit there.
+
+        BENEFICIARY_OF / LOCATED_IN edges from Disclosure don't
+        materialise today (sink drops typed-relationships when an
+        endpoint is missing — item #7). Reflected honestly as 0.
+        """
         with self._neo4j.session() as session:
             projects = session.run(
-                "MATCH (p:CohesionProject) RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "RETURN count(d) AS n"
             ).single()["n"]
             with_budget = session.run(
-                "MATCH (p:CohesionProject) "
-                "WHERE p.total_budget IS NOT NULL "
-                "RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "WHERE d.detail_total_budget IS NOT NULL "
+                "RETURN count(d) AS n"
             ).single()["n"]
             total_eu_contribution = session.run(
-                "MATCH (p:CohesionProject) "
-                "WHERE p.eu_contribution IS NOT NULL "
-                "RETURN sum(p.eu_contribution) AS total"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "WHERE d.detail_eu_contribution IS NOT NULL "
+                "RETURN sum(d.detail_eu_contribution) AS total"
             ).single()["total"] or 0
             beneficiary_links = session.run(
-                "MATCH (:Company)-[:BENEFICIARY_OF]->(:CohesionProject) "
+                "MATCH (:Company)-[:BENEFICIARY_OF]->"
+                "(:Disclosure {system: 'eu-cohesion'}) "
                 "RETURN count(*) AS n"
             ).single()["n"]
             by_fund = session.run(
-                "MATCH (p:CohesionProject) WHERE p.fund IS NOT NULL "
-                "RETURN p.fund AS fund, count(p) AS n "
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "WHERE d.detail_fund IS NOT NULL "
+                "RETURN d.detail_fund AS fund, count(d) AS n "
                 "ORDER BY n DESC LIMIT 10"
             ).data()
             by_country = session.run(
-                "MATCH (p:CohesionProject) WHERE p.country IS NOT NULL "
-                "RETURN p.country AS country, count(p) AS n "
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "WHERE d.detail_country IS NOT NULL "
+                "RETURN d.detail_country AS country, count(d) AS n "
                 "ORDER BY n DESC LIMIT 15"
             ).data()
             with_nuts = session.run(
-                "MATCH (p:CohesionProject)-[:LOCATED_IN]->(:NUTSRegion) "
-                "RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'})"
+                "-[:LOCATED_IN]->(:NUTSRegion) "
+                "RETURN count(d) AS n"
             ).single()["n"]
         return {
             "total_projects": projects,
@@ -809,12 +860,14 @@ class GraphDataQualitySource(DataQualitySource):
         with self._neo4j.session() as session:
             contracts_and_cohesion = session.run(
                 "MATCH (c:Company)-[:AWARDED_TO]-(:Contract) "
-                "WHERE (c)-[:BENEFICIARY_OF]->(:CohesionProject) "
+                "WHERE (c)-[:BENEFICIARY_OF]->"
+                "       (:Disclosure {system: 'eu-cohesion'}) "
                 "RETURN count(DISTINCT c) AS n"
             ).single()["n"]
 
             contracts_and_lobby = session.run(
-                "MATCH (c:Company)<-[:REPRESENTS]-(:Lobbyist) "
+                "MATCH (c:Company)<-[:REPRESENTS]-"
+                "(:Disclosure {system: 'eu-lobbying'}) "
                 "WHERE (c)-[:AWARDED_TO]-(:Contract) "
                 "RETURN count(DISTINCT c) AS n"
             ).single()["n"]
@@ -897,23 +950,27 @@ class GraphDataQualitySource(DataQualitySource):
 
         with self._neo4j.session() as session:
 
-            # Cohesion completeness
+            # Cohesion completeness — same Disclosure-shape fix as
+            # get_eu_knowledge_graph_stats.
             cp_total = session.run(
-                "MATCH (p:CohesionProject) RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "RETURN count(d) AS n"
             ).single()["n"]
             cp_start = session.run(
-                "MATCH (p:CohesionProject) "
-                "WHERE p.start_date IS NOT NULL "
-                "RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "WHERE d.detail_start_date IS NOT NULL "
+                "RETURN count(d) AS n"
             ).single()["n"]
             cp_nuts = session.run(
-                "MATCH (p:CohesionProject) "
-                "WHERE p.nuts_code IS NOT NULL AND p.nuts_code <> '' "
-                "RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "WHERE d.detail_nuts_code IS NOT NULL "
+                "  AND d.detail_nuts_code <> '' "
+                "RETURN count(d) AS n"
             ).single()["n"]
             cp_linked_nuts = session.run(
-                "MATCH (p:CohesionProject)-[:LOCATED_IN]->(:NUTSRegion) "
-                "RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'})"
+                "-[:LOCATED_IN]->(:NUTSRegion) "
+                "RETURN count(d) AS n"
             ).single()["n"]
 
             # Company completeness
@@ -1000,19 +1057,26 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (a:Authority) RETURN count(a) AS n"
             ).single()["n"]
 
-            # Lobbying stats
+            # Lobbying stats — same Disclosure-shape fix as
+            # get_lobbying_stats.
             lobbyist_count = session.run(
-                "MATCH (l:Lobbyist) RETURN count(l) AS n"
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "RETURN count(d) AS n"
             ).single()["n"]
 
             lobbyists_with_ep = session.run(
-                "MATCH (l:Lobbyist) WHERE l.ep_passes > 0 "
-                "RETURN count(l) AS n"
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "WHERE d.detail_ep_passes > 0 "
+                "RETURN count(d) AS n"
             ).single()["n"]
 
+            # :LobbyInterest doesn't exist in the graph today — the
+            # sink drops list-typed `interests` fields (item #14).
+            # Query left in shape that will start returning data once
+            # that fix lands; honest 0 until then.
             lobby_interests = session.run(
-                "MATCH (i:LobbyInterest)<-[:INTERESTED_IN]-(l) "
-                "RETURN i.name AS topic, count(l) AS lobbyists "
+                "MATCH (i:LobbyInterest)<-[:INTERESTED_IN]-(d) "
+                "RETURN i.name AS topic, count(d) AS lobbyists "
                 "ORDER BY lobbyists DESC LIMIT 10"
             ).data()
 
@@ -1023,7 +1087,8 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (n:NUTSRegion) RETURN count(n) AS n"
             ).single()["n"]
             cohesion_count = session.run(
-                "MATCH (p:CohesionProject) RETURN count(p) AS n"
+                "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
+                "RETURN count(d) AS n"
             ).single()["n"]
         sanctioned = self._sanctions_count_from_virtuoso()
 
