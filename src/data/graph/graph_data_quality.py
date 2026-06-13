@@ -543,17 +543,35 @@ class GraphDataQualitySource(DataQualitySource):
             }
 
     def get_trade_edges_stats(self) -> dict:
-        """Materialized trade edge stats."""
+        """Authority↔Company trade aggregates, computed live from the
+        per-contract data.
+
+        Used to read pre-materialised ``:CLIENT_OF`` / ``:SUPPLIER_OF``
+        edges produced by ``materialize_trade_edges.py``. That cron job
+        was deleted because the summary edges (a) had no time
+        dimension while every meaningful question about supplier
+        relationships is time-scoped, (b) the materialiser ran into
+        Neo4j transaction-timeout issues and the data went silently
+        invisible when it broke, and (c) the same numbers come out
+        of one Cypher query over the per-contract data.
+
+        The current query is intentionally all-time. Add a ``since``
+        kwarg the day a UI wants "last N months".
+        """
         with self._neo4j.session() as session:
-            client_of = session.run(
-                "MATCH ()-[r:CLIENT_OF]->() "
-                "RETURN count(r) AS pairs, sum(r.total_eur) AS total_eur, "
-                "  sum(r.contracts) AS total_contracts"
+            row = session.run(
+                "MATCH (a:Authority)-[:AWARDED]->(ct:Contract)"
+                "-[:AWARDED_TO]->(c:Company) "
+                "WITH a, c, count(ct) AS n, "
+                "     sum(coalesce(ct.value_eur, 0)) AS s "
+                "RETURN count(*)   AS pairs, "
+                "       sum(s)     AS total_eur, "
+                "       sum(n)     AS total_contracts"
             ).single()
             return {
-                "trade_pairs": client_of["pairs"],
-                "total_eur": client_of["total_eur"],
-                "total_contracts": client_of["total_contracts"],
+                "trade_pairs": row["pairs"],
+                "total_eur": row["total_eur"] or 0,
+                "total_contracts": row["total_contracts"] or 0,
             }
 
     def get_dedup_stats(self) -> dict:

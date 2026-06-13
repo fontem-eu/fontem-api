@@ -597,11 +597,15 @@ def test_since_filter_excludes_old_contracts():
     assert "con-old" not in node_ids
 
 
-# ── Summary mode toggles excluded rel types ───────────────────
+# ── Excluded rel types ─────────────────────────────────────────
 
 
-def test_summary_mode_excludes_awarded_rels():
-    """summary=true (default) should exclude AWARDED/AWARDED_TO rels."""
+def test_traversal_excludes_only_internal_bookkeeping_rels():
+    """Only the internal-bookkeeping rels (REPORTED / LISTED_AS /
+    CATEGORIZED_AS / SAME_AS) should be filtered out of the explorer.
+    AWARDED / AWARDED_TO must come through so contract relationships
+    are visible — they used to be hidden behind a CLIENT_OF /
+    SUPPLIER_OF summary toggle that has since been deleted."""
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
@@ -618,45 +622,18 @@ def test_summary_mode_excludes_awarded_rels():
                 return FakeResult({"n": entities[eid][0]})
             return FakeResult(None)
         if "RETURN path" in query:
-            # Verify excluded list contains AWARDED/AWARDED_TO
-            excluded = kwargs.get("excluded", [])
-            assert "AWARDED" in excluded
-            assert "AWARDED_TO" in excluded
+            excluded = set(kwargs.get("excluded", []))
+            assert "AWARDED" not in excluded
+            assert "AWARDED_TO" not in excluded
+            assert "CLIENT_OF" not in excluded
+            assert "SUPPLIER_OF" not in excluded
+            assert "REPORTED" in excluded
+            assert "SAME_AS" in excluded
             return FakeResult([])
         return FakeResult(None)
 
     client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
-    resp = client.get("/graph/comp-aaa?depth=1&summary=true")
-    cleanup_dishka()
-    assert resp.status_code == 200
-
-
-def test_detail_mode_excludes_summary_rels():
-    """summary=false should exclude CLIENT_OF/SUPPLIER_OF rels."""
-    entities = {
-        "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
-    }
-
-    def handler(query, **kwargs):
-        if "labels(n)[0]" in query:
-            eid = kwargs.get("eid")
-            if eid in entities:
-                return FakeResult({"label": entities[eid][1]})
-            return FakeResult(None)
-        if "RETURN n LIMIT 1" in query:
-            eid = kwargs.get("eid")
-            if eid in entities:
-                return FakeResult({"n": entities[eid][0]})
-            return FakeResult(None)
-        if "RETURN path" in query:
-            excluded = kwargs.get("excluded", [])
-            assert "CLIENT_OF" in excluded
-            assert "SUPPLIER_OF" in excluded
-            return FakeResult([])
-        return FakeResult(None)
-
-    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
-    resp = client.get("/graph/comp-aaa?depth=1&summary=false")
+    resp = client.get("/graph/comp-aaa?depth=1")
     cleanup_dishka()
     assert resp.status_code == 200
 
@@ -693,7 +670,7 @@ def test_node_with_datetime_property_serializes_as_iso():
     )
     # Direct edge from center to the Authority with a DateTime prop.
     rel = FakeRelationship(
-        start=auth_with_dt, end=center, rel_type="CLIENT_OF",
+        start=auth_with_dt, end=center, rel_type="AWARDED_TO",
         props={"detected_at": datetime(2026, 1, 1, tzinfo=timezone.utc)},
     )
     path = FakePath([center, auth_with_dt], [rel])
