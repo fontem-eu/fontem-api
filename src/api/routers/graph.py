@@ -22,12 +22,13 @@ from ..schemas.graph import (
 router = APIRouter(prefix="/graph", tags=["graph"])
 
 NODE_CAP = 500
-# Always excluded (internal bookkeeping)
+# Always excluded (internal bookkeeping). CLIENT_OF / SUPPLIER_OF
+# used to be pre-aggregated summary edges produced by a now-deleted
+# materialiser; the per-contract AWARDED / AWARDED_TO edges carry the
+# same information (with a time dimension), so the explorer just
+# traverses those directly.
 _ALWAYS_EXCLUDED = {"REPORTED", "LISTED_AS", "CATEGORIZED_AS", "SAME_AS"}
-# Excluded by default but can be opted in via ?rels= parameter
-_DEFAULT_EXCLUDED = _ALWAYS_EXCLUDED | {"AWARDED", "AWARDED_TO"}
-# When summary mode is off, show contract-level edges instead
-_DETAIL_EXCLUDED = _ALWAYS_EXCLUDED | {"CLIENT_OF", "SUPPLIER_OF"}
+_EXCLUDED = _ALWAYS_EXCLUDED
 _LABEL_ID = {
     "Company": "gmr_id",
     "Authority": "authority_id",
@@ -324,8 +325,8 @@ def graph_paths(
     summary="Traverse the entity graph from any starting node",
 )
 @inject
-# One Query() parameter per public knob the UI exposes (depth, types, since,
-# summary mode). They're orthogonal — bundling them into a Pydantic model would
+# One Query() parameter per public knob the UI exposes (depth, types, since).
+# They're orthogonal — bundling them into a Pydantic model would
 # break FastAPI's auto-generated /docs surface.
 def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     entity_id: str,
@@ -337,11 +338,6 @@ def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-ar
     since: str | None = Query(
         None,
         description="Filter contracts to those published on or after this date (YYYY-MM-DD)",
-    ),
-    summary: bool = Query(
-        True,
-        description="Use CLIENT_OF/SUPPLIER_OF summary edges (true) "
-        "or individual AWARDED/AWARDED_TO edges (false)",
     ),
     *,
     neo4j: FromDishka[Neo4jClient],
@@ -380,7 +376,7 @@ def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-ar
             f"  WHERE type(r) IN $excluded) "
             f"RETURN path",
             eid=entity_id,
-            excluded=list(_DEFAULT_EXCLUDED if summary else _DETAIL_EXCLUDED),
+            excluded=list(_EXCLUDED),
         )
 
         nodes_map, edges_list = _collect_paths(result, center_node)
