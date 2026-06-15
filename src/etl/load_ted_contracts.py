@@ -25,7 +25,6 @@ import os
 import time
 import uuid
 from datetime import date as _date, datetime
-from decimal import Decimal as _Decimal
 from pathlib import Path
 
 import httpx
@@ -41,6 +40,7 @@ from ..services.location_service import LocationService
 from ..services.ted_lookup import TedLookupError, resolve_publication_number
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
+from .contract_confidence import score_contract_value
 from .ted_matcher import TedMatcher
 
 logger = logging.getLogger(__name__)
@@ -95,38 +95,19 @@ def _coalesce_date(award, notice) -> tuple[str | None, str]:
 
 TED_MONTHLY_URL = "https://ted.europa.eu/packages/monthly/{year}-{month}"
 
-# Structural validation of the contract value against the eForms
-# estimate. The eForms schema carries two amounts on a notice: the
-# awarded ``cbc:TotalAmount`` (per-award value) and the procurement
-# project's ``cbc:EstimatedOverallContractAmount`` (sum or per-lot).
-# Authority data entry errors typically inflate the awarded amount
-# by extra-zero typos while leaving the estimate intact — canonical
-# example is a Swedish bus notice with TotalAmount 2.11e15 SEK and
-# EstimatedOverallContractAmount 2e9 SEK on the same lot (~1M×
-# ratio).
-#
-# Three guards, listed strongest signal first:
-#
-# 1. ``_VALUE_MISMATCH_RATIO`` (100×) — when both amounts exist, the
-#    awarded must not exceed the sum of per-lot estimates by 100×.
-#    Real cost overruns hit 1.5–3×; even severely overrun framework
-#    contracts top out an order of magnitude above estimate. 100×
-#    is comfortably above legitimate scope expansion.
-#
-# 2. ``_VALUE_SANITY_CAP_EUR`` (€100 B) — absolute hard cap. Above
-#    this no single contract is realistic; the largest historical
-#    Polish road framework was ~€10 B (over 7 years) and even mega
-#    defense programmes cap around €50 B per single award. Catches
-#    the no-estimate case (e.g. the Polish 4 T PLN outlier) where
-#    the mismatch check has no anchor.
-#
-# 3. ``_VALUE_AUDIT_THRESHOLD_EUR`` (€1 B) — log-only. Operators
-#    see every contract above €1 B in the WARN stream so they can
-#    spot-check the legitimate cohort; we don't want the cap to
-#    silently swallow real big infrastructure awards.
-_VALUE_MISMATCH_RATIO = 100.0
-_VALUE_SANITY_CAP_EUR = 1e11
-_VALUE_AUDIT_THRESHOLD_EUR = 1e9
+# Contract value handling is delegated to ``contract_confidence``. The
+# eForms notice carries three money signals — the lot/notice estimate
+# (``EstimatedOverallContractAmount``), the awarded total
+# (``NoticeResult/cbc:TotalAmount``), and the per-award payable
+# (``LegalMonetaryTotal/cbc:PayableAmount``). The loader stores all
+# three (the chosen value preferring the total), plus a [0,1] confidence
+# and a quality flag. Low-confidence values are kept but flagged so
+# downstream queries can exclude them from default aggregates. This
+# replaced three hard-coded guards (a 100x estimate-mismatch check, a
+# €100B absolute cap, and a €1B audit log) which (a) silently nulled
+# values rather than flagging them and (b) could not fire when no lot
+# estimate was parsed — exactly the gap that let the Forca Aerea
+# aircraft ship at €7.27B.
 
 
 def _download_monthly(year: int, month: int, dest: Path) -> Path:
@@ -182,12 +163,13 @@ def _already_loaded(session, ted_notice_id: str) -> bool:
     return row is not None
 
 
-def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
     driver,
     log: EventLog,
     archive_path: Path,
     currency_svc: CurrencyClient | None = None,
     skip_pub_num_lookup: bool = False,
+    rescore: bool = False,
 ):
     """Parse a TED archive and emit Authority/Contract/Company events.
 
@@ -235,7 +217,11 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
             # call or event emission. Notices already in Neo4j get
             # skipped wholesale; re-running an archive is now safe
             # AND fast.
-            if _already_loaded(session, notice.notice_id):
+            # rescore re-ingests notices already in the graph so the
+            # confidence scorer (and any other loader change) re-runs
+            # over them via the normal ETL+sink flow; the sink MERGEs,
+            # so values overwrite in place.
+            if not rescore and _already_loaded(session, notice.notice_id):
                 skipped += 1
                 continue
 
@@ -265,6 +251,40 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
         total, skipped, elapsed,
     )
     return {"total": total, "skipped": skipped, "elapsed_s": elapsed}
+
+
+def _award_lot_estimate(notice, award):
+    """The ``EstimatedOverallContractAmount`` of the lot this award
+    belongs to, or None. Falls back to the sole lot's estimate when the
+    award carries no lot_id (single-lot notices, the common case)."""
+    lots = notice.lots or []
+    lot_id = getattr(award, "lot_id", None)
+    if lot_id:
+        for lot in lots:
+            if getattr(lot, "lot_id", None) == lot_id:
+                return getattr(lot, "estimated_value", None)
+    if len(lots) == 1:
+        return getattr(lots[0], "estimated_value", None)
+    return None
+
+
+def _amount_to_eur(currency_svc, resolved_currency, rate_date_obj, raw):
+    """Return ``(original_float, eur_float)`` for one raw amount in the
+    notice currency. Without a currency service (unit tests / degraded
+    mode) the original doubles as the EUR proxy so scoring still runs."""
+    if raw is None:
+        return None, None
+    if not currency_svc:
+        return float(raw), float(raw)
+    parsed, _ = currency_svc.parse_value(raw)
+    if parsed is None:
+        return None, None
+    original = float(parsed)
+    eur = None
+    if resolved_currency:
+        dec = currency_svc.to_eur(parsed, resolved_currency, rate_date_obj)
+        eur = float(dec) if dec is not None else None
+    return original, eur
 
 
 def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
@@ -352,18 +372,12 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         )
 
         declared_currency = award.currency or notice.currency
-        raw_value = award.value or notice.total_value
         effective_date, _date_source = _coalesce_date(award, notice)
 
-        # Parse + currency-resolve via the currency service.
-        if currency_svc:
-            parsed_value, _was_sentinel = currency_svc.parse_value(raw_value)
-        else:
-            parsed_value = (
-                _Decimal(str(raw_value)) if raw_value is not None else None
-            )
+        # Resolve currency + FX-rate date once; the estimate, the awarded
+        # total, and the payable all convert at the same rate.
         resolved_currency = None
-        value_eur_decimal = None
+        rate_date_obj = None
         if currency_svc:
             rate_date_str = effective_date or notice.issue_date
             try:
@@ -378,94 +392,48 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 country=(buyer.country or "").upper(),
                 on=rate_date_obj,
             )
-            if parsed_value is not None and resolved_currency:
-                value_eur_decimal = currency_svc.to_eur(
-                    parsed_value, resolved_currency, rate_date_obj,
-                )
         else:
             resolved_currency = declared_currency
 
-        value_original_float = (
-            float(parsed_value) if parsed_value is not None else None
+        # The three money signals. The notice-level TotalAmount is only
+        # attributable to one award; for multi-award notices it is an
+        # aggregate, so we omit it and rely on the payable + estimate.
+        estimate_raw = _award_lot_estimate(notice, award)
+        total_raw = (
+            notice.total_value if len(notice.awards or []) == 1 else None
         )
-        value_eur_float = (
-            float(value_eur_decimal) if value_eur_decimal is not None else None
+        payable_raw = award.value
+
+        _est_orig, est_eur = _amount_to_eur(
+            currency_svc, resolved_currency, rate_date_obj, estimate_raw,
+        )
+        tot_orig, tot_eur = _amount_to_eur(
+            currency_svc, resolved_currency, rate_date_obj, total_raw,
+        )
+        pay_orig, pay_eur = _amount_to_eur(
+            currency_svc, resolved_currency, rate_date_obj, payable_raw,
         )
 
-        # Structural sanity check: compare the awarded value against
-        # the sum of lot-level ``EstimatedOverallContractAmount``
-        # values from the same notice. Both fields are populated by
-        # the procuring authority via eForms; a healthy notice has
-        # them within a couple of orders of magnitude, while extra-
-        # zero data entry errors blow them apart by 5+ orders
-        # (canonical: SEK 2.11e15 awarded vs 2e9 estimated on a
-        # Umeå bus notice, 1 055 124× ratio).
-        #
-        # The check fires in the ORIGINAL currency to avoid any
-        # cross-rate confusion — both numbers are in
-        # ``award.currency or notice.currency`` directly from the
-        # XML. Only drop value_eur + value_original to NULL when a
-        # mismatch is clearly detected; the rest of the Contract
-        # row still lands so the notice keeps its dashboard
-        # presence with NULL-value semantics.
-        lots_with_estimate = [
-            lot for lot in (notice.lots or [])
-            if getattr(lot, "estimated_value", None)
-        ]
-        estimate_total = sum(
-            float(lot.estimated_value) for lot in lots_with_estimate
+        score = score_contract_value(
+            estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
+            total_original=tot_orig, payable_original=pay_orig,
         )
-        if (
-            value_eur_float is not None
-            and value_eur_float > _VALUE_SANITY_CAP_EUR
-        ):
-            # Absolute hard cap. No single contract should exceed
-            # €100 B; even the largest historical defense and rail
-            # frameworks come in below this. Catches the no-estimate
-            # garbage case where the structural check can't fire.
+        # Store the chosen value (TotalAmount-preferred) in both
+        # currencies. Low-confidence values are kept but flagged.
+        if score.chosen_field == "total":
+            value_eur_float, value_original_float = tot_eur, tot_orig
+        elif score.chosen_field == "payable":
+            value_eur_float, value_original_float = pay_eur, pay_orig
+        else:
+            value_eur_float, value_original_float = None, None
+
+        if score.is_low_confidence:
             logger.warning(
-                "TED notice %s value_eur=%.2e (currency=%s, "
-                "original=%.2e) exceeds €%.0fB sanity cap — "
-                "dropping value (no realistic single contract "
-                "approaches this scale; treat as data entry error)",
-                ted_notice_id, value_eur_float, resolved_currency,
-                value_original_float or 0.0,
-                _VALUE_SANITY_CAP_EUR / 1e9,
-            )
-            value_eur_float = None
-            value_original_float = None
-        elif (
-            value_eur_float is not None
-            and estimate_total > 0
-            and parsed_value is not None
-            and float(parsed_value) > estimate_total * _VALUE_MISMATCH_RATIO
-        ):
-            logger.warning(
-                "TED notice %s value=%.2e %s exceeds estimated total "
-                "%.2e %s by %dx — likely authority data entry error, "
-                "dropping value",
-                ted_notice_id, float(parsed_value),
-                declared_currency or "?",
-                estimate_total, declared_currency or "?",
-                int(float(parsed_value) / estimate_total),
-            )
-            value_eur_float = None
-            value_original_float = None
-        elif (
-            value_eur_float is not None
-            and value_eur_float > _VALUE_AUDIT_THRESHOLD_EUR
-        ):
-            # No structural anchor (no estimate, or estimate close to
-            # awarded). Surface anything above €1B so operators can
-            # spot-check — legitimate €10B+ infrastructure / defense
-            # contracts genuinely exist and we want to see them.
-            logger.warning(
-                "TED notice %s value_eur=%.2e (currency=%s, "
-                "original=%.2e) exceeds €%.1fB audit threshold — "
-                "keeping; review for legitimacy",
-                ted_notice_id, value_eur_float, resolved_currency,
-                value_original_float or 0.0,
-                _VALUE_AUDIT_THRESHOLD_EUR / 1e9,
+                "TED notice %s value EUR %.3g flagged '%s' "
+                "(confidence %.2f) — stored but excluded from default "
+                "aggregates: %s",
+                ted_notice_id, value_eur_float or 0.0,
+                score.flag.value, score.confidence, score.reason,
             )
 
         # Emit Company once per archive (per-run dedup); the sink
@@ -502,6 +470,14 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 value_eur=value_eur_float,
                 value_currency=resolved_currency,
                 value_original=value_original_float,
+                estimated_value_eur=est_eur,
+                value_payable_eur=pay_eur,
+                value_confidence=score.confidence,
+                value_confidence_consistency=score.consistency,
+                value_confidence_plausibility=score.plausibility,
+                value_quality_flag=score.flag.value,
+                value_low_confidence=score.is_low_confidence,
+                value_payable_discrepancy=score.has_payable_discrepancy,
                 cpv=notice.cpv_main,
                 nuts=getattr(notice, "place_nuts", None),
                 language=getattr(notice, "language", None),
@@ -522,6 +498,12 @@ def main(argv=None):
     parser.add_argument("--file", help="Path to a local TED archive")
     parser.add_argument("--year", type=int)
     parser.add_argument("--month", type=int)
+    parser.add_argument(
+        "--rescore", action="store_true",
+        help="Re-ingest notices already in the graph (bypass the "
+             "already-loaded skip) so the value confidence scorer "
+             "re-runs over them. Used for backfills.",
+    )
     parser.add_argument(
         "--neo4j-uri",
         default=os.environ.get("NEO4J_URI", "bolt://neo4j:7687"),
@@ -603,6 +585,7 @@ def main(argv=None):
         load_contracts(
             driver, log, archive, currency_svc=currency_svc,
             skip_pub_num_lookup=args.skip_pub_num_lookup,
+            rescore=args.rescore,
         )
     finally:
         currency_svc.close()

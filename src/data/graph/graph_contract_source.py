@@ -10,6 +10,7 @@ import logging
 
 from ...analysis.contract_data_source import ContractDataSource
 from ...api.lang import authority_name_expr, contract_title_expr
+from ._value_quality import trusted_value_sum
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ class GraphContractSource(ContractDataSource):
                 "  ct.ted_publication_number AS publication_number, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
+                "  ct.value_low_confidence AS value_low_confidence, "
+                "  ct.value_quality_flag AS value_quality_flag, "
+                "  ct.value_payable_discrepancy AS value_payable_discrepancy, "
+                "  ct.estimated_value_eur AS estimated_value_eur, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
                 f"  {auth_name} AS authority, a.country AS authority_country, "
@@ -74,7 +79,7 @@ class GraphContractSource(ContractDataSource):
             total_value = session.run(
                 "MATCH (ct:Contract)-[:AWARDED_TO]->"
                 "(c:Company {gmr_id: $gid}) "
-                "RETURN sum(ct.value_eur) AS total, count(ct) AS cnt",
+                "RETURN " + trusted_value_sum("ct") + " AS total, count(ct) AS cnt",
                 gid=gmr_id,
             ).single()
 
@@ -88,6 +93,10 @@ class GraphContractSource(ContractDataSource):
                 "ted_publication_number": r.get("publication_number"),
                 "title": r["title"],
                 "value_eur": r["value_eur"],
+                "estimated_value_eur": r.get("estimated_value_eur"),
+                "value_low_confidence": r.get("value_low_confidence"),
+                "value_quality_flag": r.get("value_quality_flag"),
+                "value_payable_discrepancy": r.get("value_payable_discrepancy"),
                 "award_date": r["award_date"],
                 "cpv": cpv_label,
                 "procedure_type": r["procedure_type"],
@@ -132,6 +141,10 @@ class GraphContractSource(ContractDataSource):
                 "  ct.ted_publication_number AS publication_number, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
+                "  ct.value_low_confidence AS value_low_confidence, "
+                "  ct.value_quality_flag AS value_quality_flag, "
+                "  ct.value_payable_discrepancy AS value_payable_discrepancy, "
+                "  ct.estimated_value_eur AS estimated_value_eur, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
                 "  c.name AS contractor, c.country AS contractor_country, "
@@ -144,7 +157,7 @@ class GraphContractSource(ContractDataSource):
             total = session.run(
                 "MATCH (a:Authority {authority_id: $aid})"
                 "-[:AWARDED]->(ct:Contract) "
-                "RETURN sum(ct.value_eur) AS total, count(ct) AS cnt",
+                "RETURN " + trusted_value_sum("ct") + " AS total, count(ct) AS cnt",
                 aid=authority_id,
             ).single()
 
@@ -158,6 +171,10 @@ class GraphContractSource(ContractDataSource):
                 "ted_publication_number": r.get("publication_number"),
                 "title": r["title"],
                 "value_eur": r["value_eur"],
+                "estimated_value_eur": r.get("estimated_value_eur"),
+                "value_low_confidence": r.get("value_low_confidence"),
+                "value_quality_flag": r.get("value_quality_flag"),
+                "value_payable_discrepancy": r.get("value_payable_discrepancy"),
                 "award_date": r["award_date"],
                 "cpv": cpv_label,
                 "procedure_type": r["procedure_type"],
@@ -253,7 +270,7 @@ class GraphContractSource(ContractDataSource):
                 f"{where_clause} "
                 f"RETURN cpv.division AS division, "
                 f"  cpv.description AS description, "
-                f"  sum(ct.value_eur) AS total_value, "
+                f"  {trusted_value_sum('ct')} AS total_value, "
                 f"  count(ct) AS contract_count "
                 f"ORDER BY total_value DESC LIMIT 20",
                 **params,

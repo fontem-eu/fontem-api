@@ -440,6 +440,38 @@ def test_skips_notice_already_in_neo4j(
 
 @patch("src.etl.load_ted_contracts.stream_notices")
 @patch("src.etl.load_ted_contracts.TedMatcher")
+def test_rescore_reingests_already_loaded_notice(
+    mock_matcher_cls, mock_stream, monkeypatch,
+):
+    """With rescore=True the already-loaded skip is bypassed so the
+    notice is re-parsed and re-emitted (the backfill path). The sink
+    MERGEs, so values overwrite in place."""
+    monkeypatch.setattr(
+        "src.etl.load_ted_contracts._already_loaded",
+        lambda _session, _nid: True,  # pretend it is already in Neo4j
+    )
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1", stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    mock_stream.return_value = iter([
+        _stub_notice(awards=[_stub_award()], organizations={"O1": contractor}),
+    ])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    res = load_contracts(driver, log, "/fake/path.tar.gz", rescore=True)
+
+    # Not skipped — the notice was re-processed and emitted.
+    assert res["total"] == 1
+    assert res["skipped"] == 0
+    assert any(c.args[0] == "UpsertContract" for c in emit.upsert.call_args_list)
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
 def test_per_notice_transactions_one_batch_per_notice(
     mock_matcher_cls, mock_stream,
 ):
@@ -627,18 +659,37 @@ def _lot_with_estimate(lot_id: str, estimated_value: float | None,
     return lot
 
 
+def _fx_svc(rate: float = 1.0):
+    """A currency-service mock that converts PROPORTIONALLY:
+    ``parse_value(x) == x`` and ``to_eur(x) == x * rate``. Unlike
+    ``_stub_currency_svc`` (which returns one fixed EUR amount for any
+    input), this lets the estimate, total, and payable each convert to a
+    distinct EUR value — required to exercise the confidence scorer,
+    which cross-checks those signals against each other."""
+    from decimal import Decimal  # pylint: disable=import-outside-toplevel
+    svc = MagicMock()
+    svc.parse_value.side_effect = lambda v: (
+        (Decimal(str(v)), False) if v is not None else (None, False)
+    )
+    svc.resolve_currency.return_value = ("EUR", False)
+    svc.to_eur.side_effect = lambda parsed, ccy, date: (
+        Decimal(str(parsed)) * Decimal(str(rate)) if parsed is not None else None
+    )
+    return svc
+
+
 @patch("src.etl.load_ted_contracts.stream_notices")
 @patch("src.etl.load_ted_contracts.TedMatcher")
 def test_value_dropped_when_award_exceeds_estimate_by_huge_ratio(
     mock_matcher_cls, mock_stream,
 ):
-    """The canonical Swedish bus fixture: ``cbc:TotalAmount``
-    2_110_249_000_000_000 SEK (~€182 T) with
-    ``cbc:EstimatedOverallContractAmount`` 2_000_000_000 SEK
-    (~€175 M) on the same lot — ratio 1 055 124×. The cross-check
-    fires in the ORIGINAL currency (SEK vs SEK) so cross-rate
-    confusion is impossible; the loader drops ``value_eur`` and
-    ``value_original`` to NULL but keeps the rest of the Contract."""
+    """The canonical Swedish bus fixture: payable
+    2_110_249_000_000_000 SEK (~€182 T) with an
+    ``EstimatedOverallContractAmount`` of 2_000_000_000 SEK on the same
+    lot — ratio ~1,055,124x. New behaviour: the value is STORED (we never
+    destroy data) but the contract is flagged low-confidence so it is
+    excluded from default aggregates. The estimate and payable are kept
+    alongside for review."""
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
     )
@@ -650,35 +701,30 @@ def test_value_dropped_when_award_exceeds_estimate_by_huge_ratio(
         awards=[_stub_award(currency="SEK", value=2_110_249_000_000_000.0)],
         organizations={"O1": contractor},
     )
-    # Lot estimate at the same scale the authority intended for the
-    # award; the mismatch is on the awarded total.
     notice.lots = [_lot_with_estimate("LOT-0000", 2_000_000_000.0,
                                        currency="SEK")]
     mock_stream.return_value = iter([notice])
     driver, _session = _mock_driver_and_session()
     log, emit = _mock_log()
-    # Currency-service computes €182T — we still feed it through to
-    # prove that the cross-check is done in the original currency
-    # before the EUR conversion is consulted.
-    svc = _stub_currency_svc(
-        value_eur=1.82e14,
-        parsed_value=2_110_249_000_000_000.0,
-    )
+    # ~0.086 EUR/SEK so payable -> ~€182T, estimate -> ~€172M: a genuine
+    # multi-order disagreement the scorer must flag.
+    svc = _fx_svc(rate=0.0863)
     load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
     payload = next(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
-    assert "value_eur" not in payload, (
-        f"value_eur must be dropped on structural mismatch; got "
-        f"{payload.get('value_eur')!r}"
+    # Value is stored (not dropped) ...
+    assert payload["value_eur"] > 1e14
+    # ... but flagged and excluded from default aggregates.
+    assert payload["value_low_confidence"] is True
+    assert payload["value_quality_flag"] in (
+        "implausible_magnitude", "value_disagreement",
     )
-    assert "value_original" not in payload, (
-        f"value_original must also be dropped; got "
-        f"{payload.get('value_original')!r}"
-    )
+    # Cross-check signals retained.
+    assert payload["estimated_value_eur"] > 0
+    assert payload["value_payable_eur"] > 1e14
     # Rest of the Contract row still lands.
-    assert payload["ted_notice_id"]
     assert payload["authority_id"] == "auth-1"
     assert payload["company_gmr_id"] == "company-1"
 
@@ -725,11 +771,10 @@ def test_value_kept_when_award_is_proportional_to_estimate(
 def test_value_dropped_above_100b_cap_when_no_estimate(
     mock_matcher_cls, mock_stream,
 ):
-    """Polish-style garbage: notice carries no lot estimate so the
-    structural mismatch check has no anchor to fire on. The €100 B
-    absolute cap is the fallback — €900 B of unverifiable awarded
-    value is treated as a data entry error and dropped. The Contract
-    row still lands with everything else."""
+    """Polish-style garbage with no lot estimate, so plausibility is the
+    only signal. €900 B of unverifiable awarded value is implausibly
+    large: STORED but flagged low-confidence (excluded from default
+    aggregates), not silently dropped."""
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
     )
@@ -745,15 +790,16 @@ def test_value_dropped_above_100b_cap_when_no_estimate(
     mock_stream.return_value = iter([notice])
     driver, _session = _mock_driver_and_session()
     log, emit = _mock_log()
-    # Currency-service yields €900 B EUR — above the €100 B cap.
-    svc = _stub_currency_svc(value_eur=9e11, parsed_value=4e12)
+    # ~0.225 EUR/PLN -> ~€900 B awarded.
+    svc = _fx_svc(rate=0.225)
     load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
     payload = next(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
-    assert "value_eur" not in payload
-    assert "value_original" not in payload
+    assert payload["value_eur"] > 1e11           # stored
+    assert payload["value_low_confidence"] is True
+    assert payload["value_quality_flag"] == "implausible_magnitude"
     assert payload["ted_notice_id"]
 
 
@@ -797,11 +843,10 @@ def test_value_kept_below_100b_cap_when_no_estimate(
 def test_value_dropped_at_100x_mismatch_boundary(
     mock_matcher_cls, mock_stream,
 ):
-    """At the 100× mismatch threshold the cross-check fires. A
-    realistic data entry error (e.g. one extra zero on awarded total)
-    blows the ratio past 100× and gets dropped. Real-world cost
-    overruns top out around 3-10× even on troubled framework awards,
-    so 100× is comfortably above legitimate scope expansion."""
+    """An award 150× its estimate (€1 M estimate, €150 M payable) is a
+    strong disagreement. The value is stored but flagged
+    value_disagreement and marked low-confidence so it is excluded from
+    default aggregates."""
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
     )
@@ -813,19 +858,60 @@ def test_value_dropped_at_100x_mismatch_boundary(
         awards=[_stub_award(currency="EUR", value=1.5e8)],  # €150 M awarded
         organizations={"O1": contractor},
     )
-    # €1 M estimate; ratio 150×, above the 100× threshold.
     notice.lots = [_lot_with_estimate("LOT-1", 1e6, currency="EUR")]
     mock_stream.return_value = iter([notice])
     driver, _session = _mock_driver_and_session()
     log, emit = _mock_log()
-    svc = _stub_currency_svc(value_eur=1.5e8, parsed_value=1.5e8)
+    svc = _fx_svc(rate=1.0)  # EUR; each signal converts to itself
     load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
     payload = next(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
-    assert "value_eur" not in payload
-    assert "value_original" not in payload
+    assert payload["value_eur"] == 1.5e8           # stored
+    assert payload["value_low_confidence"] is True
+    assert payload["value_quality_flag"] == "value_disagreement"
+    assert payload["estimated_value_eur"] == 1e6   # estimate retained
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_aircraft_recovers_total_over_corrupted_payable(
+    mock_matcher_cls, mock_stream,
+):
+    """The Forca Aerea fix end-to-end: a single-award notice whose
+    NoticeResult TotalAmount is the clean ~€7.27 M but whose PayableAmount
+    is the x1000-corrupted ~€7.27 B. The loader must store the TotalAmount
+    (recovered correct value), keep the payable alongside, mark the
+    payable discrepancy, and stay above the low-confidence gate."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1", stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "World Aviation"
+    contractor.country = "PRT"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award(currency="EUR", value=7_274_615_930.0)],  # payable x1000
+        organizations={"O1": contractor},
+    )
+    notice.total_value = 7_274_615.93                 # clean NoticeResult total
+    notice.lots = [_lot_with_estimate("LOT-0001", 7_317_073.17)]  # estimate
+    mock_stream.return_value = iter([notice])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    svc = _fx_svc(rate=1.0)
+    load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
+    payload = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    # Recovered the true ~€7.27 M (TotalAmount), not the €7.27 B payable.
+    assert abs(payload["value_eur"] - 7_274_615.93) < 1
+    assert payload["value_payable_eur"] == 7_274_615_930.0
+    assert payload["value_payable_discrepancy"] is True
+    assert payload["value_low_confidence"] is False   # kept and counted
+    assert payload["value_quality_flag"] == "ok"
 
 
 @patch("src.etl.load_ted_contracts.stream_notices")

@@ -14,9 +14,15 @@ from datetime import datetime, timezone
 
 from ...analysis.data_quality_source import DataQualitySource
 from ..sparql.virtuoso_client import SparqlTimeout, VirtuosoClient
+from ._value_quality import trusted_value_sum
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
+
+# Contract-value aggregation guard — see ._value_quality. Excludes
+# confidence-flagged values from headline totals (the contract stays
+# counted; only its money is dropped). ``ct`` is the Contract binding.
+_TRUSTED_VALUE_SUM = trusted_value_sum("ct")
 
 # Labels the connectedness dashboard reports on. Curated rather than
 # `MATCH (n)` so each per-label query uses the label-scan index and
@@ -218,7 +224,7 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (ct:Contract) "
                 "WHERE ct.country IS NOT NULL "
                 "RETURN ct.country AS country, count(ct) AS contracts, "
-                "  sum(ct.value_eur) AS total_eur "
+                f"  {_TRUSTED_VALUE_SUM} AS total_eur "
                 "ORDER BY contracts DESC"
             ).data()
 
@@ -243,7 +249,7 @@ class GraphDataQualitySource(DataQualitySource):
             by_currency = session.run(
                 "MATCH (ct:Contract) WHERE ct.value_currency IS NOT NULL "
                 "RETURN ct.value_currency AS currency, count(ct) AS contracts, "
-                "  sum(ct.value_eur) AS total_eur "
+                f"  {_TRUSTED_VALUE_SUM} AS total_eur "
                 "ORDER BY contracts DESC LIMIT 25"
             ).data()
             return {
@@ -281,14 +287,61 @@ class GraphDataQualitySource(DataQualitySource):
             return {"total": total, "missing": fields}
 
     def get_contracts_value_timeline(self) -> list[dict]:
-        """Daily total EUR value of contracts."""
+        """Daily total EUR value of contracts (confidence-gated, so a
+        flagged outlier never spikes a day's total)."""
         with self._neo4j.session() as session:
             return session.run(
                 "MATCH (ct:Contract) "
                 "WHERE ct.publication_date IS NOT NULL AND ct.value_eur IS NOT NULL "
-                "RETURN left(ct.publication_date, 10) AS date, sum(ct.value_eur) AS value "
+                "RETURN left(ct.publication_date, 10) AS date, "
+                f"  {_TRUSTED_VALUE_SUM} AS value "
                 "ORDER BY date"
             ).data()
+
+    def get_contracts_value_quality(self) -> dict:
+        """Value-confidence overview: how many contracts are excluded from
+        value aggregates, the breakdown by quality flag, and the top
+        flagged contracts for review. This is the operator surface for
+        the values the confidence scorer pulled out of the headline
+        totals — they are kept in the graph, just not counted."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (ct:Contract) RETURN count(ct) AS n"
+            ).single()["n"]
+            flagged = session.run(
+                "MATCH (ct:Contract) "
+                "WHERE coalesce(ct.value_low_confidence, false) "
+                "RETURN count(ct) AS n"
+            ).single()["n"]
+            with_payable_discrepancy = session.run(
+                "MATCH (ct:Contract) "
+                "WHERE coalesce(ct.value_payable_discrepancy, false) "
+                "RETURN count(ct) AS n"
+            ).single()["n"]
+            by_flag = session.run(
+                "MATCH (ct:Contract) WHERE ct.value_quality_flag IS NOT NULL "
+                "RETURN ct.value_quality_flag AS flag, count(ct) AS count "
+                "ORDER BY count DESC"
+            ).data()
+            top_flagged = session.run(
+                "MATCH (ct:Contract) "
+                "WHERE coalesce(ct.value_low_confidence, false) "
+                "  AND ct.value_eur IS NOT NULL "
+                "RETURN ct.ted_notice_id AS notice, ct.title AS title, "
+                "  ct.country AS country, ct.value_eur AS value_eur, "
+                "  ct.estimated_value_eur AS estimated_eur, "
+                "  ct.value_quality_flag AS flag, "
+                "  ct.value_confidence AS confidence "
+                "ORDER BY ct.value_eur DESC LIMIT 25"
+            ).data()
+            return {
+                "total": total,
+                "flagged_low_confidence": flagged,
+                "with_payable_discrepancy": with_payable_discrepancy,
+                "low_confidence_pct": round(flagged / max(total, 1) * 100, 1),
+                "by_flag": by_flag,
+                "top_flagged": top_flagged,
+            }
 
     def get_gleif_stats(self) -> dict:
         """GLEIF-specific stats: active/inactive, LEI coverage, relationships."""
@@ -1053,20 +1106,20 @@ class GraphDataQualitySource(DataQualitySource):
                 "RETURN count(DISTINCT c) AS n"
             ).single()["n"]
 
-            # Contracts by country (top 10)
+            # Contracts by country (top 10) — value confidence-gated
             by_country = session.run(
                 "MATCH (ct:Contract) "
                 "WHERE ct.country IS NOT NULL "
                 "RETURN ct.country AS country, count(ct) AS contracts, "
-                "  sum(ct.value_eur) AS total_value "
+                f"  {_TRUSTED_VALUE_SUM} AS total_value "
                 "ORDER BY contracts DESC LIMIT 15"
             ).data()
 
-            # Top CPV sectors
+            # Top CPV sectors — value confidence-gated
             top_cpv = session.run(
                 "MATCH (ct:Contract)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN cpv.code AS code, cpv.description AS description, "
-                "  count(ct) AS contracts, sum(ct.value_eur) AS total_value "
+                f"  count(ct) AS contracts, {_TRUSTED_VALUE_SUM} AS total_value "
                 "ORDER BY contracts DESC LIMIT 10"
             ).data()
 

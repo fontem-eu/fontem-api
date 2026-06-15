@@ -10,6 +10,7 @@ import logging
 
 from ...analysis.geo_source import GeoSource
 from ...services.location_service import LocationService
+from ._value_quality import trusted_value_sum
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,7 @@ class GraphGeoSource(GeoSource):
                 "(ct:Contract)-[:AWARDED_TO]->(e)"
             )
         else:  # contracts_eur
-            value_expr = "coalesce(sum(toFloat(ct.value_eur)), 0)"
+            value_expr = f"coalesce({trusted_value_sum('ct', cast=True)}, 0)"
             entity_match = (
                 "(e:Company)-[:LOCATED_IN]->(sub:NUTSRegion), "
                 "(ct:Contract)-[:AWARDED_TO]->(e)"
@@ -165,7 +166,7 @@ class GraphGeoSource(GeoSource):
         value_expr = (
             "count(DISTINCT ct)"
             if metric == "contracts"
-            else "coalesce(sum(toFloat(ct.value_eur)), 0.0)"
+            else f"coalesce({trusted_value_sum('ct', cast=True)}, 0.0)"
         )
         fmt = {"depth": _MAX_NUTS_DEPTH, "value_expr": value_expr}
 

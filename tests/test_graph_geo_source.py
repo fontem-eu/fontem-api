@@ -84,7 +84,8 @@ def test_query_changes_shape_by_metric():
 
     source.aggregate_by_nuts(level=0, metric="contracts_eur")
     eur_query = session.run.call_args.args[0]
-    assert "sum(toFloat(ct.value_eur))" in eur_query
+    assert "toFloat(ct.value_eur)" in eur_query
+    assert "value_low_confidence" in eur_query  # confidence-gated
 
 
 def test_returns_normalized_rows():
@@ -141,12 +142,13 @@ def test_entity_contracts_count_query():
 
 
 def test_entity_contracts_eur_query():
-    """metric=contracts_eur must use sum(toFloat(ct.value_eur))."""
+    """metric=contracts_eur must sum toFloat(ct.value_eur), confidence-gated."""
     client, session = _fake_neo4j_multi([[], []])
     source = GraphGeoSource(neo4j_client=client)
     source.aggregate_entity_by_nuts(entity_id="abc-123", level=0, metric="contracts_eur")
     first_query = session.run.call_args_list[0].args[0]
-    assert "sum(toFloat(ct.value_eur))" in first_query
+    assert "toFloat(ct.value_eur)" in first_query
+    assert "value_low_confidence" in first_query  # confidence-gated
 
 
 def test_entity_scope_filter_converts_nuts_to_alpha3():
