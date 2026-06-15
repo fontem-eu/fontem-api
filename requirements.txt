@@ -13,7 +13,15 @@ rich
 loguru
 
 # REST API
-fastapi
+# Pin below starlette 1.3 / fastapi 0.137: starlette 1.3 introduced the
+# `_IncludedRouter` route object, which prometheus-fastapi-instrumentator
+# 8.0.0 cannot read (`route.path` AttributeError) — every request 500s.
+# fastapi<0.137 keeps starlette on the 1.2.x line; the explicit
+# starlette pin guards against a resolver picking 1.3 transitively.
+# Revisit when prometheus-fastapi-instrumentator ships _IncludedRouter
+# support, then the upper bounds can lift.
+fastapi<0.137
+starlette<1.3
 uvicorn[standard]
 httpx
 dishka>=1.3
