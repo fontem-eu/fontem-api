@@ -206,3 +206,30 @@ class EtlRunsSource:
         except psycopg.errors.UndefinedTable:
             return {"by_producer": {}, "by_cronjob": {}}
         return {"by_producer": by_producer, "by_cronjob": by_cronjob}
+
+    def events_timeline(
+        self, producer: str, *, days: int = 90,
+    ) -> list[dict[str, Any]]:
+        """Events emitted per day by one producer over the last ``days``.
+
+        Powers the per-dashboard "volume over time" panel. Returns
+        ``[{"day": date, "events": n}, ...]`` oldest-first; an empty list
+        when the table is missing. Bounded by the day window + the
+        producer index, so it stays cheap on the 14M-row event log.
+        """
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT date_trunc('day', ts)::date AS day, count(*) AS n
+                    FROM events.entity_events
+                    WHERE producer = %s
+                      AND ts > now() - make_interval(days => %s)
+                    GROUP BY 1
+                    ORDER BY 1
+                    """,
+                    (producer, days),
+                )
+                return [{"day": day, "events": n} for day, n in cur.fetchall()]
+        except psycopg.errors.UndefinedTable:
+            return []

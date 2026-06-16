@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request
+from typing import Annotated
 
-from src.api.dq_sources import DATA_SOURCES
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from src.api.dq_sources import BY_ID, DATA_SOURCES
 from src.atlas_api.schemas import SourcePipelineHealth
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
@@ -77,3 +79,35 @@ def pipeline_health(request: Request) -> list[SourcePipelineHealth]:
             ),
         ))
     return out
+
+
+@router.get(
+    "/pipeline/{source_id}/timeline",
+    responses={
+        404: {"description": "unknown source"},
+        503: {"description": "events store unavailable"},
+    },
+)
+def source_events_timeline(
+    request: Request,
+    source_id: str,
+    days: Annotated[int, Query(ge=1, le=365)] = 90,
+) -> list[dict]:
+    """Events-per-day for one registered source over the last `days`.
+
+    Powers the per-dashboard volume-over-time panel. ``day`` is an ISO
+    date; ``events`` the count emitted by that source's producer.
+    """
+    source = BY_ID.get(source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
+    src = request.app.state.etl_runs_source
+    if not src.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="events store unavailable (EVENTS_DATABASE_URL unset)",
+        )
+    rows = src.events_timeline(source.producer, days=days)
+    return [
+        {"day": r["day"].isoformat(), "events": r["events"]} for r in rows
+    ]

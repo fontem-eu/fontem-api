@@ -143,3 +143,48 @@ def test_pipeline_metrics_empty_when_tables_missing():
     with patch.object(EtlRunsSource, "_connect", fake_connect):
         m = src.pipeline_metrics()
     assert m == {"by_producer": {}, "by_cronjob": {}}
+
+
+def test_timeline_returns_per_day_events_for_known_source():
+    from datetime import date  # pylint: disable=import-outside-toplevel
+    rows = [{"day": date(2026, 6, 1), "events": 10},
+            {"day": date(2026, 6, 2), "events": 7}]
+    with patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.events_timeline",
+        return_value=rows,
+    ) as m:
+        r = _client().get("/data-quality/pipeline/gleif/timeline?days=30")
+    assert r.status_code == 200
+    assert r.json() == [
+        {"day": "2026-06-01", "events": 10},
+        {"day": "2026-06-02", "events": 7},
+    ]
+    # producer (not the slug) is what reaches the reader.
+    assert m.call_args.args[0] == "load_gleif"
+
+
+def test_timeline_404_for_unknown_source():
+    assert _client().get("/data-quality/pipeline/nope/timeline").status_code == 404
+
+
+def test_timeline_503_when_unconfigured():
+    r = _client(events_dsn=None).get("/data-quality/pipeline/gleif/timeline")
+    assert r.status_code == 503
+
+
+def test_events_timeline_reader_shapes_rows():
+    from datetime import date  # pylint: disable=import-outside-toplevel
+    cur = MagicMock()
+    cur.fetchall.return_value = [(date(2026, 6, 1), 5), (date(2026, 6, 2), 9)]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    @contextmanager
+    def fake_connect(_self):
+        yield conn
+
+    src = EtlRunsSource("postgresql://t:t@h/events")
+    with patch.object(EtlRunsSource, "_connect", fake_connect):
+        out = src.events_timeline("load_gleif", days=30)
+    assert out == [{"day": date(2026, 6, 1), "events": 5},
+                   {"day": date(2026, 6, 2), "events": 9}]
