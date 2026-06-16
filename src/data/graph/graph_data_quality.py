@@ -234,11 +234,13 @@ class GraphDataQualitySource(DataQualitySource):
             total = session.run(
                 "MATCH (ct:Contract) RETURN count(ct) AS n"
             ).single()["n"]
+            # "Undisclosed" = no usable awarded value could be derived.
+            # The loader never wrote the aspirational `value_undisclosed`
+            # flag (so this gauge read a permanent 0 → "100% disclosed");
+            # the value-confidence work makes the real signal a plain
+            # `value_eur IS NULL`, which is what we count here.
             undisclosed = session.run(
-                "MATCH (ct:Contract) WHERE ct.value_undisclosed = true RETURN count(ct) AS n"
-            ).single()["n"]
-            inferred = session.run(
-                "MATCH (ct:Contract) WHERE ct.currency_inferred = true RETURN count(ct) AS n"
+                "MATCH (ct:Contract) WHERE ct.value_eur IS NULL RETURN count(ct) AS n"
             ).single()["n"]
             converted = session.run(
                 "MATCH (ct:Contract) WHERE ct.value_eur IS NOT NULL RETURN count(ct) AS n"
@@ -255,7 +257,6 @@ class GraphDataQualitySource(DataQualitySource):
             return {
                 "total": total,
                 "value_undisclosed": undisclosed,
-                "currency_inferred": inferred,
                 "converted_to_eur": converted,
                 "with_currency": with_currency,
                 "by_currency": by_currency,
