@@ -159,28 +159,40 @@ def _consistency(
 
     Returns ``(score, had_estimate, payable_discrepancy)``.
     """
-    checks: list[tuple[float, float]] = []  # (agreement, weight)
     had_estimate = estimate_eur is not None and estimate_eur > 0
-    if had_estimate:
-        checks.append((_agreement(chosen_eur, estimate_eur), _WEIGHT_ESTIMATE))
 
-    payable_discrepancy = False
     payable_is_crosscheck = (
         payable_eur is not None and payable_eur > 0 and chosen_field != "payable"
     )
+    payable_agreement = 0.0
+    payable_discrepancy = False
     if payable_is_crosscheck:
         gap = abs(math.log10(chosen_eur) - math.log10(payable_eur))
-        checks.append((_agreement(chosen_eur, payable_eur), _WEIGHT_PAYABLE))
+        payable_agreement = _agreement(chosen_eur, payable_eur)
         payable_discrepancy = gap > _DISCREPANCY_TOL
 
-    if not checks:
-        return _NO_ESTIMATE_CONSISTENCY, False, payable_discrepancy
+    if had_estimate:
+        # The estimate is the independent anchor; the payable is a
+        # down-weighted corroborator. A corrupted total+payable pair can
+        # never out-vote a sane estimate.
+        checks = [(_agreement(chosen_eur, estimate_eur), _WEIGHT_ESTIMATE)]
+        if payable_is_crosscheck:
+            checks.append((payable_agreement, _WEIGHT_PAYABLE))
+        score = sum(a * w for a, w in checks) / sum(w for _, w in checks)
+        return score, True, payable_discrepancy
 
-    score = sum(a * w for a, w in checks) / sum(w for _, w in checks)
-    if not had_estimate:
-        # Only the payable corroborated us — weak evidence, cap it.
-        score = min(score, _PAYABLE_ONLY_CAP)
-    return score, had_estimate, payable_discrepancy
+    # No independent estimate. The payable shares the result-block source
+    # corruption (the Drama / x1000 notices), so it is *asymmetric* evidence:
+    # it may corroborate a value (raising consistency toward the payable-only
+    # cap) but a disagreement must NOT be read as proof of error. Treating a
+    # corrupt sibling field as decisive wrongly flagged ~750 contracts whose
+    # stored total was perfectly sane (e.g. a EUR 274k air-transport award
+    # sitting next to a PayableAmount of EUR 490). Fall back to the neutral
+    # "unverifiable" prior and record the discrepancy for review instead.
+    score = _NO_ESTIMATE_CONSISTENCY
+    if payable_is_crosscheck and not payable_discrepancy:
+        score = min(max(score, payable_agreement), _PAYABLE_ONLY_CAP)
+    return score, False, payable_discrepancy
 
 
 def _positive(value: float | None) -> float | None:

@@ -21,6 +21,7 @@ only as good as its behaviour on the cases that motivated it.
 import pytest
 
 from src.etl.contract_confidence import (
+    _PAYABLE_ONLY_CAP,
     LOW_CONFIDENCE_THRESHOLD,
     ValueFlag,
     score_contract_value,
@@ -64,6 +65,17 @@ CASES = [
      False, ValueFlag.IMPLAUSIBLE_MAGNITUDE),
 
     ("FRA Paris concession 19B", 15_000_000_000, 19_000_000_000, None,
+     False, ValueFlag.IMPLAUSIBLE_MAGNITUDE),
+
+    # No estimate + a corrupt PayableAmount next to a sane TotalAmount must
+    # NOT flag the contract: the payable shares the result-block corruption,
+    # so its disagreement is not evidence the total is wrong (calibration
+    # 2026-06-16). The plausible total is kept; the giant is still caught.
+    ("no-est sane total, junk payable (reinstated)", None, 274_166, 490,
+     True, ValueFlag.OK),
+    ("no-est sane total, x1000 payable (reinstated)", None, 1_414_542, 1_414_542_000,
+     True, ValueFlag.OK),
+    ("no-est giant single signal still flagged", None, 33_260_500_000, 49_000,
      False, ValueFlag.IMPLAUSIBLE_MAGNITUDE),
 ]
 
@@ -113,6 +125,31 @@ def test_aircraft_and_rou_recover_the_correct_total_not_the_x1000_payable():
     assert rou.chosen_field == "total"
     assert abs(rou.chosen_value - 9_989_377.06) < 1
     assert rou.has_payable_discrepancy is True
+
+
+def test_no_estimate_disagreeing_payable_keeps_sane_total_but_flags_discrepancy():
+    """Calibration: with no independent estimate, a disagreeing (unreliable)
+    payable cannot drive a plausible total below the threshold. The total is
+    kept and counted, but the payable mismatch is recorded for review."""
+    r = score_contract_value(
+        estimate_eur=None, total_eur=274_166.0, payable_eur=490.0,
+    )
+    assert r.chosen_field == "total"
+    assert r.flag is ValueFlag.OK
+    assert r.is_low_confidence is False
+    assert r.confidence >= LOW_CONFIDENCE_THRESHOLD
+    assert r.has_payable_discrepancy is True
+
+
+def test_no_estimate_agreeing_payable_does_not_exceed_payable_only_cap():
+    """Two agreeing result fields (no estimate) are weaker than an
+    independent estimate, so confidence stays capped — never full trust."""
+    r = score_contract_value(
+        estimate_eur=None, total_eur=500_000.0, payable_eur=505_000.0,
+    )
+    assert r.flag is ValueFlag.OK
+    assert r.has_payable_discrepancy is False
+    assert r.consistency <= _PAYABLE_ONLY_CAP + 1e-9
 
 
 def test_clean_contract_with_agreeing_payable_has_no_discrepancy():
