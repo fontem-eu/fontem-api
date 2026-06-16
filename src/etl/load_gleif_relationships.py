@@ -114,7 +114,7 @@ def parse_relationships(xml_stream):
             yield child_lei, parent_lei, "ultimate"
 
 
-def emit_relationships(log: EventLog, records) -> dict:
+def emit_relationships(log: EventLog, records) -> dict:  # pylint: disable=too-many-locals
     """Emit one UpsertRelationship per (child_lei, parent_lei) record.
 
     Predicate is ``subsidiaryOf``; the ``properties`` bag carries
@@ -123,11 +123,34 @@ def emit_relationships(log: EventLog, records) -> dict:
     """
     batch_id = uuid.uuid4()
     total = 0
+    ensured = 0
+    seen_leis: set[str] = set()
     t0 = time.time()
     with log.batch(batch_id, producer="load_gleif_relationships") as emit:
         for child_lei, parent_lei, consolidation_type in records:
             child_id = str(gmr_id.from_lei(child_lei))
             parent_id = str(gmr_id.from_lei(parent_lei))
+            # Resolve-or-create both endpoints before the edge. The RR
+            # file references LEIs whose base LEI-CDF record may not be in
+            # the graph (the two feeds load independently), and the sink's
+            # MATCH-both-then-MERGE silently no-ops when an endpoint is
+            # absent — that is how ~35% of these edges used to vanish
+            # invisibly. LEI is a deterministic hard key, so a minimal
+            # UpsertCompany MERGEs onto the real node when load_gleif
+            # enriches it (no duplicate) and otherwise stands as a
+            # lei-bearing stub the consolidator can later match/merge.
+            # Emit-only: we never read graph state, just dedupe per run.
+            for lei, gid in ((child_lei, child_id), (parent_lei, parent_id)):
+                if lei in seen_leis:
+                    continue
+                seen_leis.add(lei)
+                emit.upsert(
+                    "UpsertCompany",
+                    iri=f"http://data.fontem.eu/id/Company/{gid}",
+                    domain="company",
+                    payload=builders.upsert_company(gmr_id=gid, lei=lei),
+                )
+                ensured += 1
             emit.upsert(
                 "UpsertRelationship",
                 # IRI key = src + predicate + dst — keeps the event
@@ -152,8 +175,11 @@ def emit_relationships(log: EventLog, records) -> dict:
                     "  %d relationships emitted (%.0f/s)", total, rate,
                 )
     elapsed = time.time() - t0
-    logger.info("Done: %d relationships in %.1fs", total, elapsed)
-    return {"total": total, "elapsed_s": round(elapsed, 1)}
+    logger.info(
+        "Done: %d relationships, %d endpoint companies ensured in %.1fs",
+        total, ensured, elapsed,
+    )
+    return {"total": total, "companies_ensured": ensured, "elapsed_s": round(elapsed, 1)}
 
 
 def main(argv=None):
