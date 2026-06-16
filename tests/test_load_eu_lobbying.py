@@ -26,7 +26,7 @@ from src.etl.load_eu_lobbying import (
     _COUNTRY_MAP,
     _parse_entity,
     emit_lobbyist_disclosures,
-    emit_represents_relationships,
+    resolve_lobbyist_companies,
 )
 
 
@@ -160,10 +160,10 @@ def test_emit_disclosure_skips_zero_cost_fields():
 
 # ── relationship emit ───────────────────────────────────────
 
-def test_only_confident_matches_become_represents():
-    """The /resolve hook returns matched/ambiguous/no_match; only
-    matched should yield a UpsertRelationship event."""
-    log, emit = _mock_log()
+def test_confident_match_sets_company_gmr_id_for_filed_by():
+    """The /resolve hook returns matched/ambiguous/no_match. A confident
+    match becomes the disclosure's company_gmr_id (→ working FILED_BY
+    edge); ambiguous / no_match leave the disclosure standalone."""
     entities = [
         {"tr_id": "A", "name": "MatchedCo", "country_iso": "DEU",
          "country": "GERMANY"},
@@ -181,34 +181,35 @@ def test_only_confident_matches_become_represents():
             res.match.tier = "name_country"
             res.match.confidence = 0.92
             return res
-        if name == "AmbiguousCo":
-            res = MagicMock()
-            res.hint = "ambiguous"
-            res.match = None
-            return res
         res = MagicMock()
-        res.hint = "no_match"
+        res.hint = "ambiguous" if name == "AmbiguousCo" else "no_match"
         res.match = None
         return res
 
     with patch.object(load_eu_lobbying, "resolve_entity", side_effect=fake_resolve):
-        summary = emit_represents_relationships(log, entities)
+        matches, summary = resolve_lobbyist_companies(entities)
     assert summary == {"confident": 1, "ambiguous": 1, "no_match": 1}
-    assert emit.upsert.call_count == 1
-    payload = emit.upsert.call_args.kwargs["payload"]
-    assert payload["predicate"] == "represents"
-    assert "EuLobbyingDisclosure/A" in payload["src_iri"]
-    assert "Company/00040372" in payload["dst_iri"]
-    assert payload["properties"]["tier"] == "name_country"
+    assert matches == {"A": ("00040372-dad6-5d34-882c-8b8624b4e734",
+                             "name_country", 0.92)}
 
-
-def test_no_represents_when_resolver_unavailable():
+    # The matched disclosure carries company_gmr_id (the sink turns that
+    # into Disclosure-[:FILED_BY]->Company); the others don't.
     log, emit = _mock_log()
+    emit_lobbyist_disclosures(log, entities, matches)
+    by_id = {c.kwargs["payload"]["disclosure_id"]: c.kwargs["payload"]
+             for c in emit.upsert.call_args_list}
+    assert by_id["A"]["company_gmr_id"] == "00040372-dad6-5d34-882c-8b8624b4e734"
+    assert by_id["A"]["details"]["registrant_match_tier"] == "name_country"
+    assert "company_gmr_id" not in by_id["B"]
+    assert "company_gmr_id" not in by_id["C"]
+
+
+def test_no_matches_when_resolver_unavailable():
     entities = [{"tr_id": "A", "name": "X", "country_iso": "FR", "country": "F"}]
     with patch.object(load_eu_lobbying, "resolve_entity", return_value=None):
-        summary = emit_represents_relationships(log, entities)
+        matches, summary = resolve_lobbyist_companies(entities)
+    assert not matches
     assert summary == {"confident": 0, "ambiguous": 0, "no_match": 0}
-    emit.upsert.assert_not_called()
 
 
 def test_main_accepts_argv(monkeypatch):

@@ -152,14 +152,20 @@ def _disclosure_iri(tr_id: str) -> str:
     return f"http://data.fontem.eu/id/EuLobbyingDisclosure/{tr_id}"
 
 
-def _company_iri(gmr_id: str) -> str:
-    return f"http://data.fontem.eu/id/Company/{gmr_id}"
+def emit_lobbyist_disclosures(
+    log: EventLog, entities: list[dict],
+    matches: dict[str, tuple[str, str, float]] | None = None,
+) -> int:
+    """Emit one UpsertDisclosure per lobbyist.
 
-
-def emit_lobbyist_disclosures(log: EventLog, entities: list[dict]) -> int:
-    """Emit one UpsertDisclosure per lobbyist. company_gmr_id is
-    omitted — the registrant is the Lobbyist itself; REPRESENTS
-    edges to companies are emitted separately as relationships."""
+    When the registrant resolves to a known Company (``matches[tr_id]``),
+    set the disclosure's ``company_gmr_id`` so the sink materialises a
+    ``FILED_BY`` edge from the disclosure's own upsert. That edge is built
+    with the disclosure's full composite key, so unlike a typed REPRESENTS
+    relationship (which can't address a composite-keyed :Disclosure and so
+    100%-dropped at the sink) it actually attaches.
+    """
+    matches = matches or {}
     emitted = 0
     chunk: list[dict] = []
 
@@ -182,6 +188,10 @@ def emit_lobbyist_disclosures(log: EventLog, entities: list[dict]) -> int:
                         details[k] = v
                 if ent.get("interests"):
                     details["interests"] = ent["interests"]
+                match = matches.get(ent["tr_id"])
+                if match is not None:
+                    details["registrant_match_tier"] = match[1]
+                    details["registrant_match_confidence"] = float(match[2])
                 emit.upsert(
                     "UpsertDisclosure",
                     iri=_disclosure_iri(ent["tr_id"]),
@@ -189,6 +199,7 @@ def emit_lobbyist_disclosures(log: EventLog, entities: list[dict]) -> int:
                     payload=builders.upsert_disclosure(
                         system="eu-lobbying",
                         disclosure_id=ent["tr_id"],
+                        company_gmr_id=match[0] if match is not None else None,
                         disclosure_type="lobbyist-registration",
                         title=ent["name"][:200] or None,
                         url=ent.get("website") or None,
@@ -209,36 +220,24 @@ def emit_lobbyist_disclosures(log: EventLog, entities: list[dict]) -> int:
     return emitted
 
 
-def emit_represents_relationships(
-    log: EventLog, entities: list[dict],
-) -> dict:
-    """For each lobbyist, POST /resolve with name + country and
-    emit a UpsertRelationship event for confident matches."""
+def resolve_lobbyist_companies(
+    entities: list[dict],
+) -> tuple[dict[str, tuple[str, str, float]], dict]:
+    """Resolve each lobbyist's registrant identity via the consolidator
+    /resolve endpoint (name + ISO-3 country).
+
+    Returns ``(matches, summary)`` where ``matches`` maps ``tr_id`` to
+    ``(gmr_id, tier, confidence)`` for confident matches only. The caller
+    sets that gmr_id as the disclosure's ``company_gmr_id`` to get a
+    working FILED_BY edge. Ambiguous / no_match registrants are left as
+    the standalone :Disclosure (which already *is* the lobbyist) — minting
+    a duplicate Company for them would just clone that identity with no
+    other source to cross-link to.
+    """
+    matches: dict[str, tuple[str, str, float]] = {}
     confident = 0
     ambiguous = 0
     no_match = 0
-    chunk: list[tuple[str, str, str, float, str]] = []
-
-    def _flush(buf):
-        if not buf:
-            return
-        with log.batch(uuid.uuid4(), producer="load_eu_lobbying") as emit:
-            for tr_id, gmr_id, tier, conf, _ in buf:
-                emit.upsert(
-                    "UpsertRelationship",
-                    iri=_disclosure_iri(tr_id),
-                    domain="eu_lobbying",
-                    payload=builders.upsert_relationship(
-                        src_iri=_disclosure_iri(tr_id),
-                        dst_iri=_company_iri(gmr_id),
-                        predicate="represents",
-                        properties={
-                            "tier": tier,
-                            "confidence": float(conf),
-                        },
-                    ),
-                )
-
     for ent in entities:
         if not ent.get("tr_id") or not ent.get("name"):
             continue
@@ -250,26 +249,21 @@ def emit_represents_relationships(
         if res is None:
             continue
         if res.hint == "matched" and res.match is not None:
-            chunk.append((
-                ent["tr_id"], res.match.gmr_id,
-                res.match.tier, res.match.confidence, ent["name"],
-            ))
+            matches[ent["tr_id"]] = (
+                res.match.gmr_id, res.match.tier, res.match.confidence,
+            )
             confident += 1
-            if len(chunk) >= EMIT_CHUNK:
-                _flush(chunk)
-                chunk = []
         elif res.hint == "ambiguous":
             ambiguous += 1
         else:
             no_match += 1
 
-    _flush(chunk)
-    return {
+    return matches, {
         "confident": confident, "ambiguous": ambiguous, "no_match": no_match,
     }
 
 
-def load_eu_lobbying(log: EventLog) -> dict:
+def load_eu_lobbying(log: EventLog) -> dict:  # pylint: disable=too-many-locals
     """Download TR XML and emit Lobbyist/REPRESENTS events."""
     logger.info("Downloading EU Transparency Register XML from %s ...", TR_XML_URL)
     with httpx.Client(timeout=120.0, follow_redirects=True,
@@ -307,15 +301,13 @@ def load_eu_lobbying(log: EventLog) -> dict:
 
     logger.info("Parsed %d lobbyist entities", len(entities))
 
-    emitted = emit_lobbyist_disclosures(log, entities)
-    logger.info("Emitted %d UpsertDisclosure events", emitted)
-
-    rep_summary = emit_represents_relationships(log, entities)
+    matches, rep_summary = resolve_lobbyist_companies(entities)
+    emitted = emit_lobbyist_disclosures(log, entities, matches)
     logger.info(
-        "Resolver: %d confident matches → relationships, "
-        "%d ambiguous, %d no_match",
-        rep_summary["confident"], rep_summary["ambiguous"],
-        rep_summary["no_match"],
+        "Emitted %d UpsertDisclosure events (%d FILED_BY a resolved company); "
+        "resolver: %d confident, %d ambiguous, %d no_match",
+        emitted, len(matches), rep_summary["confident"],
+        rep_summary["ambiguous"], rep_summary["no_match"],
     )
     return {"emitted": emitted, "represents": rep_summary}
 
