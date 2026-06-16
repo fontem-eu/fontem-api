@@ -137,3 +137,72 @@ class EtlRunsSource:
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
         except psycopg.errors.UndefinedTable:
             return []
+
+    def pipeline_metrics(self) -> dict[str, dict]:
+        """Raw per-producer and per-cronjob pipeline metrics for the
+        data-quality source-health view.
+
+        Returns ``{"by_producer": {producer: {...}}, "by_cronjob":
+        {cronjob: {...}}}``. The caller joins these against the
+        DataSource registry (producer ⇄ cronjob ⇄ dashboard) and derives
+        dead-letter % / staleness. Three small aggregate queries, all
+        index-backed; missing tables → empty dicts so a pre-bootstrap
+        cluster renders "no data yet" rather than 500-ing.
+        """
+        by_producer: dict[str, dict] = {}
+        by_cronjob: dict[str, dict] = {}
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT producer,
+                           count(*) AS events_total,
+                           count(*) FILTER (
+                               WHERE ts > now() - interval '30 days'
+                           ) AS events_30d,
+                           max(ts) AS last_event_at
+                    FROM events.entity_events
+                    GROUP BY producer
+                    """
+                )
+                for producer, total, recent, last in cur.fetchall():
+                    by_producer[producer] = {
+                        "events_total": total,
+                        "events_30d": recent,
+                        "last_event_at": last,
+                        "deadletter": 0,
+                    }
+                # Dead-lettered events attributed back to their producer.
+                cur.execute(
+                    """
+                    SELECT ee.producer, count(*) AS n
+                    FROM events.dead_letter dl
+                    JOIN events.entity_events ee ON ee.seq = dl.seq
+                    GROUP BY ee.producer
+                    """
+                )
+                for producer, n in cur.fetchall():
+                    by_producer.setdefault(producer, {
+                        "events_total": 0, "events_30d": 0,
+                        "last_event_at": None, "deadletter": 0,
+                    })["deadletter"] = n
+                # Latest run per cronjob (DISTINCT ON, index-backed).
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (cronjob_name)
+                           cronjob_name, started_at, finished_at,
+                           status, summary
+                    FROM events.etl_run
+                    ORDER BY cronjob_name, started_at DESC
+                    """
+                )
+                for name, started, finished, status, summary in cur.fetchall():
+                    by_cronjob[name] = {
+                        "last_run_at": started,
+                        "last_run_finished_at": finished,
+                        "last_run_status": status,
+                        "last_run_summary": summary,
+                    }
+        except psycopg.errors.UndefinedTable:
+            return {"by_producer": {}, "by_cronjob": {}}
+        return {"by_producer": by_producer, "by_cronjob": by_cronjob}

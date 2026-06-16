@@ -177,3 +177,31 @@ class SeriesResponse(BaseModel):
         description="True if `count` hit the configured row limit.",
     )
     data: list[Observation]
+
+
+class SourcePipelineHealth(BaseModel):
+    """Per-source pipeline health for the data-quality hub: one row per
+    registered DataSource, joining the events-DB metrics (run status,
+    volume, dead-letter) so the dashboard can flag stale / failing /
+    lossy feeds at a glance."""
+
+    id: str
+    label: str
+    theme: str
+    route: str | None = None
+    events_total: int = 0
+    events_30d: int = 0
+    last_event_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_run_finished_at: datetime | None = None
+    last_run_status: str | None = Field(
+        default=None, description="running | success | failed",
+    )
+    last_run_summary: str | None = None
+    deadletter: int = 0
+    deadletter_pct: float = 0.0
+    age_hours: float | None = Field(
+        default=None,
+        description="hours since the last successful run (or last event)",
+    )
+    stale: bool = False

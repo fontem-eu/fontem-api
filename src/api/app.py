@@ -30,6 +30,7 @@ from src.api.routers.valuation import router as valuation_router
 from src.api.routers.contracts import router as contracts_router
 from src.api.routers.data_quality import router as data_quality_router
 from src.api.routers.dq_etl_runs import router as dq_etl_runs_router
+from src.api.routers.dq_pipeline import router as dq_pipeline_router
 from src.api.routers.entity_resolution import router as entity_resolution_router
 from src.api.routers.persons import router as persons_router
 from src.api.routers.graph import router as graph_router
@@ -99,6 +100,7 @@ app.include_router(health_router)
 app.include_router(contracts_router)
 app.include_router(data_quality_router)
 app.include_router(dq_etl_runs_router)
+app.include_router(dq_pipeline_router)
 app.include_router(entity_resolution_router)
 app.include_router(persons_router)
 app.include_router(graph_router)
