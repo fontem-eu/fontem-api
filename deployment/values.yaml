@@ -38,3 +38,9 @@ virtuoso:
 # /api/ over cluster DNS.
 service:
   type: NodePort
+
+# Events store (read-only) for the ETL-runs + pipeline-health DQ
+# endpoints. Same Postgres the ETL cronjobs write to.
+eventsStore:
+  secretName: fontem-postgres-credentials
+  secretKey: EVENTS_DATABASE_URL

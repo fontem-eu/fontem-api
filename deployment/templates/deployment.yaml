@@ -150,6 +150,16 @@ spec:
             - name: STATS_DATABASE_URL
               value: "postgresql://{{ .Values.fontemStats.user }}:$(STATS_POSTGRES_PASSWORD)@{{ .Values.fontemStats.host }}:5432/{{ .Values.fontemStats.database }}"
             {{- end }}
+            # Events store — read-only, powers the ETL-runs + per-source
+            # pipeline-health DQ endpoints (EtlRunsSource). Independent of
+            # fontemStats, so wired unconditionally from the same secret the
+            # ETL cronjobs use. A direct secretKeyRef (no $(VAR) build), so
+            # ordering is irrelevant; EtlRunsSource degrades to 503 if unset.
+            - name: EVENTS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.eventsStore.secretName | default "fontem-postgres-credentials" }}
+                  key: {{ .Values.eventsStore.secretKey | default "EVENTS_DATABASE_URL" }}
             {{- if .Values.virtuoso.enabled }}
             # Read-only SPARQL endpoint used by the data-quality
             # source for sanctions panels (post Phase 2 cutover).
