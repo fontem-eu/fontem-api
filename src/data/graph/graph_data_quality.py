@@ -553,16 +553,40 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
                 "WHERE d.detail_ep_passes > 0 RETURN count(d) AS n"
             ).single()["n"]
-            # REPRESENTS edges to Company don't materialise in Neo4j
-            # today (item #7 in DATA_QUALITY_BACKLOG.md — sink silently
-            # drops typed-relationship events whose endpoint isn't
-            # resolvable). When that lands, this surfaces matches
-            # automatically; until then it's an honest 0.
+            # A confident consolidator match on the registrant sets the
+            # disclosure's company_gmr_id, which the sink materialises as
+            # Disclosure-[:FILED_BY]->Company (item #7: the typed
+            # REPRESENTS edge can't address a composite-keyed :Disclosure,
+            # so the link rides on the disclosure's own upsert instead).
             matched = session.run(
                 "MATCH (d:Disclosure {system: 'eu-lobbying'})"
-                "-[:REPRESENTS]->() "
+                "-[:FILED_BY]->(:Company) "
                 "RETURN count(DISTINCT d) AS n"
             ).single()["n"]
+            # The most-represented companies: how many lobbyist
+            # registrations resolve to each company.
+            top_companies = session.run(
+                "MATCH (d:Disclosure {system: 'eu-lobbying'})"
+                "-[:FILED_BY]->(c:Company) "
+                "RETURN coalesce(c.name, c.gmr_id) AS company, "
+                "       count(d) AS lobbyists "
+                "ORDER BY lobbyists DESC LIMIT 20"
+            ).data()
+            # Registrant category mix (companies vs NGOs vs consultancies …).
+            by_category = session.run(
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "WHERE d.detail_category IS NOT NULL "
+                "RETURN d.detail_category AS category, count(d) AS count "
+                "ORDER BY count DESC LIMIT 15"
+            ).data()
+            # Top declared spenders (annual lobbying cost ceiling).
+            top_spenders = session.run(
+                "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
+                "WHERE d.detail_cost_max IS NOT NULL "
+                "RETURN coalesce(d.title, d.disclosure_id) AS lobbyist, "
+                "       d.detail_cost_max AS cost_max "
+                "ORDER BY d.detail_cost_max DESC LIMIT 20"
+            ).data()
             by_country = session.run(
                 "MATCH (d:Disclosure {system: 'eu-lobbying'}) "
                 "WHERE d.detail_country IS NOT NULL "
@@ -594,6 +618,9 @@ class GraphDataQualitySource(DataQualitySource):
                 "by_country": by_country,
                 "registrations_timeline": registrations,
                 "cost_distribution": cost_ranges,
+                "top_companies": top_companies,
+                "by_category": by_category,
+                "top_spenders": top_spenders,
             }
 
     def get_trade_edges_stats(self) -> dict:
