@@ -1,0 +1,88 @@
+{{/*
+On-demand data-quality assertion Job.
+
+Ships with the ETL chart (same image + release lifecycle as the
+loaders) but is a one-shot Job, not a scheduled CronJob — disabled by
+default so a normal sync never runs it. Render + apply it on demand
+after an ETL change reaches a shared store, to gate the data:
+
+  helm template fontem-api-etl deployment-etl/ \
+    --set dqAssert.enabled=true --set version=<image-tag> \
+    --set dqAssert.runId=$(date +%s) \
+    -s templates/job-dq-assert.yaml | kubectl -n <namespace> apply -f -
+
+Runs against whatever NEO4J_* / EVENTS_DATABASE_URL the namespace's
+secrets point at — fontem-shared (= staging data) or fontem-prod.
+Exit code is non-zero when a block-tier assertion fails, so the Job
+goes Failed and is visible in `kubectl get jobs`.
+*/}}
+{{- if .Values.dqAssert.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dq-assert-{{ .Values.dqAssert.runId | default "manual" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: dq-assert
+    component: data-quality
+spec:
+  # Auto-clean a finished run after 30 min so repeated invocations
+  # don't pile up; bump runId for each new run to get a fresh Job.
+  ttlSecondsAfterFinished: 1800
+  activeDeadlineSeconds: {{ .Values.dqAssert.deadlineSeconds | default 600 }}
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: dq-assert
+        component: data-quality
+      annotations:
+        linkerd.io/inject: disabled
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: dq-assert
+          image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
+          imagePullPolicy: Always
+          env:
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_URI
+            - name: NEO4J_USER
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_USER
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
+            - name: EVENTS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fontem-postgres-credentials
+                  key: EVENTS_DATABASE_URL
+            # Surfaced in the report header so the log says which env ran.
+            - name: DQ_ENV_LABEL
+              value: {{ .Release.Namespace | quote }}
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          command:
+            - python
+            - -m
+            - src.data_quality.assertions
+            {{- if .Values.dqAssert.family }}
+            - --family
+            - {{ .Values.dqAssert.family | quote }}
+            {{- end }}
+{{- end }}

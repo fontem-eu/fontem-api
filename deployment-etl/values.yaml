@@ -72,3 +72,16 @@ firds:
 # leaves these empty.
 nodeSelector: {}
 tolerations: []
+
+# ─── On-demand data-quality assertion Job ───────────────────────────
+# Disabled by default: a normal chart sync must NOT run it. Render with
+# --set dqAssert.enabled=true (+ a fresh runId) and apply on demand to
+# gate a shared store after an ETL change. See templates/job-dq-assert.yaml.
+#   family — optional subset: keys,refs,values,pipeline,freshness
+#            (empty → run the whole catalog)
+#   runId  — appended to the Job name so each run is a distinct object
+dqAssert:
+  enabled: false
+  runId: "manual"
+  family: ""
+  deadlineSeconds: 600
