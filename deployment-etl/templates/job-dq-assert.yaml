@@ -21,7 +21,6 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: dq-assert-{{ .Values.dqAssert.runId | default "manual" }}
-  namespace: {{ .Release.Namespace }}
   labels:
     app: dq-assert
     component: data-quality
@@ -67,9 +66,6 @@ spec:
                 secretKeyRef:
                   name: fontem-postgres-credentials
                   key: EVENTS_DATABASE_URL
-            # Surfaced in the report header so the log says which env ran.
-            - name: DQ_ENV_LABEL
-              value: {{ .Release.Namespace | quote }}
           resources:
             requests:
               cpu: "100m"
