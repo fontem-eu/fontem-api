@@ -113,3 +113,24 @@ def test_skips_record_with_invalid_year_and_keeps_going(tmp_path: Path):
     # Both attempts were made; only the second one counted as emitted.
     assert emit.upsert.call_count == 2
     assert emit.control.call_count == 0
+
+
+def test_skips_implausible_future_year(tmp_path: Path):
+    # 2099 is a botched XBRL period-end; the plausibility guard drops it
+    # while keeping the valid year, so the sweep doesn't emit a future
+    # FinancialYear. (See DQ assertion values.financialyear_year_range.)
+    edgar_dir = _seed_edgar_dir(tmp_path, cik=320193, years=[2023, 2099])
+    log, emit = _mock_log()
+    load_us_financials(log, edgar_dir)
+    years = [c.kwargs["payload"]["year"] for c in emit.upsert.call_args_list]
+    assert years == [2023]
+
+
+def test_plausible_filing_year_bounds():
+    import datetime  # pylint: disable=import-outside-toplevel
+    from src.etl.load_us_financials import _plausible_filing_year  # pylint: disable=import-outside-toplevel
+    now = datetime.date.today().year
+    assert _plausible_filing_year(2023) is True
+    assert _plausible_filing_year(now + 1) is True
+    assert _plausible_filing_year(now + 2) is False
+    assert _plausible_filing_year(1989) is False

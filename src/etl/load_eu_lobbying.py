@@ -76,6 +76,35 @@ def _text(elem: ET.Element | None, path: str) -> str:
 # One local per XML field extracted from the lobbying record. The fields
 # are documented inline next to where each one is read — collapsing them
 # into a kwargs dict would erase the column headers.
+def _parse_cost_band(elem: ET.Element) -> tuple[int, int]:
+    """Closed-year lobbying spend band as ``(cost_min, cost_max)``.
+
+    The EU register doesn't validate the self-reported range, so
+    registrants occasionally transpose the bounds (min > max). Keep the
+    band well-ordered when both ends are present rather than returning an
+    inverted cost_max < cost_min. A missing bound stays 0 (dropped at
+    emit time).
+    """
+    cost_min = 0
+    cost_max = 0
+    fin = elem.find("financialData")
+    closed = fin.find("closedYear") if fin is not None else None
+    costs = closed.find("costs") if closed is not None else None
+    range_el = costs.find("range") if costs is not None else None
+    if range_el is not None:
+        try:
+            cost_max = int(_text(range_el, "max") or "0")
+        except ValueError:
+            pass
+        try:
+            cost_min = int(_text(range_el, "min") or "0")
+        except ValueError:
+            pass
+    if cost_min and cost_max:
+        cost_min, cost_max = min(cost_min, cost_max), max(cost_min, cost_max)
+    return cost_min, cost_max
+
+
 def _parse_entity(elem: ET.Element) -> dict[str, Any]:  # pylint: disable=too-many-locals
     """Parse an interestRepresentative XML element into a flat dict."""
     tr_id = _text(elem, "identificationCode")
@@ -86,24 +115,7 @@ def _parse_entity(elem: ET.Element) -> dict[str, Any]:  # pylint: disable=too-ma
     country = _text(head_office, "country") if head_office is not None else ""
     city = _text(head_office, "city") if head_office is not None else ""
 
-    cost_min = 0
-    cost_max = 0
-    fin = elem.find("financialData")
-    if fin is not None:
-        closed = fin.find("closedYear")
-        if closed is not None:
-            costs = closed.find("costs")
-            if costs is not None:
-                range_el = costs.find("range")
-                if range_el is not None:
-                    try:
-                        cost_max = int(_text(range_el, "max") or "0")
-                    except ValueError:
-                        pass
-                    try:
-                        cost_min = int(_text(range_el, "min") or "0")
-                    except ValueError:
-                        pass
+    cost_min, cost_max = _parse_cost_band(elem)
 
     ep_passes = 0
     try:

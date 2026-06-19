@@ -228,3 +228,41 @@ def test_main_accepts_argv(monkeypatch):
         lambda _log: {"emitted": 0, "represents": {"confident": 0}},
     )
     load_eu_lobbying.main([])
+
+
+def _entity_xml_costs(cmin: str, cmax: str) -> str:
+    return f"""
+<interestRepresentative>
+  <identificationCode>999-99</identificationCode>
+  <name><originalName>Band Test</originalName></name>
+  <headOffice><country>GERMANY</country><city>Berlin</city></headOffice>
+  <financialData><closedYear>
+    <costs><range><min>{cmin}</min><max>{cmax}</max></range></costs>
+  </closedYear></financialData>
+  <registrationDate>2020-01-01T00:00:00</registrationDate>
+  <lastUpdateDate>2024-06-01T00:00:00</lastUpdateDate>
+</interestRepresentative>
+"""
+
+
+def test_parser_normalises_transposed_cost_band():
+    import xml.etree.ElementTree as ET  # pylint: disable=import-outside-toplevel
+    # Source has min > max (registrant transposed the bounds).
+    parsed = _parse_entity(ET.fromstring(_entity_xml_costs("50000", "10000")))
+    assert parsed["cost_min"] == 10000
+    assert parsed["cost_max"] == 50000
+    assert parsed["cost_max"] >= parsed["cost_min"]
+
+
+def test_parser_leaves_well_ordered_cost_band():
+    import xml.etree.ElementTree as ET  # pylint: disable=import-outside-toplevel
+    parsed = _parse_entity(ET.fromstring(_entity_xml_costs("10000", "50000")))
+    assert parsed["cost_min"] == 10000 and parsed["cost_max"] == 50000
+
+
+def test_parser_keeps_single_open_bound_untouched():
+    import xml.etree.ElementTree as ET  # pylint: disable=import-outside-toplevel
+    # Only a lower bound present (max absent → 0): not reordered into a
+    # misleading [0, 50000]; the 0 stays and is dropped at emit time.
+    parsed = _parse_entity(ET.fromstring(_entity_xml_costs("50000", "")))
+    assert parsed["cost_min"] == 50000 and parsed["cost_max"] == 0

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import datetime
 import logging
 import os
 import time
@@ -42,6 +43,14 @@ from fontem_events import EventLog
 logger = logging.getLogger(__name__)
 
 SOURCE = "edgar"
+
+
+def _plausible_filing_year(year: int) -> bool:
+    """Annual filings cannot report a future fiscal year. Guards against
+    the occasional botched XBRL period-end (2039 / 2113 seen in the wild).
+    Mirrors the data-quality assertion values.financialyear_year_range.
+    """
+    return 1990 <= year <= datetime.date.today().year + 1
 
 _ANNUAL_FORMS = {"10-K", "20-F", "40-F"}
 
@@ -122,7 +131,10 @@ def _extract_annual(facts_json: dict) -> list[dict]:  # pylint: disable=too-many
 
     records = []
     for year_str in sorted(all_years, reverse=True)[:10]:
-        rec = {"year": int(year_str)}
+        year_i = int(year_str)
+        if not _plausible_filing_year(year_i):
+            continue
+        rec = {"year": year_i}
         has_data = False
         for field in _CONCEPT_MAP:
             val = raw.get(field, {}).get(year_str)

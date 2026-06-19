@@ -105,6 +105,12 @@ def parse_relationships(xml_stream):
 
         if not child_lei or not parent_lei:
             continue
+        # A company cannot be its own parent. GLEIF's RR file carries a
+        # handful of self-consolidation records (child_lei == parent_lei)
+        # that would otherwise materialise a :Company-[:SUBSIDIARY_OF]->self
+        # loop — drop them at the source.
+        if child_lei == parent_lei:
+            continue
         if status and status != "ACTIVE":
             continue
 

@@ -217,3 +217,12 @@ def test_emit_listings_isin_lands_on_the_payload():
     payload = listing_call.kwargs["payload"]
     assert payload["isin"] == "NL0012969182"
     assert payload["ticker"] == "ADYEN"
+
+
+def test_esef_plausible_filing_year_bounds():
+    import datetime  # pylint: disable=import-outside-toplevel
+    from src.etl.load_eu_listings import _plausible_filing_year  # pylint: disable=import-outside-toplevel
+    now = datetime.date.today().year
+    assert _plausible_filing_year(2021) is True
+    assert _plausible_filing_year(now + 2) is False
+    assert _plausible_filing_year(1989) is False

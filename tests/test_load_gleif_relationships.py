@@ -1,7 +1,8 @@
 """Tests for the GLEIF Level 2 relationships loader (post-event-log)."""
+import io
 from unittest.mock import MagicMock
 
-from src.etl.load_gleif_relationships import emit_relationships
+from src.etl.load_gleif_relationships import emit_relationships, parse_relationships
 
 
 def _mock_log():
@@ -64,3 +65,39 @@ def test_payload_uses_subsidiary_of_predicate_and_carries_type():
     assert payload["properties"]["consolidation_type"] == "direct"
     assert "Company/" in payload["src_iri"]
     assert "Company/" in payload["dst_iri"]
+
+
+def _rr_xml(records):
+    """Minimal GLEIF RR XML stream for parse_relationships tests.
+
+    records: list of (child_lei, parent_lei, rel_type, status).
+    """
+    ns = "http://www.gleif.org/data/schema/rr/2016"
+    body = "".join(
+        f"<RelationshipRecord><Relationship>"
+        f"<StartNode><NodeID>{c}</NodeID></StartNode>"
+        f"<EndNode><NodeID>{p}</NodeID></EndNode>"
+        f"<RelationshipType>{rt}</RelationshipType>"
+        f"<RelationshipStatus>{st}</RelationshipStatus>"
+        f"</Relationship></RelationshipRecord>"
+        for c, p, rt, st in records
+    )
+    return io.BytesIO(
+        f'<?xml version="1.0"?><RelationshipData xmlns="{ns}">{body}</RelationshipData>'.encode()
+    )
+
+
+def test_parse_skips_self_consolidation():
+    out = list(parse_relationships(_rr_xml([
+        ("AAAA0000000000000001", "BBBB0000000000000002", "IS_DIRECTLY_CONSOLIDATED_BY", "ACTIVE"),
+        # self-loop: child == parent → must be dropped
+        ("CCCC0000000000000003", "CCCC0000000000000003", "IS_DIRECTLY_CONSOLIDATED_BY", "ACTIVE"),
+    ])))
+    assert out == [("AAAA0000000000000001", "BBBB0000000000000002", "direct")]
+
+
+def test_parse_keeps_normal_and_ultimate():
+    out = list(parse_relationships(_rr_xml([
+        ("AAAA0000000000000001", "BBBB0000000000000002", "IS_ULTIMATELY_CONSOLIDATED_BY", "ACTIVE"),
+    ])))
+    assert out == [("AAAA0000000000000001", "BBBB0000000000000002", "ultimate")]

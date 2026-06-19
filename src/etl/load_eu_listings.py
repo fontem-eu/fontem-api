@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import datetime
 import logging
 import os
 import time
@@ -42,6 +43,14 @@ logger = logging.getLogger(__name__)
 
 ESEF_FINANCIALS_GRAPH = "http://data.fontem.eu/graph/financials/esef"
 SOURCE = "esef"
+
+
+def _plausible_filing_year(year: int) -> bool:
+    """Annual filings cannot report a future fiscal year. Guards against
+    the occasional botched XBRL period-end (2039 / 2113 seen in the wild).
+    Mirrors the data-quality assertion values.financialyear_year_range.
+    """
+    return 1990 <= year <= datetime.date.today().year + 1
 
 # Simplified country → currency mapping for major EU/EEA markets
 COUNTRY_CURRENCY = {
@@ -167,6 +176,8 @@ def emit_financials(emit, summaries_dir: Path) -> int:
             if year is None:
                 continue
             year_int = int(year)
+            if not _plausible_filing_year(year_int):
+                continue
             extras = {
                 k: filing.get(k) for k in _FILING_FIELDS
                 if filing.get(k) is not None
