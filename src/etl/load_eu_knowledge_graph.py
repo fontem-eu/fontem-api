@@ -147,6 +147,10 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):  # pylint: d
             beneficiary_gmr_id = str(
                 gmr_id.from_name(country_code or "EU", f"kohesio_ben:{ben_qid}")
             )
+        # Authoritative beneficiary name straight from the Kohesio export
+        # (Beneficiary_Name column) — used to resolve-or-create the
+        # beneficiary :Company the disclosure's company_gmr_id points at.
+        beneficiary_name = (row.get("Beneficiary_Name") or "").strip()[:300] or None
 
         # project_id remains in the parsed record as a stable
         # UUID5 derived from the QID — not used by the emit path
@@ -181,6 +185,7 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):  # pylint: d
             "nuts_code": nuts_code or None,
             "country": country_code or None,
             "beneficiary_gmr_id": beneficiary_gmr_id,
+            "beneficiary_name": beneficiary_name,
             "beneficiary_qid": ben_qid or None,
         }
 
@@ -191,15 +196,37 @@ def emit_disclosure_events(log: EventLog, records: list[dict]) -> dict:
     bounded."""
     total = 0
     emitted = 0
+    companies = 0
+    seen_beneficiaries: set[str] = set()
     chunk: list[dict] = []
 
     def _flush(buf: list[dict]) -> int:
+        nonlocal companies
         if not buf:
             return 0
         batch_id = uuid.uuid4()
         n = 0
         with log.batch(batch_id, producer="load_eu_knowledge_graph") as emit:
             for rec in buf:
+                # Resolve-or-create the beneficiary as a :Company so the
+                # disclosure's company_gmr_id is never a dangling reference
+                # (the sink's MATCH-both-then-MERGE silently drops FILED_BY
+                # otherwise). Name comes from the Kohesio export. Deduped per
+                # run; MERGEs onto the real node if another loader enriches it.
+                ben_id = rec.get("beneficiary_gmr_id")
+                if ben_id and ben_id not in seen_beneficiaries:
+                    seen_beneficiaries.add(ben_id)
+                    emit.upsert(
+                        "UpsertCompany",
+                        iri=f"http://data.fontem.eu/id/Company/{ben_id}",
+                        domain="company",
+                        payload=builders.upsert_company(
+                            gmr_id=ben_id,
+                            name=rec.get("beneficiary_name"),
+                            country=rec.get("country"),
+                        ),
+                    )
+                    companies += 1
                 year = None
                 if rec.get("start_date"):
                     try:
@@ -244,7 +271,7 @@ def emit_disclosure_events(log: EventLog, records: list[dict]) -> dict:
             chunk = []
 
     emitted += _flush(chunk)
-    return {"total": total, "emitted": emitted}
+    return {"total": total, "emitted": emitted, "companies": companies}
 
 
 def main(argv=None):
@@ -306,8 +333,9 @@ def main(argv=None):
         log.close()
     elapsed = time.time() - t0
     logger.info(
-        "Done: %d projects, %d events emitted in %.1fs",
-        summary["total"], summary["emitted"], elapsed,
+        "Done: %d projects, %d events emitted "
+        "(%d beneficiary companies resolved-or-created) in %.1fs",
+        summary["total"], summary["emitted"], summary["companies"], elapsed,
     )
 
 

@@ -246,10 +246,17 @@ class TestEmitDisclosure:  # pylint: disable=missing-class-docstring
             "start_date": "2024-09-01", "end_date": "2026-12-31",
             "nuts_code": "PT10", "country": "PRT",
             "beneficiary_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
+            "beneficiary_name": "Camara Municipal de Lisboa",
             "beneficiary_qid": "Q67890",
         }
         load_eu_knowledge_graph.emit_disclosure_events(log, [rec])
-        assert emit.upsert.call_count == 1
+        # Now two upserts: the beneficiary :Company (resolve-or-create) then
+        # the disclosure whose company_gmr_id points at it.
+        assert emit.upsert.call_count == 2
+        company = emit.upsert.call_args_list[0]
+        assert company.args[0] == "UpsertCompany"
+        assert company.kwargs["payload"]["gmr_id"] == "00040372-dad6-5d34-882c-8b8624b4e734"
+        assert company.kwargs["payload"]["name"] == "Camara Municipal de Lisboa"
         payload = emit.upsert.call_args.kwargs["payload"]
         assert payload["system"] == "eu-cohesion"
         assert payload["disclosure_id"] == "Q12345"
@@ -269,3 +276,51 @@ class TestEmitDisclosure:  # pylint: disable=missing-class-docstring
         load_eu_knowledge_graph.emit_disclosure_events(log, [rec])
         payload = emit.upsert.call_args.kwargs["payload"]
         assert "company_gmr_id" not in payload
+        # No beneficiary → no resolve-or-create company either.
+        assert all(c.args[0] != "UpsertCompany" for c in emit.upsert.call_args_list)
+
+    def test_emit_dedupes_beneficiary_company(self):  # pylint: disable=missing-function-docstring
+        from src.etl import load_eu_knowledge_graph  # pylint: disable=import-outside-toplevel
+        log, emit = self._mock_log()
+        base = {
+            "wikibase_qid": "Q1", "title": "t", "start_date": "2024-01-01",
+            "country": "PRT",
+            "beneficiary_gmr_id": "ben-1", "beneficiary_name": "Shared Beneficiary",
+        }
+        # Two projects, same beneficiary → exactly one UpsertCompany.
+        load_eu_knowledge_graph.emit_disclosure_events(log, [
+            {**base, "qid": "QA"}, {**base, "qid": "QB"},
+        ])
+        companies = [c for c in emit.upsert.call_args_list if c.args[0] == "UpsertCompany"]
+        assert len(companies) == 1
+        disclosures = [c for c in emit.upsert.call_args_list if c.args[0] == "UpsertDisclosure"]
+        assert len(disclosures) == 2
+
+    def test_emit_beneficiary_company_without_name_still_resolves(self):  # pylint: disable=missing-function-docstring
+        from src.etl import load_eu_knowledge_graph  # pylint: disable=import-outside-toplevel
+        log, emit = self._mock_log()
+        rec = {"qid": "Q1", "wikibase_qid": "Q1", "title": "t",
+               "start_date": "2024-01-01", "country": "PRT",
+               "beneficiary_gmr_id": "ben-x"}  # no beneficiary_name
+        load_eu_knowledge_graph.emit_disclosure_events(log, [rec])
+        company = [c for c in emit.upsert.call_args_list if c.args[0] == "UpsertCompany"][0]
+        assert company.kwargs["payload"]["gmr_id"] == "ben-x"
+        assert company.kwargs["payload"].get("name") is None
+
+
+def test_parse_captures_beneficiary_name():
+    # Kohesio identifies beneficiaries by its own Wikibase QID
+    # (linkedopendata.eu) AND ships the human name in Beneficiary_Name.
+    header = (
+        "Operation_Unique_Identifier,Beneficiary_Unique_Identifier,"
+        "Beneficiary_Name,CountryCode,Operation_Name_English\n"
+    )
+    row = (
+        "https://linkedopendata.eu/entity/Q100,"
+        "https://linkedopendata.eu/entity/Q200,"
+        "Camara Municipal de Lisboa,PT,Some Project\n"
+    )
+    parsed = list(parse_kohesio_csv((header + row).encode(), since=None))
+    assert len(parsed) == 1
+    assert parsed[0]["beneficiary_name"] == "Camara Municipal de Lisboa"
+    assert parsed[0]["beneficiary_gmr_id"]  # derived from the Wikibase QID
