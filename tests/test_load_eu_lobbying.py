@@ -25,6 +25,7 @@ from src.etl import load_eu_lobbying
 from src.etl.load_eu_lobbying import (
     _COUNTRY_MAP,
     _parse_entity,
+    emit_deregistrations,
     emit_lobbyist_disclosures,
     resolve_lobbyist_companies,
 )
@@ -266,3 +267,74 @@ def test_parser_keeps_single_open_bound_untouched():
     # misleading [0, 50000]; the 0 stays and is dropped at emit time.
     parsed = _parse_entity(ET.fromstring(_entity_xml_costs("50000", "")))
     assert parsed["cost_min"] == 50000 and parsed["cost_max"] == 0
+# ── deregistration (keep history, redact names) ──────────────────────
+
+def test_emit_deregistrations_redacts_name_keeps_interests():
+    log, emit = _mock_log()
+    n = emit_deregistrations(log, {"111-22", "333-44"}, "2026-06-19")
+    assert n == 2
+    for c in emit.upsert.call_args_list:
+        p = c.kwargs["payload"]
+        assert p["system"] == "eu-lobbying"
+        assert p["title"] == "[deregistered]"
+        assert p["details"]["name"] == "[deregistered]"
+        assert p["details"]["acronym"] == "[deregistered]"
+        assert p["details"]["active"] is False
+        assert p["details"]["deregistered_at"] == "2026-06-19"
+        # No interests re-sent: the sink's partial SET keeps the existing
+        # detail_interests (the political signal we deliberately retain).
+        assert "interests" not in p["details"]
+
+
+def test_emit_deregistrations_empty_is_noop():
+    log, emit = _mock_log()
+    assert emit_deregistrations(log, set(), "2026-06-19") == 0
+    emit.upsert.assert_not_called()
+
+
+def test_live_disclosure_marked_active():
+    log, emit = _mock_log()
+    emit_lobbyist_disclosures(log, [{"tr_id": "1", "name": "X", "interests": ["a"]}])
+    assert emit.upsert.call_args.kwargs["payload"]["details"]["active"] is True
+
+
+def test_prior_disclosure_ids_extracts_and_filters(monkeypatch):
+    rows = [
+        ("http://data.fontem.eu/id/EuLobbyingDisclosure/111-22",),
+        ("http://data.fontem.eu/id/EuLobbyingDisclosure/333-44",),
+        ("http://data.fontem.eu/id/SomethingElse/x",),  # wrong prefix → dropped
+    ]
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            pass
+
+        def __iter__(self):
+            return iter(rows)
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def cursor(self):
+            return _Cur()
+
+    monkeypatch.setattr(load_eu_lobbying.psycopg, "connect", lambda *a, **k: _Conn())
+    ids = load_eu_lobbying._prior_disclosure_ids("postgresql://x")  # pylint: disable=protected-access
+    assert ids == {"111-22", "333-44"}
+
+
+def test_prior_disclosure_ids_unconfigured_or_unsubstituted():
+    assert load_eu_lobbying._prior_disclosure_ids(None) == set()  # pylint: disable=protected-access
+    assert load_eu_lobbying._prior_disclosure_ids(  # pylint: disable=protected-access
+        "postgresql://u:$(PW)@h/db"
+    ) == set()

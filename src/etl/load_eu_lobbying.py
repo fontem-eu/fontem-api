@@ -32,12 +32,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import logging
+import os
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Any
 
 import httpx
+import psycopg
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
@@ -49,6 +52,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 TR_XML_URL = "https://transparency-register.europa.eu/odplastorganisationxml_en"
 EMIT_CHUNK = 500
+
+# Placeholder written into name fields when a lobbyist is tombstoned, so
+# the kept history carries no personal data (GDPR).
+_REDACTED = "[deregistered]"
 
 # Country name normalization (TR uses full names, Company nodes use ISO).
 _COUNTRY_MAP = {
@@ -200,6 +207,7 @@ def emit_lobbyist_disclosures(
                         details[k] = v
                 if ent.get("interests"):
                     details["interests"] = ent["interests"]
+                details["active"] = True
                 match = matches.get(ent["tr_id"])
                 if match is not None:
                     details["registrant_match_tier"] = match[1]
@@ -275,6 +283,68 @@ def resolve_lobbyist_companies(
     }
 
 
+def _prior_disclosure_ids(dsn: str | None) -> set[str]:
+    """tr_ids ever emitted for eu-lobbying, read from the loader's own
+    event log. Loaders stay emit-only w.r.t. the graph, but the event
+    store is our own output — reading it to diff the register snapshot
+    against what we've seen before is fair game.
+    """
+    if not dsn:
+        return set()
+    dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
+    if "$(" in dsn:
+        return set()
+    prefix = _disclosure_iri("")
+    ids: set[str] = set()
+    with psycopg.connect(dsn, connect_timeout=10) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT iri FROM events.entity_events WHERE producer = %s",
+            ("load_eu_lobbying",),
+        )
+        for (iri,) in cur:
+            if iri and iri.startswith(prefix):
+                ids.add(iri[len(prefix):])
+    return ids
+
+
+def emit_deregistrations(
+    log: EventLog, dropped_ids: set[str], deregistered_at: str,
+) -> int:
+    """Tombstone lobbyists that fell off the register. Keep the record
+    and its interests (the political signal that matters), flip
+    ``active`` false, and redact the name fields — the Transparency
+    Register names natural persons, and once a registrant drops off the
+    upstream lawful basis we retain trends, not identities (GDPR).
+    The eu-lobbying upsert still carries the :Lobbyist label via the
+    sink, and the partial SET leaves detail_interests/category/etc.
+    untouched.
+    """
+    if not dropped_ids:
+        return 0
+    n = 0
+    with log.batch(uuid.uuid4(), producer="load_eu_lobbying") as emit:
+        for tr_id in sorted(dropped_ids):
+            emit.upsert(
+                "UpsertDisclosure",
+                iri=_disclosure_iri(tr_id),
+                domain="eu_lobbying",
+                payload=builders.upsert_disclosure(
+                    system="eu-lobbying",
+                    disclosure_id=tr_id,
+                    disclosure_type="lobbyist-registration",
+                    title=_REDACTED,
+                    details={
+                        "name": _REDACTED,
+                        "acronym": _REDACTED,
+                        "active": False,
+                        "deregistered_at": deregistered_at,
+                    },
+                ),
+            )
+            n += 1
+    return n
+
+
 def load_eu_lobbying(log: EventLog) -> dict:  # pylint: disable=too-many-locals
     """Download TR XML and emit Lobbyist/REPRESENTS events."""
     logger.info("Downloading EU Transparency Register XML from %s ...", TR_XML_URL)
@@ -321,7 +391,24 @@ def load_eu_lobbying(log: EventLog) -> dict:  # pylint: disable=too-many-locals
         emitted, len(matches), rep_summary["confident"],
         rep_summary["ambiguous"], rep_summary["no_match"],
     )
-    return {"emitted": emitted, "represents": rep_summary}
+
+    # Deregistration: anything we emitted before but that's absent from
+    # today's register has dropped off — tombstone it (keep history,
+    # redact names).
+    current_ids = {e["tr_id"] for e in entities if e.get("tr_id")}
+    dropped = _prior_disclosure_ids(os.environ.get("EVENTS_DATABASE_URL")) - current_ids
+    deregistered = emit_deregistrations(
+        log, dropped, datetime.date.today().isoformat(),
+    )
+    if deregistered:
+        logger.info(
+            "Tombstoned %d deregistered lobbyists (names redacted, history kept)",
+            deregistered,
+        )
+    return {
+        "emitted": emitted, "represents": rep_summary,
+        "deregistered": deregistered,
+    }
 
 
 def main(argv=None) -> None:
