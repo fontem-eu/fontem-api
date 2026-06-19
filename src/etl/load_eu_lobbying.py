@@ -109,6 +109,12 @@ def _parse_cost_band(elem: ET.Element) -> tuple[int, int]:
             pass
     if cost_min and cost_max:
         cost_min, cost_max = min(cost_min, cost_max), max(cost_min, cost_max)
+    elif cost_min:
+        # Open-top bracket (e.g. ">= 10,000,000"): the register reports a
+        # lower bound and no upper one. Mirror it as [min, min] so the band
+        # is never inverted (cost_max=0 would read as cost_max < cost_min);
+        # the lower bound carries the signal.
+        cost_max = cost_min
     return cost_min, cost_max
 
 

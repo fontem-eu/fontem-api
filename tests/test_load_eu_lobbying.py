@@ -261,12 +261,14 @@ def test_parser_leaves_well_ordered_cost_band():
     assert parsed["cost_min"] == 10000 and parsed["cost_max"] == 50000
 
 
-def test_parser_keeps_single_open_bound_untouched():
+def test_parser_open_top_bracket_mirrors_lower_bound():
     import xml.etree.ElementTree as ET  # pylint: disable=import-outside-toplevel
-    # Only a lower bound present (max absent → 0): not reordered into a
-    # misleading [0, 50000]; the 0 stays and is dropped at emit time.
+    # Open-top bracket (">= 50000": lower bound present, upper absent) →
+    # mirrored to [50000, 50000] so it's never inverted (cost_max=0 would
+    # read as cost_max < cost_min).
     parsed = _parse_entity(ET.fromstring(_entity_xml_costs("50000", "")))
-    assert parsed["cost_min"] == 50000 and parsed["cost_max"] == 0
+    assert parsed["cost_min"] == 50000 and parsed["cost_max"] == 50000
+    assert parsed["cost_max"] >= parsed["cost_min"]
 # ── deregistration (keep history, redact names) ──────────────────────
 
 def test_emit_deregistrations_redacts_name_keeps_interests():
