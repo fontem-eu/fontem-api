@@ -30,6 +30,7 @@ REFS = "refs"            # referential integrity (relationships)
 VALUES = "values"        # value sanity / domain ranges
 PIPELINE = "pipeline"    # sink lag + dead-letter (events store)
 FRESHNESS = "freshness"  # source recency (events store)
+GOLDEN = "golden"        # known-true ground-truth facts (graph)
 
 Evaluator = Callable[[Mapping[str, Any]], "tuple[bool, str]"]
 
@@ -66,6 +67,14 @@ def le_threshold(key: str, threshold: int, label: str) -> Evaluator:
     def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
         v = int(row.get(key) or 0)
         return v <= threshold, f"{label}={v} (limit {threshold})"
+    return _ev
+
+
+def at_least(key: str, minimum: int, label: str) -> Evaluator:
+    """OK when row[key] >= minimum (presence of a known-true fact)."""
+    def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
+        v = int(row.get(key) or 0)
+        return v >= minimum, f"{label}={v} (expected >= {minimum})"
     return _ev
 
 
@@ -427,6 +436,40 @@ ASSERTIONS: list[Assertion] = [
         _cadence_freshness_query(),
         zero_with_detail("stale sources"),
         "Makes 'great data quality in staging' enforceable: a source past its cadence is flagged.",
+    ),
+
+    # ---- Family G: golden facts (BLOCK, known-true ground truth) -----------
+    # Relations/entities we KNOW are true and must exist. A missing one means
+    # data loss (a silent drop), not just drift — so they block.
+    Assertion(
+        "golden.nuts_germany_exists", GOLDEN,
+        "Germany (NUTS 'DE') is present", BLOCK, "cypher",
+        "MATCH (n:NUTSRegion {code:'DE'}) RETURN count(*) AS found",
+        at_least("found", 1, "DE regions"),
+        "The NUTS classification is fixed; Germany must always resolve.",
+    ),
+    Assertion(
+        "golden.nuts_germany_subdivided", GOLDEN,
+        "Germany's NUTS-1 subdivisions are materialized (>=10)", BLOCK, "cypher",
+        "MATCH (:NUTSRegion)-[:PART_OF]->(:NUTSRegion {code:'DE'}) "
+        "RETURN count(*) AS found",
+        at_least("found", 10, "DE children"),
+        "Silent-drop canary for the NUTS hierarchy: Germany has 16 NUTS-1 regions.",
+    ),
+    Assertion(
+        "golden.apple_company_exists", GOLDEN,
+        "Apple Inc. (LEI HWUPKR0MPOU8FGXBT394) exists", BLOCK, "cypher",
+        "MATCH (c:Company {lei:'HWUPKR0MPOU8FGXBT394'}) RETURN count(*) AS found",
+        at_least("found", 1, "Apple nodes"),
+        "A stable, well-known GLEIF entity must resolve to a Company.",
+    ),
+    Assertion(
+        "golden.volkswagen_group_materialized", GOLDEN,
+        "Volkswagen AG's subsidiary group is materialized (>=50)", BLOCK, "cypher",
+        "MATCH (:Company)-[:SUBSIDIARY_OF]->(:Company {lei:'529900NNUPAGGOMPXZ31'}) "
+        "RETURN count(*) AS found",
+        at_least("found", 50, "VW subsidiaries"),
+        "Silent-drop canary for GLEIF SUBSIDIARY_OF: VW AG had 207 subsidiaries.",
     ),
 ]
 

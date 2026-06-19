@@ -338,3 +338,28 @@ def test_prior_disclosure_ids_unconfigured_or_unsubstituted():
     assert load_eu_lobbying._prior_disclosure_ids(  # pylint: disable=protected-access
         "postgresql://u:$(PW)@h/db"
     ) == set()
+
+
+def test_emit_sends_both_cost_bounds_when_bracket_shrinks():
+    # A registrant whose bracket shrank to "< 10000" reports only an upper
+    # bound. The loader must still emit cost_min=0 (not drop it) so the sink
+    # overwrites a stale lower bound from a previous, larger bracket rather
+    # than leaving an inverted cost_max < cost_min.
+    log, emit = _mock_log()
+    emit_lobbyist_disclosures(log, [{
+        "tr_id": "9", "name": "Shrunk Bracket Co",
+        "cost_min": 0, "cost_max": 10000, "interests": [],
+    }])
+    details = emit.upsert.call_args.kwargs["payload"]["details"]
+    assert details["cost_min"] == 0
+    assert details["cost_max"] == 10000
+
+
+def test_emit_omits_cost_when_both_bounds_absent():
+    log, emit = _mock_log()
+    emit_lobbyist_disclosures(log, [{
+        "tr_id": "10", "name": "No Cost Co",
+        "cost_min": 0, "cost_max": 0, "interests": [],
+    }])
+    details = emit.upsert.call_args.kwargs["payload"]["details"]
+    assert "cost_min" not in details and "cost_max" not in details

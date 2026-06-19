@@ -12,7 +12,7 @@ import pytest
 
 from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
-    ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS,
+    ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
     Assertion, by_id, le_threshold, zero_violations, zero_with_detail,
 )
 from src.data_quality.assertions.runner import (
@@ -30,7 +30,7 @@ def test_ids_unique():
 
 
 def test_families_and_severities_valid():
-    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS}
+    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN}
     for a in ASSERTIONS:
         assert a.family in fams, a.id
         assert a.severity in (BLOCK, WARN), a.id
@@ -57,7 +57,7 @@ def test_values_block_except_documented_warn():
 def test_engine_matches_family():
     # Graph families use cypher; events families use sql.
     for a in ASSERTIONS:
-        if a.family in (KEYS, REFS, VALUES):
+        if a.family in (KEYS, REFS, VALUES, GOLDEN):
             assert a.engine == "cypher", a.id
         else:
             assert a.engine == "sql", a.id
@@ -158,11 +158,11 @@ def test_evaluate_routes_engine():
 def _all_clean_cypher(_q):
     # Every catalog cypher query aliases its count to `violations`/`total`;
     # zero violations + a benign total/lag satisfies all evaluators.
-    return {"violations": 0, "total": 0, "lag": 0, "dl": 0, "detail": ""}
+    return {"violations": 0, "total": 0, "lag": 0, "dl": 0, "detail": "", "found": 1000}
 
 
 def _all_clean_sql(_q):
-    return {"violations": 0, "lag": 0, "dl": 0, "detail": ""}
+    return {"violations": 0, "lag": 0, "dl": 0, "detail": "", "found": 1000}
 
 
 def test_run_catalog_all_pass():

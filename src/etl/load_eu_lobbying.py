@@ -199,12 +199,19 @@ def emit_lobbyist_disclosures(
                     "name", "acronym", "country", "country_iso",
                     "city", "category", "entity_form", "website",
                     "goals", "ep_passes", "members_fte",
-                    "cost_min", "cost_max",
                     "registration_date", "last_updated",
                 ):
                     v = ent.get(k)
                     if v not in (None, "", 0, 0.0):
                         details[k] = v
+                # Always emit both cost bounds together when either is present,
+                # so a shrunk bracket (the lower bound drops out across loads)
+                # overwrites a stale cost_min in the sink rather than leaving an
+                # inverted cost_max < cost_min. _parse_cost_band already orders
+                # a transposed pair; this closes the stale-lower-bound case.
+                if ent.get("cost_min") or ent.get("cost_max"):
+                    details["cost_min"] = ent.get("cost_min", 0)
+                    details["cost_max"] = ent.get("cost_max", 0)
                 if ent.get("interests"):
                     details["interests"] = ent["interests"]
                 details["active"] = True
