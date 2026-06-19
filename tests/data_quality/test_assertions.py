@@ -268,3 +268,18 @@ def test_sql_runner_raises_without_dsn():
     run = cli._build_sql_runner(None)
     with pytest.raises(RuntimeError):
         run("SELECT 1")
+
+
+def test_gdpr_and_coverage_assertions_present_and_blocking():
+    cat = by_id()
+    # Privacy guard + coverage check for the lobbying dereg invariant.
+    for aid in ("values.deregistered_lobbyist_name_redacted",
+                "values.active_lobbyist_has_name"):
+        assert aid in cat, aid
+        assert cat[aid].severity == BLOCK, aid
+        assert cat[aid].engine == "cypher", aid
+        assert cat[aid].family == VALUES, aid
+    # The redaction guard must key off the deregistered marker + the
+    # redaction sentinel so it actually catches a leaked name.
+    q = cat["values.deregistered_lobbyist_name_redacted"].query
+    assert "detail_active = false" in q and "[deregistered]" in q

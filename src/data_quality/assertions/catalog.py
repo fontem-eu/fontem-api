@@ -359,6 +359,30 @@ ASSERTIONS: list[Assertion] = [
         zero_violations("financial years that break the balance-sheet identity"),
         "Filings legitimately restate; warn (investigative signal) rather than block.",
     ),
+    Assertion(
+        "values.deregistered_lobbyist_name_redacted", VALUES,
+        "Deregistered lobbyists carry no name (GDPR redaction)", BLOCK, "cypher",
+        "MATCH (d:Disclosure {system:'eu-lobbying'}) WHERE d.detail_active = false "
+        "AND ((d.detail_name IS NOT NULL AND d.detail_name <> '[deregistered]') "
+        "OR (d.title IS NOT NULL AND d.title <> '[deregistered]')) "
+        "RETURN count(*) AS violations",
+        zero_violations("deregistered lobbyists still carrying a name"),
+        "Privacy guard: once a registrant drops off the upstream lawful basis we "
+        "keep trends, not identities. A real name on a tombstoned record is a "
+        "GDPR leak — the dereg path must redact name + title.",
+    ),
+    Assertion(
+        "values.active_lobbyist_has_name", VALUES,
+        "Active lobbyists have a real (non-redacted) name", BLOCK, "cypher",
+        "MATCH (d:Disclosure {system:'eu-lobbying'}) "
+        "WHERE coalesce(d.detail_active, true) = true "
+        "AND (d.detail_name IS NULL OR d.detail_name = '[deregistered]') "
+        "RETURN count(*) AS violations",
+        zero_violations("active lobbyists missing a name"),
+        "Coverage: a currently-registered lobbyist must be identifiable. A missing "
+        "or already-redacted name on an active record means dropped or "
+        "wrongly-tombstoned data.",
+    ),
 
     # ---- Family D: pipeline integrity (WARN, events store) ----------------
     Assertion(
