@@ -12,8 +12,9 @@ import pytest
 
 from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
-    ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
-    Assertion, by_id, le_threshold, zero_violations, zero_with_detail,
+    ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE,
+    Assertion, by_id, le_threshold, min_coverage, zero_violations,
+    zero_with_detail,
 )
 from src.data_quality.assertions.runner import (
     AssertionResult, ERROR, FAIL, PASS, evaluate_assertion, exit_code,
@@ -30,7 +31,7 @@ def test_ids_unique():
 
 
 def test_families_and_severities_valid():
-    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN}
+    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE}
     for a in ASSERTIONS:
         assert a.family in fams, a.id
         assert a.severity in (BLOCK, WARN), a.id
@@ -57,7 +58,7 @@ def test_values_block_except_documented_warn():
 def test_engine_matches_family():
     # Graph families use cypher; events families use sql.
     for a in ASSERTIONS:
-        if a.family in (KEYS, REFS, VALUES, GOLDEN):
+        if a.family in (KEYS, REFS, VALUES, GOLDEN, COVERAGE):
             assert a.engine == "cypher", a.id
         else:
             assert a.engine == "sql", a.id
@@ -158,7 +159,8 @@ def test_evaluate_routes_engine():
 def _all_clean_cypher(_q):
     # Every catalog cypher query aliases its count to `violations`/`total`;
     # zero violations + a benign total/lag satisfies all evaluators.
-    return {"violations": 0, "total": 0, "lag": 0, "dl": 0, "detail": "", "found": 1000}
+    return {"violations": 0, "total": 0, "covered": 0, "lag": 0, "dl": 0,
+            "detail": "", "found": 1000}
 
 
 def _all_clean_sql(_q):
@@ -283,3 +285,10 @@ def test_gdpr_and_coverage_assertions_present_and_blocking():
     # redaction sentinel so it actually catches a leaked name.
     q = cat["values.deregistered_lobbyist_name_redacted"].query
     assert "detail_active = false" in q and "[deregistered]" in q
+
+
+def test_min_coverage_evaluator():
+    ev = min_coverage(0.80, "pt")
+    assert ev({"total": 0, "covered": 0})[0] is True          # no rows → ok
+    assert ev({"total": 10, "covered": 9})[0] is True          # 90% >= 80%
+    assert ev({"total": 10, "covered": 5})[0] is False         # 50% < 80%

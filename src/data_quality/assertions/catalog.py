@@ -31,6 +31,7 @@ VALUES = "values"        # value sanity / domain ranges
 PIPELINE = "pipeline"    # sink lag + dead-letter (events store)
 FRESHNESS = "freshness"  # source recency (events store)
 GOLDEN = "golden"        # known-true ground-truth facts (graph)
+COVERAGE = "coverage"    # field-population coverage (graph)
 
 Evaluator = Callable[[Mapping[str, Any]], "tuple[bool, str]"]
 
@@ -75,6 +76,19 @@ def at_least(key: str, minimum: int, label: str) -> Evaluator:
     def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
         v = int(row.get(key) or 0)
         return v >= minimum, f"{label}={v} (expected >= {minimum})"
+    return _ev
+
+
+def min_coverage(min_ratio: float, label: str) -> Evaluator:
+    """OK when row['covered']/row['total'] >= min_ratio. Empty population
+    (total 0) passes — nothing to cover yet."""
+    def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
+        total = int(row.get("total") or 0)
+        covered = int(row.get("covered") or 0)
+        if total == 0:
+            return True, f"{label}: no rows yet"
+        ratio = covered / total
+        return ratio >= min_ratio, f"{label}: {covered}/{total} ({ratio:.0%}, min {min_ratio:.0%})"
     return _ev
 
 
@@ -436,6 +450,34 @@ ASSERTIONS: list[Assertion] = [
         _cadence_freshness_query(),
         zero_with_detail("stale sources"),
         "Makes 'great data quality in staging' enforceable: a source past its cadence is flagged.",
+    ),
+
+    # ---- TED tender-integrity (procurement-integrity initiative) ----------
+    Assertion(
+        "values.contract_bidder_count_positive", VALUES,
+        "Awarded contracts have tenders_received >= 1", BLOCK, "cypher",
+        "MATCH (c:Contract) WHERE c.tenders_received IS NOT NULL "
+        "AND c.tenders_received < 1 RETURN count(*) AS violations",
+        zero_violations("contracts with a non-positive bidder count"),
+        "An awarded contract had at least one bidder; 0 is corrupt parsing.",
+    ),
+    Assertion(
+        "coverage.contract_procedure_type_2026", COVERAGE,
+        "2026 contracts carry procedure_type (>=80%)", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= '2026-01-01' "
+        "RETURN count(*) AS total, count(c.procedure_type) AS covered",
+        min_coverage(0.80, "procedure_type"),
+        "procedure_type is always in eForms; low coverage means the loader "
+        "or re-ingest hasn't populated it yet.",
+    ),
+    Assertion(
+        "coverage.contract_bidder_count_2026", COVERAGE,
+        "2026 contracts carry tenders_received (>=40%)", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= '2026-01-01' "
+        "RETURN count(*) AS total, count(c.tenders_received) AS covered",
+        min_coverage(0.40, "bidder count"),
+        "Bidder count drives the single-bidder indicator; some notices omit "
+        "the submission statistics, so the bar is lower than procedure_type.",
     ),
 
     # ---- Family G: golden facts (BLOCK, known-true ground truth) -----------
