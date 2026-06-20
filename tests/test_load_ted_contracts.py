@@ -71,6 +71,7 @@ def _stub_award(currency="EUR", value=1000.0, contractor_org_id="O1"):
     award.currency = currency
     award.award_date = "2025-09-15"
     award.conclusion_date = None
+    award.tenders_received = 1  # single-bidder, for the integrity assertions
     return award
 
 
@@ -90,6 +91,11 @@ def _stub_notice(*, awards, organizations):
     notice.organizations = organizations
     notice.cpv_main = "45000000"
     notice.procedure_type = "open"
+    notice.award_criterion_type = "price"
+    notice.submission_deadline = "2025-08-15"
+    notice.is_framework = False
+    notice.eu_funded = True
+    notice.funding_programme = "RRF"
     notice.notice_type = "can-standard"
     notice.currency = "EUR"
     notice.total_value = None
@@ -204,6 +210,14 @@ def test_contract_payload_carries_authority_and_company_links(
     )
     payload = contract_call.kwargs["payload"]
     assert payload["authority_id"] == "auth-1"
+    # Tender-integrity fields threaded through from the parsed notice/award.
+    assert payload["procedure_type"] == "open"
+    assert payload["tenders_received"] == 1
+    assert payload["award_criterion_type"] == "price"
+    assert payload["submission_deadline"] == "2025-08-15"
+    assert payload["is_framework"] is False
+    assert payload["eu_funded"] is True
+    assert payload["funding_programme"] == "RRF"
     assert payload["company_gmr_id"] == "company-1"
     assert payload["ted_notice_id"] == "912f1717-1ace-413d-aa61-cd21cd6b95e7"
     assert payload["ted_publication_number"] == "295342-2026"

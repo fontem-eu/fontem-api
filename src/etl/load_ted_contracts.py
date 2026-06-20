@@ -486,6 +486,15 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 # contracts are jurisdictionally grouped by the
                 # procuring entity, not the awarded vendor.
                 country=LocationService.to_alpha3(buyer.country),
+                # Tender-integrity fields (eForms) — inputs to the SMSB
+                # single-bidder / non-open indicators + the CRI red flags.
+                procedure_type=notice.procedure_type,
+                tenders_received=award.tenders_received,
+                award_criterion_type=notice.award_criterion_type,
+                submission_deadline=notice.submission_deadline,
+                is_framework=notice.is_framework,
+                eu_funded=notice.eu_funded,
+                funding_programme=notice.funding_programme,
             ),
         )
 
