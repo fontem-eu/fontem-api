@@ -12,8 +12,9 @@ import pytest
 
 from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
-    ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE,
-    Assertion, by_id, le_threshold, min_coverage, zero_violations,
+    ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
+    COVERAGE, ORACLE, Assertion, by_id, le_threshold, min_coverage, oracle_band,
+    zero_violations,
     zero_with_detail,
 )
 from src.data_quality.assertions.runner import (
@@ -31,7 +32,7 @@ def test_ids_unique():
 
 
 def test_families_and_severities_valid():
-    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE}
+    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE, ORACLE}
     for a in ASSERTIONS:
         assert a.family in fams, a.id
         assert a.severity in (BLOCK, WARN), a.id
@@ -58,7 +59,7 @@ def test_values_block_except_documented_warn():
 def test_engine_matches_family():
     # Graph families use cypher; events families use sql.
     for a in ASSERTIONS:
-        if a.family in (KEYS, REFS, VALUES, GOLDEN, COVERAGE):
+        if a.family in (KEYS, REFS, VALUES, GOLDEN, COVERAGE, ORACLE):
             assert a.engine == "cypher", a.id
         else:
             assert a.engine == "sql", a.id
@@ -292,3 +293,22 @@ def test_min_coverage_evaluator():
     assert ev({"total": 0, "covered": 0})[0] is True          # no rows → ok
     assert ev({"total": 10, "covered": 9})[0] is True          # 90% >= 80%
     assert ev({"total": 10, "covered": 5})[0] is False         # 50% < 80%
+
+
+def test_oracle_band_in_range_passes():
+    ev = oracle_band(0.20, 0.60, 100, "HU single-bidder")
+    ok, obs = ev({"sample": 500, "rate": 0.42})
+    assert ok and "0.420" in obs
+
+
+def test_oracle_band_out_of_range_fails():
+    ev = oracle_band(0.20, 0.60, 100, "HU single-bidder")
+    ok, obs = ev({"sample": 500, "rate": 0.05})
+    assert not ok and "0.050" in obs
+
+
+def test_oracle_band_thin_sample_passes_with_note():
+    # Too few rows to judge — we validate computation, not manufacture a verdict.
+    ev = oracle_band(0.20, 0.60, 100, "HU single-bidder")
+    ok, obs = ev({"sample": 12, "rate": 0.99})
+    assert ok and "too thin" in obs

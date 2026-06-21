@@ -32,6 +32,7 @@ PIPELINE = "pipeline"    # sink lag + dead-letter (events store)
 FRESHNESS = "freshness"  # source recency (events store)
 GOLDEN = "golden"        # known-true ground-truth facts (graph)
 COVERAGE = "coverage"    # field-population coverage (graph)
+ORACLE = "oracle"        # computed indicators validated vs published external figures
 
 Evaluator = Callable[[Mapping[str, Any]], "tuple[bool, str]"]
 
@@ -60,6 +61,24 @@ def zero_violations(label: str = "violations", total_key: str | None = None) -> 
         if total_key and row.get(total_key) is not None:
             obs += f" of {row[total_key]}"
         return v == 0, obs
+    return _ev
+
+
+def oracle_band(low: float, high: float, min_sample: int,
+                label: str) -> Evaluator:
+    """OK when an independently-computed rate lands inside the band an
+    external authority publishes for the same indicator. Passes (with a
+    note) when the sample is too thin to judge — we validate the
+    computation, we don't manufacture a verdict from a handful of rows."""
+    def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
+        sample = int(row.get("sample") or 0)
+        if sample < min_sample:
+            return True, (f"{label}: n={sample} < {min_sample} — too thin to "
+                          f"validate against the published band [{low}, {high}]")
+        rate = float(row.get("rate") or 0.0)
+        ok = low <= rate <= high
+        return ok, (f"{label}: rate={rate:.3f} vs published band "
+                    f"[{low}, {high}] (n={sample})")
     return _ev
 
 
@@ -512,6 +531,41 @@ ASSERTIONS: list[Assertion] = [
         "RETURN count(*) AS found",
         at_least("found", 50, "VW subsidiaries"),
         "Silent-drop canary for GLEIF SUBSIDIARY_OF: VW AG had 207 subsidiaries.",
+    ),
+
+    # ----- Oracle: our computed indicators vs externally-published figures -----
+    Assertion(
+        "oracle.hungary_single_bidder_rate", ORACLE,
+        "Hungary single-bidder rate matches the EC Single Market Scoreboard band",
+        WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.country IN ['HUN', 'HU'] "
+        "AND c.tenders_received IS NOT NULL "
+        "WITH count(*) AS sample, "
+        "count(CASE WHEN c.tenders_received = 1 THEN 1 END) AS single "
+        "RETURN sample, CASE WHEN sample > 0 THEN toFloat(single) / sample "
+        "ELSE 0.0 END AS rate",
+        oracle_band(0.20, 0.60, 100, "HU single-bidder"),
+        "Oracle. The EC Single Market Scoreboard reports Hungary's "
+        "single-bidder share among the highest in the EU (~30-45% across "
+        "recent editions). Our independently-computed rate must land in that "
+        "published band — if it drifts out, the suspect is our ingestion or "
+        "the indicator logic, not Hungary. WARN until the historical TED "
+        "backfill aligns our window with the EC's published years; the band "
+        "is deliberately wide to tolerate the period gap.",
+    ),
+    Assertion(
+        "oracle.eu_single_bidder_rate", ORACLE,
+        "EU-wide single-bidder rate is in the EC-published range", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.tenders_received IS NOT NULL "
+        "WITH count(*) AS sample, "
+        "count(CASE WHEN c.tenders_received = 1 THEN 1 END) AS single "
+        "RETURN sample, CASE WHEN sample > 0 THEN toFloat(single) / sample "
+        "ELSE 0.0 END AS rate",
+        oracle_band(0.05, 0.45, 1000, "EU single-bidder"),
+        "Oracle. The EC reports the EU aggregate single-bidder share in the "
+        "low-to-mid tens of percent. A rate outside this wide band means our "
+        "bidder-count capture is systematically wrong (e.g. the 0-as-1 bug we "
+        "fixed), not that the single market changed overnight.",
     ),
 ]
 
