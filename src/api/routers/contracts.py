@@ -158,6 +158,33 @@ def sector_summary(
     return source.get_sector_summary(country=country, year=year)
 
 
+@router.get("/contracts/single-bidder-rate")
+@inject
+def single_bidder_rate(
+    country: str | None = Query(None),
+    cpv: str | None = Query(None),
+    *,
+    source: FromDishka[ContractDataSource],
+):
+    """Single-bidder rate (EC Single Market Scoreboard headline) over
+    contracts with a known bidder count, optionally scoped by authority
+    country and/or CPV prefix."""
+    return source.get_single_bidder_stats(country=country, cpv=cpv)
+
+
+@router.get("/contracts/single-bidder-by-country")
+@inject
+def single_bidder_by_country(
+    min_sample: int = Query(20, ge=1),
+    limit: int = Query(40, ge=1, le=200),
+    *,
+    source: FromDishka[ContractDataSource],
+):
+    """Single-bidder rate per authority country (>= min_sample contracts),
+    highest first — the cross-country benchmark."""
+    return source.get_single_bidder_by_country(min_sample=min_sample, limit=limit)
+
+
 @router.get("/contracts/{notice_id}")
 @inject
 def contract_detail(

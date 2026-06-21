@@ -409,3 +409,119 @@ class TestTedLink:
         cleanup_dishka()
         assert resp.status_code == 302
         assert resp.headers["location"].endswith("/295342-2026")
+
+
+class TestSingleBidderEngine:
+    """Tests for the SMSB single-bidder-rate endpoints + source methods."""
+
+    def test_single_bidder_rate_endpoint(self):
+        """The scoped single-bidder-rate endpoint returns the source result."""
+        mock = _mock_contract_source()
+        mock.get_single_bidder_stats.return_value = {
+            "scope": {"country": "HUN", "cpv": None},
+            "total": 100, "single_bidder": 40, "single_bidder_rate": 0.4,
+        }
+        client = make_test_client(contract_source=mock)
+        resp = client.get("/contracts/single-bidder-rate?country=HUN")
+        cleanup_dishka()
+        assert resp.status_code == 200
+        assert resp.json()["single_bidder_rate"] == 0.4
+        mock.get_single_bidder_stats.assert_called_once_with(country="HUN", cpv=None)
+
+    def test_single_bidder_by_country_endpoint(self):
+        """The per-country benchmark endpoint returns the source result."""
+        mock = _mock_contract_source()
+        mock.get_single_bidder_by_country.return_value = [
+            {"country": "HUN", "total": 200, "single": 90,
+             "single_bidder_rate": 0.45},
+        ]
+        client = make_test_client(contract_source=mock)
+        resp = client.get("/contracts/single-bidder-by-country")
+        cleanup_dishka()
+        assert resp.status_code == 200
+        assert resp.json()[0]["country"] == "HUN"
+
+    def test_integrity_block_derives_flags(self):
+        """The detail integrity block carries fields + derived red flags."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            GraphContractSource)
+        src = GraphContractSource(MagicMock())
+        block = src._integrity_block({  # pylint: disable=protected-access
+            "tenders_received": 1, "procedure_type": "neg-wo-call",
+            "award_criterion_type": "price"})
+        assert block["tenders_received"] == 1
+        assert block["is_single_bidder"] is True
+        assert block["is_no_call"] is True
+        assert block["integrity_red_flags"] == 4
+
+    def test_get_single_bidder_stats_computes_rate(self):
+        """The source computes the single-bidder rate from the count query."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            GraphContractSource)
+        src = GraphContractSource(MagicMock())
+        session = MagicMock()
+        session.run.return_value.single.return_value = {"total": 100, "single": 40}
+        src._neo4j.session.return_value.__enter__ = MagicMock(  # pylint: disable=protected-access
+            return_value=session)
+        src._neo4j.session.return_value.__exit__ = MagicMock(  # pylint: disable=protected-access
+            return_value=False)
+        out = src.get_single_bidder_stats(country="HUN")
+        assert out["total"] == 100 and out["single_bidder_rate"] == 0.4
+
+
+def test_get_single_bidder_by_country_source():
+    """The per-country benchmark source method returns the query rows."""
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    session.run.return_value.data.return_value = [
+        {"country": "HUN", "total": 200, "single": 90,
+         "single_bidder_rate": 0.45},
+    ]
+    src._neo4j.session.return_value.__enter__ = MagicMock(  # pylint: disable=protected-access
+        return_value=session)
+    src._neo4j.session.return_value.__exit__ = MagicMock(  # pylint: disable=protected-access
+        return_value=False)
+    rows = src.get_single_bidder_by_country(min_sample=50, limit=10)
+    assert rows[0]["country"] == "HUN" and rows[0]["single_bidder_rate"] == 0.45
+
+
+def test_get_contract_detail_includes_integrity():
+    """get_contract_detail returns the integrity block with derived flags."""
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    ct = {"ted_notice_id": "n1", "title": "Books", "value_eur": 5000,
+          "cpv": "72000000", "procedure_type": "neg-wo-call",
+          "publication_date": "2026-01-15", "tenders_received": 1,
+          "award_criterion_type": "price"}
+    auth = {"name": "Ministry", "country": "HUN"}
+    comp = {"gmr_id": "g1", "name": "Acme", "country": "HUN"}
+    session.run.return_value.single.return_value = {
+        "ct": ct, "a": auth, "c": comp, "cpv": None}
+    src._neo4j.session.return_value.__enter__ = MagicMock(  # pylint: disable=protected-access
+        return_value=session)
+    src._neo4j.session.return_value.__exit__ = MagicMock(  # pylint: disable=protected-access
+        return_value=False)
+    out = src.get_contract_detail("n1")
+    assert out["procedure_type"] == "neg-wo-call"
+    integ = out["integrity"]
+    assert integ["is_single_bidder"] is True
+    assert integ["is_no_call"] is True
+    assert integ["integrity_red_flags"] >= 2
+
+
+def test_get_contract_detail_missing_returns_none():
+    """A missing contract row yields None (404 path)."""
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    session.run.return_value.single.return_value = None
+    src._neo4j.session.return_value.__enter__ = MagicMock(  # pylint: disable=protected-access
+        return_value=session)
+    src._neo4j.session.return_value.__exit__ = MagicMock(  # pylint: disable=protected-access
+        return_value=False)
+    assert src.get_contract_detail("nope") is None

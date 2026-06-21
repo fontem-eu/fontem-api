@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 
+from fontem_event_schemas.integrity import contract_red_flags
+
 from ...analysis.contract_data_source import ContractDataSource
 from ...api.lang import authority_name_expr, contract_title_expr
 from ._value_quality import trusted_value_sum
@@ -245,7 +247,73 @@ class GraphContractSource(ContractDataSource):
                 "name": row["c"]["name"],
                 "country": row["c"].get("country"),
             },
+            # Tender-integrity: the raw eForms fields + the shared keystone's
+            # derived red flags (single-bidder etc.), computed on the fly so
+            # the detail page works even before the sink re-materialises them.
+            "integrity": self._integrity_block(ct),
         }
+
+    @staticmethod
+    def _integrity_block(ct) -> dict:
+        fields = {
+            "procedure_type": ct.get("procedure_type"),
+            "tenders_received": ct.get("tenders_received"),
+            "award_criterion_type": ct.get("award_criterion_type"),
+            "submission_deadline": ct.get("submission_deadline"),
+            "is_framework": ct.get("is_framework"),
+            "eu_funded": ct.get("eu_funded"),
+            "funding_programme": ct.get("funding_programme"),
+        }
+        return {**fields, **contract_red_flags(fields)}
+
+    def get_single_bidder_stats(
+        self, country: str | None = None, cpv: str | None = None,
+    ) -> dict:
+        """Single-bidder rate over contracts with a known bidder count,
+        optionally scoped by authority country and/or CPV prefix. The
+        EC Single Market Scoreboard headline indicator."""
+        where = ["c.tenders_received IS NOT NULL"]
+        params: dict = {}
+        if country:
+            where.append("c.country = $country")
+            params["country"] = country
+        if cpv:
+            where.append("c.cpv STARTS WITH $cpv")
+            params["cpv"] = cpv
+        clause = " AND ".join(where)
+        with self._neo4j.session() as session:
+            row = session.run(
+                f"MATCH (c:Contract) WHERE {clause} "
+                "RETURN count(*) AS total, "
+                "count(CASE WHEN c.tenders_received = 1 THEN 1 END) AS single",
+                **params,
+            ).single()
+        total = (row["total"] if row else 0) or 0
+        single = (row["single"] if row else 0) or 0
+        return {
+            "scope": {"country": country, "cpv": cpv},
+            "total": total,
+            "single_bidder": single,
+            "single_bidder_rate": (single / total) if total else None,
+        }
+
+    def get_single_bidder_by_country(self, min_sample: int = 20,
+                                     limit: int = 40) -> list[dict]:
+        """Single-bidder rate per authority country (min_sample contracts
+        for a meaningful rate), highest first — the cross-country
+        benchmark that keeps any one figure honest."""
+        with self._neo4j.session() as session:
+            return session.run(
+                "MATCH (c:Contract) WHERE c.tenders_received IS NOT NULL "
+                "AND c.country IS NOT NULL "
+                "WITH c.country AS country, count(*) AS total, "
+                "count(CASE WHEN c.tenders_received = 1 THEN 1 END) AS single "
+                "WHERE total >= $min_sample "
+                "RETURN country, total, single, "
+                "toFloat(single) / total AS single_bidder_rate "
+                "ORDER BY single_bidder_rate DESC LIMIT $limit",
+                min_sample=min_sample, limit=limit,
+            ).data()
 
     def get_sector_summary(
         self, country: str | None = None, year: int | None = None,

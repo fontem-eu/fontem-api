@@ -42,6 +42,20 @@ class ContractDataSource(ABC):
         """Return aggregated contract values by CPV division."""
 
     @abstractmethod
+    def get_single_bidder_stats(
+        self, country: str | None = None, cpv: str | None = None,
+    ) -> dict:
+        """Single-bidder rate (the EC SMSB headline indicator) over
+        contracts with a known bidder count, optionally scoped."""
+
+    @abstractmethod
+    def get_single_bidder_by_country(
+        self, min_sample: int = 20, limit: int = 40,
+    ) -> list[dict]:
+        """Single-bidder rate per authority country (the cross-country
+        benchmark)."""
+
+    @abstractmethod
     def get_stored_publication_number(self, notice_id: str) -> str | None:
         """Return the TED publication-number stored on the Contract row
         keyed by ``notice_id`` (the eForms UUID), or ``None`` if the
