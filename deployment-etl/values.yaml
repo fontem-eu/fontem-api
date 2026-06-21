@@ -85,3 +85,15 @@ dqAssert:
   runId: "manual"
   family: ""
   deadlineSeconds: 600
+
+# One-off TED contract backfill/re-ingest. Off by default; render with
+# --set tedBackfill.enabled=true --set tedBackfill.year=2026
+# --set tedBackfill.month=1 and apply per month to re-emit a month's
+# notices (e.g. after a parser fix) into the event log. See
+# templates/job-ted-backfill.yaml.
+tedBackfill:
+  enabled: false
+  year: 2026
+  month: 1
+  rescore: true
+  deadlineSeconds: 14400

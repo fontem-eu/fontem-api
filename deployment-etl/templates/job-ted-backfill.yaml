@@ -1,0 +1,89 @@
+{{/*
+One-off TED contract backfill / re-ingest Job.
+
+Same image + secrets as the etl-ted-contracts CronJob, but a one-shot
+Job that re-emits a SPECIFIC year+month into the event log — used after
+a parser fix (e.g. the 0-tenders-unrecorded guard) to correct already-
+ingested contracts without waiting for the daily schedule. Emit-only:
+the loader writes events.entity_events; the sinks materialise them.
+
+  helm template fontem-api-etl deployment-etl/ \
+    --set tedBackfill.enabled=true --set version=<image-tag> \
+    --set tedBackfill.year=2026 --set tedBackfill.month=1 \
+    -s templates/job-ted-backfill.yaml | kubectl -n <namespace> apply -f -
+
+Run once per month (Jan..Jun for the 2026 backfill). Each Job name is
+keyed by year+month so months don't collide; bump or delete to re-run.
+Always run against fontem-shared (staging) first — never prod directly.
+*/}}
+{{- if .Values.tedBackfill.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ted-backfill-{{ .Values.tedBackfill.year }}-{{ printf "%02d" (int .Values.tedBackfill.month) }}
+  labels:
+    app: ted-backfill
+    component: etl
+spec:
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: {{ .Values.tedBackfill.deadlineSeconds | default 14400 }}
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ted-backfill
+        component: etl
+      annotations:
+        linkerd.io/inject: disabled
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: ted-backfill
+          image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
+          imagePullPolicy: Always
+          env:
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_URI
+            - name: NEO4J_USER
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_USER
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
+            - name: EVENTS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fontem-postgres-credentials
+                  key: EVENTS_DATABASE_URL
+            - name: CRONJOB_NAME
+              value: "etl-ted-contracts-backfill"
+            - name: IMAGE_TAG
+              value: {{ .Values.version | quote }}
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          command:
+            - python
+            - -m
+            - src.etl.load_ted_contracts
+            - --year
+            - {{ .Values.tedBackfill.year | quote }}
+            - --month
+            - {{ .Values.tedBackfill.month | quote }}
+            {{- if .Values.tedBackfill.rescore }}
+            - --rescore
+            {{- end }}
+{{- end }}
