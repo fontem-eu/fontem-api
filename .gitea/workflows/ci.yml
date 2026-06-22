@@ -48,6 +48,10 @@ jobs:
     runs-on: python
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so SonarQube can blame-diff new vs existing
+          # code; a shallow clone makes it treat everything as new.
+          fetch-depth: 0
       - uses: actions/checkout@v4
         with:
           repository: void42/fontem-ci

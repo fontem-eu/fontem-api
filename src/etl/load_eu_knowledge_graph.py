@@ -140,17 +140,25 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):  # pylint: d
             or ""
         ).strip()
 
-        beneficiary_gmr_id = None
         ben_uri = row.get("Beneficiary_Unique_Identifier", "")
         ben_qid = _extract_qid(ben_uri)
-        if ben_qid:
+        # Authoritative beneficiary name straight from the Kohesio export.
+        beneficiary_name = (row.get("Beneficiary_Name") or "").strip()[:300] or None
+        # Canonical company gmr_id: mint from the beneficiary name + country —
+        # the same name-keyed scheme other loaders use — so a beneficiary that
+        # is also a TED contractor / GLEIF entity resolves to the SAME :Company
+        # node instead of a kohesio-only twin (the old `kohesio_ben:<qid>`
+        # namespace guaranteed isolation). QID is kept as beneficiary_qid for
+        # provenance + as a last-resort key when the export gives no name.
+        beneficiary_gmr_id = None
+        if beneficiary_name:
+            beneficiary_gmr_id = str(
+                gmr_id.from_name(country_code or "EU", beneficiary_name)
+            )
+        elif ben_qid:
             beneficiary_gmr_id = str(
                 gmr_id.from_name(country_code or "EU", f"kohesio_ben:{ben_qid}")
             )
-        # Authoritative beneficiary name straight from the Kohesio export
-        # (Beneficiary_Name column) — used to resolve-or-create the
-        # beneficiary :Company the disclosure's company_gmr_id points at.
-        beneficiary_name = (row.get("Beneficiary_Name") or "").strip()[:300] or None
 
         # project_id remains in the parsed record as a stable
         # UUID5 derived from the QID — not used by the emit path
@@ -286,7 +294,7 @@ def main(argv=None):
         help="Comma-separated country codes (default: all EU-27)",
     )
     parser.add_argument(
-        "--since", default="2025-09-01",
+        "--since", default="2021-01-01",
         help="Only ingest projects with start_date >= YYYY-MM-DD",
     )
     args = parser.parse_args(argv)
@@ -310,6 +318,7 @@ def main(argv=None):
     else:
         countries = [c.strip() for c in args.countries.split(",") if c.strip()]
         logger.info("Downloading %d countries (since=%s)", len(countries), args.since)
+        failed: list[str] = []
         for cc in countries:
             try:
                 data = download_country_csv(cc)
@@ -317,7 +326,15 @@ def main(argv=None):
                 logger.info("  %s: %d projects after date filter", cc, len(records))
                 all_records.extend(records)
             except httpx.HTTPError:
-                logger.warning("  %s: download failed, skipping", cc)
+                logger.warning("  %s: download failed", cc)
+                failed.append(cc)
+        # A half-empty load must not pass as success. A couple of countries
+        # legitimately 404 from time to time; more than that is a real outage.
+        if len(failed) > 3:
+            logger.error(
+                "%d/%d country downloads failed (%s) — refusing to emit a "
+                "partial load", len(failed), len(countries), ",".join(failed))
+            sys.exit(1)
 
     logger.info("Total: %d projects to emit", len(all_records))
 

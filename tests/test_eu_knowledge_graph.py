@@ -324,3 +324,28 @@ def test_parse_captures_beneficiary_name():
     assert len(parsed) == 1
     assert parsed[0]["beneficiary_name"] == "Camara Municipal de Lisboa"
     assert parsed[0]["beneficiary_gmr_id"]  # derived from the Wikibase QID
+
+
+def test_beneficiary_gmr_id_is_canonical_from_name():
+    """The beneficiary company id is minted from name+country (the canonical
+    scheme), so a cohesion beneficiary that is also a TED/GLEIF company
+    resolves to the same node — not a kohesio-only twin."""
+    from src.etl import gmr_id  # pylint: disable=import-outside-toplevel
+    row = {
+        "Operation_Unique_Identifier": "https://linkedopendata.eu/entity/Q111",
+        "Beneficiary_Unique_Identifier": "https://linkedopendata.eu/entity/Q222",
+        "Beneficiary_Name": "Siemens AG",
+        "CountryCode": "DE",
+        "Operation_Start_Date": "01/03/2024",
+    }
+    import csv  # pylint: disable=import-outside-toplevel
+    import io  # pylint: disable=import-outside-toplevel
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(row.keys()))
+    writer.writeheader()
+    writer.writerow(row)
+    [rec] = list(parse_kohesio_csv(buf.getvalue().encode(), since="2021-01-01"))
+    expected = str(gmr_id.from_name("DEU", "Siemens AG"))
+    assert rec["beneficiary_gmr_id"] == expected
+    assert "kohesio_ben" not in rec["beneficiary_gmr_id"]
+    assert rec["beneficiary_qid"] == "Q222"

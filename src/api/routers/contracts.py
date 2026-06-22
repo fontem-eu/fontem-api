@@ -6,6 +6,8 @@ contract detail, sector summary, and unified search.
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 import httpx
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
@@ -161,8 +163,8 @@ def sector_summary(
 @router.get("/contracts/single-bidder-rate")
 @inject
 def single_bidder_rate(
-    country: str | None = Query(None),
-    cpv: str | None = Query(None),
+    country: Annotated[str | None, Query()] = None,
+    cpv: Annotated[str | None, Query()] = None,
     *,
     source: FromDishka[ContractDataSource],
 ):
@@ -175,8 +177,8 @@ def single_bidder_rate(
 @router.get("/contracts/single-bidder-by-country")
 @inject
 def single_bidder_by_country(
-    min_sample: int = Query(20, ge=1),
-    limit: int = Query(40, ge=1, le=200),
+    min_sample: Annotated[int, Query(ge=1)] = 20,
+    limit: Annotated[int, Query(ge=1, le=200)] = 40,
     *,
     source: FromDishka[ContractDataSource],
 ):
