@@ -498,6 +498,45 @@ ASSERTIONS: list[Assertion] = [
         "Bidder count drives the single-bidder indicator; some notices omit "
         "the submission statistics, so the bar is lower than procedure_type.",
     ),
+    Assertion(
+        "coverage.cohesion_min_projects", COVERAGE,
+        "EU cohesion (Kohesio) carries a meaningful project count (>=35k)",
+        WARN, "cypher",
+        "MATCH (d:Disclosure {system:'eu-cohesion'}) RETURN count(d) AS found",
+        at_least("found", 35000, "cohesion disclosures"),
+        "Kohesio 2021-27 across all 27 members is far more than the broken "
+        "partial load. A low count means countries failed to download and "
+        "were silently skipped (load_eu_knowledge_graph.py swallows the "
+        "per-country HTTPError and still exits success).",
+    ),
+    Assertion(
+        "coverage.cohesion_country_coverage", COVERAGE,
+        "EU cohesion spans >=20 of 27 members (>=50 beneficiaries each)",
+        WARN, "cypher",
+        "MATCH (d:Disclosure {system:'eu-cohesion'})-[:FILED_BY]->(c:Company) "
+        "WHERE c.country IS NOT NULL "
+        "WITH c.country AS country, count(*) AS n WHERE n >= 50 "
+        "RETURN count(country) AS found",
+        at_least("found", 20, "EU members with >=50 cohesion beneficiaries"),
+        "Silent per-country download failures drop big members (Italy is "
+        "absent; AUT/DNK/HRV/LUX/ROU/SWE land ~1 record). A real load "
+        "reaches most of the 27.",
+    ),
+    Assertion(
+        "coverage.cohesion_beneficiary_linkage", COVERAGE,
+        "EU cohesion beneficiaries link into the company graph (>=20%)",
+        WARN, "cypher",
+        "MATCH (d:Disclosure {system:'eu-cohesion'})-[:FILED_BY]->(c:Company) "
+        "WITH DISTINCT c, size([(c)--() | 1]) AS degree "
+        "WITH count(c) AS total, "
+        "sum(CASE WHEN degree > 1 THEN 1 ELSE 0 END) AS covered "
+        "RETURN total, covered",
+        min_coverage(0.20, "cohesion beneficiaries connected to the graph"),
+        "Beneficiary gmr_id is minted via a bespoke kohesio_ben:Q<qid> scheme "
+        "no other loader uses, so beneficiaries are isolated twins with no "
+        "link to the canonical company graph - cohesion spend can't be joined "
+        "to TED / GLEIF / financials.",
+    ),
 
     # ---- Family G: golden facts (BLOCK, known-true ground truth) -----------
     # Relations/entities we KNOW are true and must exist. A missing one means

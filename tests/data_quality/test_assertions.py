@@ -161,11 +161,11 @@ def _all_clean_cypher(_q):
     # Every catalog cypher query aliases its count to `violations`/`total`;
     # zero violations + a benign total/lag satisfies all evaluators.
     return {"violations": 0, "total": 0, "covered": 0, "lag": 0, "dl": 0,
-            "detail": "", "found": 1000}
+            "detail": "", "found": 100000}
 
 
 def _all_clean_sql(_q):
-    return {"violations": 0, "lag": 0, "dl": 0, "detail": "", "found": 1000}
+    return {"violations": 0, "lag": 0, "dl": 0, "detail": "", "found": 100000}
 
 
 def test_run_catalog_all_pass():
