@@ -287,6 +287,47 @@ class GraphDataQualitySource(DataQualitySource):
                 fields[field] = n
             return {"total": total, "missing": fields}
 
+    def get_contracts_integrity(self) -> dict:
+        """Tender-integrity metrics for the DQ dashboard: bidder-count and
+        procedure-type coverage, the single-bidder rate (EC SMSB headline),
+        the red-flag distribution and per-flag counts. Reads the flags the
+        sink materialises via the shared keystone (contract_red_flags)."""
+        with self._neo4j.session() as session:
+            total = session.run(
+                "MATCH (ct:Contract) RETURN count(ct) AS n").single()["n"]
+            with_bidders = session.run(
+                "MATCH (ct:Contract) WHERE ct.tenders_received IS NOT NULL "
+                "RETURN count(ct) AS n").single()["n"]
+            single = session.run(
+                "MATCH (ct:Contract) WHERE ct.tenders_received = 1 "
+                "RETURN count(ct) AS n").single()["n"]
+            with_proc = session.run(
+                "MATCH (ct:Contract) WHERE ct.procedure_type IS NOT NULL "
+                "RETURN count(ct) AS n").single()["n"]
+            flag_dist = session.run(
+                "MATCH (ct:Contract) WHERE ct.integrity_red_flags IS NOT NULL "
+                "RETURN ct.integrity_red_flags AS flags, count(*) AS contracts "
+                "ORDER BY flags").data()
+            flags = {}
+            for prop, key in (
+                ("is_single_bidder", "single_bidder"),
+                ("is_non_open", "non_open"),
+                ("is_no_call", "no_call"),
+                ("is_price_only", "price_only"),
+            ):
+                flags[key] = session.run(
+                    f"MATCH (ct:Contract) WHERE ct.{prop} = true "
+                    "RETURN count(ct) AS n").single()["n"]
+        return {
+            "total": total,
+            "bidder_count_coverage": (with_bidders / total) if total else None,
+            "procedure_type_coverage": (with_proc / total) if total else None,
+            "single_bidder": single,
+            "single_bidder_rate": (single / with_bidders) if with_bidders else None,
+            "red_flag_distribution": flag_dist,
+            "flags": flags,
+        }
+
     def get_contracts_value_timeline(self) -> list[dict]:
         """Daily total EUR value of contracts (confidence-gated, so a
         flagged outlier never spikes a day's total)."""

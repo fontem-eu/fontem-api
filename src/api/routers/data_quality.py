@@ -93,6 +93,14 @@ def contracts_value_timeline(source: FromDishka[DataQualitySource]):
     return source.get_contracts_value_timeline()
 
 
+@router.get("/contracts/integrity")
+@inject
+def contracts_integrity(source: FromDishka[DataQualitySource]):
+    """Tender-integrity metrics: bidder-count / procedure-type coverage,
+    single-bidder rate, and the red-flag distribution."""
+    return source.get_contracts_integrity()
+
+
 @router.get("/contracts/value-quality")
 @inject
 def contracts_value_quality(source: FromDishka[DataQualitySource]):

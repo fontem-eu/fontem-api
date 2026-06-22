@@ -47,6 +47,17 @@ class MockDataQualitySource(DataQualitySource):
             "authority_count": 10,
         }
 
+    def get_contracts_integrity(self):
+        return {
+            "total": 100, "bidder_count_coverage": 0.75,
+            "procedure_type_coverage": 0.99, "single_bidder": 30,
+            "single_bidder_rate": 0.4,
+            "red_flag_distribution": [{"flags": 0, "contracts": 40},
+                                      {"flags": 2, "contracts": 60}],
+            "flags": {"single_bidder": 30, "non_open": 50,
+                      "no_call": 10, "price_only": 20},
+        }
+
 
 def test_overview_returns_all_sections():
     """GET /data-quality returns all four sections."""
@@ -148,3 +159,38 @@ def test_connectedness_endpoint_with_data():
     # frontend relies on this for chart labels.
     buckets = [b["bucket"] for b in company["histogram"]]
     assert buckets == ["0", "1", "2-5", "6-10", "11-50", "51-100", "101-500", "500+"]
+
+
+def test_contracts_integrity_endpoint():
+    """GET /data-quality/contracts/integrity returns the integrity metrics."""
+    client = make_test_client(data_quality_source=MockDataQualitySource())
+    resp = client.get("/data-quality/contracts/integrity")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["single_bidder_rate"] == 0.4
+    assert body["flags"]["single_bidder"] == 30
+    assert body["red_flag_distribution"][1]["contracts"] == 60
+
+
+def test_graph_get_contracts_integrity():
+    """The graph impl computes coverage + single-bidder rate + flag dist."""
+    from unittest.mock import MagicMock  # pylint: disable=import-outside-toplevel
+    from src.data.graph.graph_data_quality import (  # pylint: disable=import-outside-toplevel
+        GraphDataQualitySource)
+    session = MagicMock()
+    result = MagicMock()
+    result.single.return_value = {"n": 10}
+    result.data.return_value = [{"flags": 0, "contracts": 6},
+                                {"flags": 2, "contracts": 4}]
+    session.run.return_value = result
+    fake = MagicMock()
+    fake.session.return_value.__enter__ = MagicMock(return_value=session)
+    fake.session.return_value.__exit__ = MagicMock(return_value=False)
+    src = GraphDataQualitySource(neo4j_client=fake, virtuoso_client=None)
+    out = src.get_contracts_integrity()
+    assert out["total"] == 10
+    assert out["bidder_count_coverage"] == 1.0
+    assert out["single_bidder_rate"] == 1.0
+    assert out["red_flag_distribution"][1]["contracts"] == 4
+    assert out["flags"]["price_only"] == 10

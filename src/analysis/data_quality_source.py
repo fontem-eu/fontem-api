@@ -43,6 +43,7 @@ class DataQualitySource(ABC):
     def get_contracts_currency_quality(self) -> dict: return {}
     def get_contracts_value_timeline(self) -> list[dict]: return []
     def get_contracts_value_quality(self) -> dict: return {}
+    def get_contracts_integrity(self) -> dict: return {}
     def get_gleif_stats(self) -> dict: return {}
     def get_edgar_stats(self) -> dict: return {}
     def get_esef_stats(self) -> dict: return {}
