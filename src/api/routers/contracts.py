@@ -45,6 +45,19 @@ def company_contracts(
     )
 
 
+@router.get("/companies/{gmr_id}/cohesion-grants")
+@inject
+def company_cohesion_grants(
+    gmr_id: str,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    *,
+    source: FromDishka[ContractDataSource],
+):
+    """EU cohesion (Kohesio) grants attained by a company — amount, fund,
+    programme, dates — mirroring the contracts panel on the funding side."""
+    return source.get_company_cohesion_grants(gmr_id, limit=limit)
+
+
 @router.get("/companies/{gmr_id}")
 @inject
 def company_profile(
@@ -335,7 +348,35 @@ def unified_search(  # pylint: disable=too-many-locals,unused-argument
                 q=q, seen=list(seen), remaining=remaining,
             ).data()
 
-        company_rows = listed + procurement
+        # 3. Cohesion-only beneficiaries (no listing, no contract) — EU
+        # cohesion (Kohesio) grant recipients. They are canonical :Company
+        # nodes now, so make them findable. Excludes the unnamed 'nan'
+        # collapse node.
+        seen |= {r["gmr_id"] for r in procurement}
+        remaining = max(0, limit - len(listed) - len(procurement))
+        cohesion = []
+        if remaining > 0:
+            cohesion = session.run(
+                "MATCH (c:Company)<-[:FILED_BY]-"
+                "(:Disclosure {system:'eu-cohesion'}) "
+                "WHERE NOT c.gmr_id IN $seen "
+                "  AND toLower(c.name) CONTAINS toLower($q) "
+                "  AND toLower(trim(coalesce(c.name, ''))) NOT IN "
+                "      ['nan', '', 'n/a', 'none', 'null', '-'] "
+                "WITH DISTINCT c, "
+                "  CASE WHEN toLower(c.name) = toLower($q) THEN 4 "
+                "       WHEN toLower(c.name) STARTS WITH toLower($q) THEN 2 "
+                "       ELSE 0 END AS rank "
+                "RETURN c.gmr_id AS gmr_id, c.name AS name, "
+                "  c.country AS country, "
+                "  null AS ticker, null AS exchange, null AS currency, "
+                "  null AS is_active, rank "
+                "ORDER BY rank DESC, size(c.name) ASC, c.name ASC "
+                "LIMIT $remaining",
+                q=q, seen=list(seen), remaining=remaining,
+            ).data()
+
+        company_rows = listed + procurement + cohesion
         for r in company_rows:
             r["symbol"] = r.get("ticker")
             r["search_name"] = (

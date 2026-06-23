@@ -42,6 +42,12 @@ class ContractDataSource(ABC):
         """Return aggregated contract values by CPV division."""
 
     @abstractmethod
+    def get_company_cohesion_grants(
+        self, gmr_id: str, limit: int = 50,
+    ) -> dict:
+        """EU cohesion grants a company attained (FILED_BY disclosures)."""
+
+    @abstractmethod
     def get_single_bidder_stats(
         self, country: str | None = None, cpv: str | None = None,
     ) -> dict:

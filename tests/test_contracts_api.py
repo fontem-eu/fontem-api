@@ -189,7 +189,8 @@ class TestUnifiedSearch:
                      "ticker": None, "exchange": None, "currency": None,
                      "is_active": True},
                 ]
-            elif call_count["n"] == 2:
+            elif call_count["n"] in (2, 3):
+                # procurement-only companies + cohesion beneficiaries
                 result.data.return_value = []
             else:
                 result.data.return_value = [
@@ -525,3 +526,58 @@ def test_get_contract_detail_missing_returns_none():
     src._neo4j.session.return_value.__exit__ = MagicMock(  # pylint: disable=protected-access
         return_value=False)
     assert src.get_contract_detail("nope") is None
+
+
+def test_get_company_cohesion_grants_source():
+    """The source returns a company's cohesion grants + summary."""
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    company = {"name": "Acme Sp. z o.o.", "country": "POL"}
+    grants = [{"title": "Digitalisation", "eu_contribution": 59877.7,
+               "total_budget": 93925.81, "fund": "ERDF",
+               "programme": "Competitiveness PL", "start_date": "2024-03-01",
+               "end_date": None, "nuts": "PL21", "year": 2024}]
+    summary = {"grant_count": 1, "total_eu": 59877.7}
+    calls = [MagicMock(), MagicMock(), MagicMock()]
+    calls[0].single.return_value = company
+    calls[1].data.return_value = grants
+    calls[2].single.return_value = summary
+    session.run.side_effect = calls
+    src._neo4j.session.return_value.__enter__ = MagicMock(return_value=session)  # pylint: disable=protected-access
+    src._neo4j.session.return_value.__exit__ = MagicMock(return_value=False)  # pylint: disable=protected-access
+    out = src.get_company_cohesion_grants("g1")
+    assert out["grant_count"] == 1
+    assert out["total_eu_contribution"] == 59877.7
+    assert out["grants"][0]["fund"] == "ERDF"
+    assert out["name"] == "Acme Sp. z o.o."
+
+
+def test_get_company_cohesion_grants_unknown_company():
+    """Unknown company → empty grants, count 0."""
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    session.run.return_value.single.return_value = None
+    src._neo4j.session.return_value.__enter__ = MagicMock(return_value=session)  # pylint: disable=protected-access
+    src._neo4j.session.return_value.__exit__ = MagicMock(return_value=False)  # pylint: disable=protected-access
+    out = src.get_company_cohesion_grants("nope")
+    assert out["grant_count"] == 0 and out["grants"] == []
+
+
+def test_cohesion_grants_endpoint():
+    """GET /companies/{id}/cohesion-grants returns the source result."""
+    mock = _mock_contract_source()
+    mock.get_company_cohesion_grants.return_value = {
+        "gmr_id": "g1", "name": "Acme", "country": "POL",
+        "grants": [{"title": "X", "fund": "ERDF"}],
+        "grant_count": 1, "total_eu_contribution": 59877.7,
+    }
+    client = make_test_client(contract_source=mock)
+    resp = client.get("/companies/g1/cohesion-grants")
+    cleanup_dishka()
+    assert resp.status_code == 200
+    assert resp.json()["grant_count"] == 1
+    assert resp.json()["grants"][0]["fund"] == "ERDF"

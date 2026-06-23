@@ -195,6 +195,50 @@ class GraphContractSource(ContractDataSource):
             "contracts": contracts,
         }
 
+    def get_company_cohesion_grants(
+        self, gmr_id: str, limit: int = 50,
+    ) -> dict:
+        """EU cohesion (Kohesio) grants attained by a company — the
+        eu-cohesion disclosures FILED_BY it, with the EU contribution, fund,
+        programme and dates. Mirrors get_company_contracts on the funding
+        side. Unnamed-beneficiary 'nan' nodes are excluded."""
+        with self._neo4j.session() as session:
+            company = session.run(
+                "MATCH (c:Company {gmr_id: $gid}) "
+                "RETURN c.name AS name, c.country AS country",
+                gid=gmr_id,
+            ).single()
+            if not company:
+                return {"gmr_id": gmr_id, "grants": [], "grant_count": 0,
+                        "total_eu_contribution": 0}
+            rows = session.run(
+                "MATCH (:Company {gmr_id: $gid})<-[:FILED_BY]-"
+                "(d:Disclosure {system:'eu-cohesion'}) "
+                "RETURN d.title AS title, "
+                "  d.detail_eu_contribution AS eu_contribution, "
+                "  d.detail_total_budget AS total_budget, "
+                "  d.detail_fund AS fund, d.detail_programme AS programme, "
+                "  d.detail_start_date AS start_date, "
+                "  d.detail_end_date AS end_date, "
+                "  d.detail_nuts_code AS nuts, d.year AS year "
+                "ORDER BY coalesce(d.detail_start_date, toString(d.year)) DESC "
+                "LIMIT $limit",
+                gid=gmr_id, limit=limit,
+            ).data()
+            summary = session.run(
+                "MATCH (:Company {gmr_id: $gid})<-[:FILED_BY]-"
+                "(d:Disclosure {system:'eu-cohesion'}) "
+                "RETURN count(d) AS grant_count, "
+                "  sum(coalesce(d.detail_eu_contribution, 0)) AS total_eu",
+                gid=gmr_id,
+            ).single()
+        return {
+            "gmr_id": gmr_id, "name": company["name"],
+            "country": company["country"], "grants": rows,
+            "grant_count": summary["grant_count"],
+            "total_eu_contribution": summary["total_eu"],
+        }
+
     def get_contract_detail(
         self, notice_id: str, lang: str | None = None,
     ) -> dict | None:
