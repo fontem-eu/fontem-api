@@ -537,6 +537,19 @@ ASSERTIONS: list[Assertion] = [
         "link to the canonical company graph - cohesion spend can't be joined "
         "to TED / GLEIF / financials.",
     ),
+    Assertion(
+        "values.cohesion_no_unnamed_collapse", VALUES,
+        "No cohesion beneficiary collapsed into a 'nan'/empty-name company",
+        BLOCK, "cypher",
+        "MATCH (c:Company)<-[:FILED_BY]-(:Disclosure {system:'eu-cohesion'}) "
+        "WHERE toLower(trim(coalesce(c.name, ''))) IN "
+        "['nan', '', 'n/a', 'none', 'null', '-'] "
+        "RETURN count(DISTINCT c) AS violations",
+        zero_violations("cohesion beneficiaries collapsed under a missing name"),
+        "Kohesio writes missing names as 'nan'; minting from_name('nan') merges "
+        "thousands of unrelated beneficiaries into one node. The loader falls "
+        "back to the per-QID key so they stay distinct.",
+    ),
 
     # ---- Family G: golden facts (BLOCK, known-true ground truth) -----------
     # Relations/entities we KNOW are true and must exist. A missing one means

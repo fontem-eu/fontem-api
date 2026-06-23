@@ -349,3 +349,34 @@ def test_beneficiary_gmr_id_is_canonical_from_name():
     assert rec["beneficiary_gmr_id"] == expected
     assert "kohesio_ben" not in rec["beneficiary_gmr_id"]
     assert rec["beneficiary_qid"] == "Q222"
+
+
+def test_nan_beneficiary_does_not_collapse():
+    """Missing names (Kohesio writes 'nan') must not collapse into one
+    from_name('nan') node — they fall back to the per-QID key and stay
+    distinct from a really-named beneficiary."""
+    import csv  # pylint: disable=import-outside-toplevel
+    import io  # pylint: disable=import-outside-toplevel
+    from src.etl import gmr_id  # pylint: disable=import-outside-toplevel
+
+    def parse_one(name, qid):
+        row = {
+            "Operation_Unique_Identifier": "https://x/entity/Q1",
+            "Beneficiary_Unique_Identifier": f"https://x/entity/{qid}",
+            "Beneficiary_Name": name, "CountryCode": "PL",
+            "Operation_Start_Date": "01/03/2024",
+        }
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=list(row.keys()))
+        writer.writeheader()
+        writer.writerow(row)
+        return list(parse_kohesio_csv(buf.getvalue().encode(),
+                                      since="2021-01-01"))[0]
+
+    nan_a = parse_one("nan", "Q9")
+    nan_b = parse_one("nan", "Q10")
+    named = parse_one("Real Co", "Q9")
+    assert nan_a["beneficiary_name"] is None
+    assert nan_a["beneficiary_gmr_id"] != nan_b["beneficiary_gmr_id"]   # distinct per QID
+    assert nan_a["beneficiary_gmr_id"] != named["beneficiary_gmr_id"]
+    assert named["beneficiary_gmr_id"] == str(gmr_id.from_name("POL", "Real Co"))

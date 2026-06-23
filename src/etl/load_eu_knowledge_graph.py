@@ -144,6 +144,14 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):  # pylint: d
         ben_qid = _extract_qid(ben_uri)
         # Authoritative beneficiary name straight from the Kohesio export.
         beneficiary_name = (row.get("Beneficiary_Name") or "").strip()[:300] or None
+        # Kohesio writes missing names as the literal "nan" (pandas NaN);
+        # a name-keyed mint would collapse every unnamed beneficiary into
+        # one node. Treat those as no-name so they fall back to the
+        # per-QID key and stay distinct.
+        if beneficiary_name and beneficiary_name.lower() in (
+            "nan", "n/a", "none", "null", "-",
+        ):
+            beneficiary_name = None
         # Canonical company gmr_id: mint from the beneficiary name + country —
         # the same name-keyed scheme other loaders use — so a beneficiary that
         # is also a TED contractor / GLEIF entity resolves to the SAME :Company
