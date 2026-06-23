@@ -239,6 +239,21 @@ class TestUnifiedSearch:
         assert "STARTS WITH toLower($q)" in source
         assert "ORDER BY rank DESC" in source
 
+    def test_cohesion_filter_uses_valid_cypher_negation(self):
+        """Regression: the cohesion branch filtered junk names with
+        `<expr> NOT IN [...]`, but Cypher has no `NOT IN` operator (that's
+        SQL) — it must be `NOT <expr> IN [...]`. The broken form raised
+        CypherSyntaxError, but only when this branch ran (listed+procurement
+        < limit), so it slipped past common queries and 500'd on narrower
+        ones (smoke MOBILE-2, q="Siemens AG"). The mocked Neo4j can't catch
+        invalid Cypher, so guard the query shape here.
+        """
+        from src.api.routers import contracts as contracts_router  # pylint: disable=import-outside-toplevel
+        import inspect  # pylint: disable=import-outside-toplevel
+        source = inspect.getsource(contracts_router.unified_search)
+        assert ") NOT IN" not in source, "Cypher has no `NOT IN`; use `NOT <expr> IN`"
+        assert "NOT toLower(trim(coalesce(c.name, ''))) IN" in source
+
     def test_rank_field_not_leaked_to_client(self):
         """`rank` is internal to the Cypher; clients see ordered rows."""
         mock = _mock_contract_source()

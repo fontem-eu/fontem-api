@@ -361,7 +361,11 @@ def unified_search(  # pylint: disable=too-many-locals,unused-argument
                 "(:Disclosure {system:'eu-cohesion'}) "
                 "WHERE NOT c.gmr_id IN $seen "
                 "  AND toLower(c.name) CONTAINS toLower($q) "
-                "  AND toLower(trim(coalesce(c.name, ''))) NOT IN "
+                # Cypher has no `x NOT IN list` operator (that's SQL) — it must
+                # be `NOT x IN list`. The old form raised CypherSyntaxError, but
+                # only when this branch ran (listed+procurement < limit), so it
+                # slipped past common queries and 500'd on narrower ones.
+                "  AND NOT toLower(trim(coalesce(c.name, ''))) IN "
                 "      ['nan', '', 'n/a', 'none', 'null', '-'] "
                 "WITH DISTINCT c, "
                 "  CASE WHEN toLower(c.name) = toLower($q) THEN 4 "
