@@ -500,10 +500,10 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "coverage.cohesion_min_projects", COVERAGE,
-        "EU cohesion (Kohesio) carries a meaningful project count (>=35k)",
+        "EU cohesion (Kohesio) carries a meaningful project count (>=150k)",
         WARN, "cypher",
         "MATCH (d:Disclosure {system:'eu-cohesion'}) RETURN count(d) AS found",
-        at_least("found", 35000, "cohesion disclosures"),
+        at_least("found", 150000, "cohesion disclosures"),
         "Kohesio 2021-27 across all 27 members is far more than the broken "
         "partial load. A low count means countries failed to download and "
         "were silently skipped (load_eu_knowledge_graph.py swallows the "
