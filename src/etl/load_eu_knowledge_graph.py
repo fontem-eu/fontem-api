@@ -206,6 +206,61 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):  # pylint: d
         }
 
 
+def _programme_code(programme: str | None) -> str | None:
+    return (str(gmr_id.from_name("EU", f"cohesion-programme:{programme}"))
+            if programme else None)
+
+
+def _fund_code(fund: str | None) -> str | None:
+    return str(gmr_id.from_name("EU", f"cohesion-fund:{fund}")) if fund else None
+
+
+def emit_programme_fund_nodes(log: EventLog, records: list[dict]) -> tuple[int, int]:
+    """Emit the :Programme + :Fund taxonomy nodes and the
+    Programme-[:FINANCED_BY]->Fund edges (deduped) BEFORE the disclosures,
+    so the disclosure's UNDER_PROGRAMME MATCH resolves. Kohesio gives the
+    programme + fund as strings per project; this lifts them into reference
+    nodes (the managing authority is not in the export)."""
+    seen_p: set[str] = set()
+    seen_f: set[str] = set()
+    seen_link: set[tuple[str, str]] = set()
+    batch_id = uuid.uuid4()
+    with log.batch(batch_id, producer="load_eu_knowledge_graph") as emit:
+        for rec in records:
+            programme, fund = rec.get("programme"), rec.get("fund")
+            pcode, fcode = _programme_code(programme), _fund_code(fund)
+            if fcode and fcode not in seen_f:
+                seen_f.add(fcode)
+                emit.upsert(
+                    "UpsertTaxonomyCode",
+                    iri=f"http://data.fontem.eu/id/Fund/{fcode}",
+                    domain="cohesion",
+                    payload=builders.upsert_taxonomy_code(
+                        system="fund", code=fcode, label=fund),
+                )
+            if pcode and pcode not in seen_p:
+                seen_p.add(pcode)
+                emit.upsert(
+                    "UpsertTaxonomyCode",
+                    iri=f"http://data.fontem.eu/id/Programme/{pcode}",
+                    domain="cohesion",
+                    payload=builders.upsert_taxonomy_code(
+                        system="programme", code=pcode, label=programme),
+                )
+            if pcode and fcode and (pcode, fcode) not in seen_link:
+                seen_link.add((pcode, fcode))
+                emit.upsert(
+                    "UpsertRelationship",
+                    iri=f"http://data.fontem.eu/id/Programme/{pcode}",
+                    domain="cohesion",
+                    payload=builders.upsert_relationship(
+                        src_iri=f"http://data.fontem.eu/id/Programme/{pcode}",
+                        dst_iri=f"http://data.fontem.eu/id/Fund/{fcode}",
+                        predicate="FINANCED_BY"),
+                )
+    return len(seen_p), len(seen_f)
+
+
 def emit_disclosure_events(log: EventLog, records: list[dict]) -> dict:
     """Emit one UpsertDisclosure per project. Chunked into
     EMIT_CHUNK-sized batches so each Postgres transaction stays
@@ -259,6 +314,8 @@ def emit_disclosure_events(log: EventLog, records: list[dict]) -> dict:
                     v = rec.get(k)
                     if v not in (None, ""):
                         details[k] = v
+                if pcode := _programme_code(rec.get("programme")):
+                    details["programme_code"] = pcode
                 emit.upsert(
                     "UpsertDisclosure",
                     iri=(
@@ -353,6 +410,8 @@ def main(argv=None):
     log = EventLog.from_env()
     t0 = time.time()
     try:
+        logger.info("Emitted %d programmes + %d funds",
+                    *emit_programme_fund_nodes(log, all_records))
         summary = emit_disclosure_events(log, all_records)
     finally:
         log.close()

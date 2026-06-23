@@ -541,14 +541,20 @@ ASSERTIONS: list[Assertion] = [
         "values.cohesion_no_unnamed_collapse", VALUES,
         "No cohesion beneficiary collapsed into a 'nan'/empty-name company",
         BLOCK, "cypher",
-        "MATCH (c:Company)<-[:FILED_BY]-(:Disclosure {system:'eu-cohesion'}) "
+        "MATCH (c:Company)<-[:FILED_BY]-(d:Disclosure {system:'eu-cohesion'}) "
         "WHERE toLower(trim(coalesce(c.name, ''))) IN "
         "['nan', '', 'n/a', 'none', 'null', '-'] "
+        "WITH c, count(DISTINCT d.detail_beneficiary_qid) AS qids "
+        "WHERE qids > 1 "
         "RETURN count(DISTINCT c) AS violations",
-        zero_violations("cohesion beneficiaries collapsed under a missing name"),
+        zero_violations("distinct cohesion beneficiaries collapsed under one "
+                        "missing-name node"),
         "Kohesio writes missing names as 'nan'; minting from_name('nan') merges "
-        "thousands of unrelated beneficiaries into one node. The loader falls "
-        "back to the per-QID key so they stay distinct.",
+        "distinct beneficiaries (different QIDs) into one node. The loader keys "
+        "the unnamed by their QID so they stay separate -- this flags a "
+        "missing-name node only when it still spans >1 distinct beneficiary "
+        "QID (the collapse signature), not the legitimately-unnamed-but-"
+        "distinct nodes that mere emptiness would over-count.",
     ),
 
     # ---- Family G: golden facts (BLOCK, known-true ground truth) -----------

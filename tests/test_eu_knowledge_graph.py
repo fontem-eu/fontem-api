@@ -12,6 +12,8 @@ import pytest
 from src.etl.load_eu_knowledge_graph import (
     _normalize_date,
     parse_kohesio_csv,
+    emit_disclosure_events,
+    emit_programme_fund_nodes,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "kohesio"
@@ -380,3 +382,48 @@ def test_nan_beneficiary_does_not_collapse():
     assert nan_a["beneficiary_gmr_id"] != nan_b["beneficiary_gmr_id"]   # distinct per QID
     assert nan_a["beneficiary_gmr_id"] != named["beneficiary_gmr_id"]
     assert named["beneficiary_gmr_id"] == str(gmr_id.from_name("POL", "Real Co"))
+
+
+def _emit_log():
+    from unittest.mock import MagicMock  # pylint: disable=import-outside-toplevel
+    log = MagicMock()
+    emit = MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    return log, emit
+
+
+def test_emit_programme_fund_nodes_deduped():
+    """Programme + Fund taxonomy nodes + Programme-FINANCED_BY->Fund, deduped."""
+    log, emit = _emit_log()
+    records = [
+        {"qid": "Q1", "programme": "Competitiveness PL", "fund": "ERDF"},
+        {"qid": "Q2", "programme": "Competitiveness PL", "fund": "ERDF"},
+        {"qid": "Q3", "programme": "HR PL", "fund": "ESF+"},
+    ]
+    prog_n, fund_n = emit_programme_fund_nodes(log, records)
+    assert (prog_n, fund_n) == (2, 2)
+    kinds = [c.args[0] for c in emit.upsert.call_args_list]
+    assert kinds.count("UpsertTaxonomyCode") == 4
+    assert kinds.count("UpsertRelationship") == 2
+    prog = [c for c in emit.upsert.call_args_list
+            if c.args[0] == "UpsertTaxonomyCode"
+            and c.kwargs["payload"]["system"] == "programme"][0]
+    assert prog.kwargs["payload"]["label"] == "Competitiveness PL"
+    rel = [c for c in emit.upsert.call_args_list
+           if c.args[0] == "UpsertRelationship"][0]
+    assert rel.kwargs["payload"]["predicate"] == "FINANCED_BY"
+
+
+def test_disclosure_carries_programme_code():
+    """The disclosure's details carry the programme_code for UNDER_PROGRAMME."""
+    from src.etl.load_eu_knowledge_graph import (  # pylint: disable=import-outside-toplevel
+        _programme_code)
+    log, emit = _emit_log()
+    rec = {"qid": "Q1", "programme": "Competitiveness PL", "fund": "ERDF",
+           "title": "X"}
+    emit_disclosure_events(log, [rec])
+    disc = [c for c in emit.upsert.call_args_list
+            if c.args[0] == "UpsertDisclosure"][0]
+    details = disc.kwargs["payload"]["details"]
+    assert details["programme_code"] == _programme_code("Competitiveness PL")
