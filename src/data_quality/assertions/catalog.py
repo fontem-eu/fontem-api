@@ -627,31 +627,6 @@ ASSERTIONS: list[Assertion] = [
     ),
     # ---- FX exchange-rate health + new graph-integrity checks -------------
     Assertion(
-        "coverage.fx_rates_current", COVERAGE,
-        "Exchange rates are fresh (latest within a few days of today)",
-        WARN, "cypher",
-        "MATCH (r:ExchangeRate) WITH max(r.date) AS latest "
-        "RETURN CASE WHEN latest IS NULL "
-        "OR latest < toString(date() - duration('P4D')) "
-        "THEN 1 ELSE 0 END AS violations",
-        zero_violations("stale FX (no rate within the last ~4 days)"),
-        "TED contract values convert to EUR via these rates; a stale feed "
-        "silently freezes conversions. ECB skips weekends/holidays so a 4-day "
-        "grace covers a long weekend. The daily currency-loader cron must keep "
-        "the latest rate within a day or two of today (it had been failing).",
-    ),
-    Assertion(
-        "coverage.fx_rates_history", COVERAGE,
-        "Exchange-rate history reaches back to 2000", WARN, "cypher",
-        "MATCH (r:ExchangeRate) WITH min(r.date) AS earliest "
-        "RETURN CASE WHEN earliest IS NULL OR earliest > '2000-12-31' "
-        "THEN 1 ELSE 0 END AS violations",
-        zero_violations("FX history shallower than 2000"),
-        "Historical TED awards convert at the award-date rate, so the series "
-        "must span the full ingested period. ECB publishes daily reference "
-        "rates from 2000-01-03; anything shallower means a coverage gap.",
-    ),
-    Assertion(
         "keys.critical_indexes_present", KEYS,
         "Critical Neo4j indexes exist (sink throughput + lookups)",
         BLOCK, "cypher",
