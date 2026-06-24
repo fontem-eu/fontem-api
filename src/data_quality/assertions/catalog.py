@@ -655,10 +655,9 @@ ASSERTIONS: list[Assertion] = [
         "keys.critical_indexes_present", KEYS,
         "Critical Neo4j indexes exist (sink throughput + lookups)",
         BLOCK, "cypher",
-        "SHOW INDEXES YIELD name WITH collect(name) AS idx "
-        "RETURN size([x IN "
+        "SHOW INDEXES YIELD name WHERE name IN "
         "['disclosure_system_id','company_gmr_id','contract_ted_notice_id'] "
-        "WHERE NOT x IN idx]) AS violations",
+        "RETURN 3 - count(DISTINCT name) AS violations",
         zero_violations("missing critical indexes"),
         "A missing :Disclosure(system,disclosure_id) index turns every "
         "cohesion/lobbying MERGE into an O(n) label scan and the sink crawls "
