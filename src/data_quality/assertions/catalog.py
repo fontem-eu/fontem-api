@@ -625,6 +625,67 @@ ASSERTIONS: list[Assertion] = [
         "bidder-count capture is systematically wrong (e.g. the 0-as-1 bug we "
         "fixed), not that the single market changed overnight.",
     ),
+    # ---- FX exchange-rate health + new graph-integrity checks -------------
+    Assertion(
+        "coverage.fx_rates_current", COVERAGE,
+        "Exchange rates are fresh (latest within a few days of today)",
+        WARN, "cypher",
+        "MATCH (r:ExchangeRate) WITH max(r.date) AS latest "
+        "RETURN CASE WHEN latest IS NULL "
+        "OR latest < toString(date() - duration('P4D')) "
+        "THEN 1 ELSE 0 END AS violations",
+        zero_violations("stale FX (no rate within the last ~4 days)"),
+        "TED contract values convert to EUR via these rates; a stale feed "
+        "silently freezes conversions. ECB skips weekends/holidays so a 4-day "
+        "grace covers a long weekend. The daily currency-loader cron must keep "
+        "the latest rate within a day or two of today (it had been failing).",
+    ),
+    Assertion(
+        "coverage.fx_rates_history", COVERAGE,
+        "Exchange-rate history reaches back to 2000", WARN, "cypher",
+        "MATCH (r:ExchangeRate) WITH min(r.date) AS earliest "
+        "RETURN CASE WHEN earliest IS NULL OR earliest > '2000-12-31' "
+        "THEN 1 ELSE 0 END AS violations",
+        zero_violations("FX history shallower than 2000"),
+        "Historical TED awards convert at the award-date rate, so the series "
+        "must span the full ingested period. ECB publishes daily reference "
+        "rates from 2000-01-03; anything shallower means a coverage gap.",
+    ),
+    Assertion(
+        "keys.critical_indexes_present", KEYS,
+        "Critical Neo4j indexes exist (sink throughput + lookups)",
+        BLOCK, "cypher",
+        "SHOW INDEXES YIELD name WITH collect(name) AS idx "
+        "RETURN size([x IN "
+        "['disclosure_system_id','company_gmr_id','contract_ted_notice_id'] "
+        "WHERE NOT x IN idx]) AS violations",
+        zero_violations("missing critical indexes"),
+        "A missing :Disclosure(system,disclosure_id) index turns every "
+        "cohesion/lobbying MERGE into an O(n) label scan and the sink crawls "
+        "(observed: ~0/sec in prod until the index was added). These indexes "
+        "are load-bearing; their absence is a prod incident, not a nicety.",
+    ),
+    Assertion(
+        "coverage.cohesion_programme_financed", COVERAGE,
+        "Cohesion programmes are financed by a fund", WARN, "cypher",
+        "MATCH (p:Programme) WHERE NOT (p)-[:FINANCED_BY]->(:Fund) "
+        "RETURN count(*) AS violations",
+        zero_violations("programmes with no FINANCED_BY fund"),
+        "The cohesion model is (:CohesionProject)-[:UNDER_PROGRAMME]->"
+        "(:Programme)-[:FINANCED_BY]->(:Fund). A programme with no fund means "
+        "the per-system taxonomy label or the relationship emit regressed.",
+    ),
+    Assertion(
+        "coverage.contract_currency_convertible", COVERAGE,
+        "Contracts valued in a real currency convert to EUR", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.value_currency =~ '[A-Z]{3}' "
+        "AND c.value_original IS NOT NULL AND c.value_eur IS NULL "
+        "RETURN count(*) AS violations",
+        le_threshold("violations", 500, "contracts with an unconverted value"),
+        "A real-currency value that didn't convert to EUR is invisible to "
+        "every aggregate. MDL/MKD/UAH/RSD have no free rate source (a known "
+        "gap); the threshold surfaces growth beyond the current ~300.",
+    ),
 ]
 
 

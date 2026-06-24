@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import date as _date, datetime
@@ -394,6 +395,11 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             )
         else:
             resolved_currency = declared_currency
+        # TED uses non-currency placeholders (UNPUBLISHED, OP_DATPRO) in the
+        # currency field when no value is published. Null them so the contract
+        # carries no spurious currency (and no value to convert downstream).
+        if resolved_currency and not re.fullmatch(r"[A-Z]{3}", resolved_currency):
+            resolved_currency = None
 
         # The three money signals. The notice-level TotalAmount is only
         # attributable to one award; for multi-award notices it is an
@@ -425,6 +431,11 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         elif score.chosen_field == "payable":
             value_eur_float, value_original_float = pay_eur, pay_orig
         else:
+            value_eur_float, value_original_float = None, None
+
+        # A no-awarded-value contract must not carry a (stray, often
+        # sign-flipped) monetary value; keep value_eur clean.
+        if score.flag.value == "no_awarded_value":
             value_eur_float, value_original_float = None, None
 
         if score.is_low_confidence:
