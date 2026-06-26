@@ -15,6 +15,7 @@ import pytest
 from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
     ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
+    CONSISTENCY,
     COVERAGE, ORACLE, Assertion, by_id, le_threshold, min_coverage, oracle_band,
     zero_violations,
     zero_with_detail,
@@ -34,11 +35,12 @@ def test_ids_unique():
 
 
 def test_families_and_severities_valid():
-    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE, ORACLE}
+    fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE, ORACLE,
+            CONSISTENCY}
     for a in ASSERTIONS:
         assert a.family in fams, a.id
         assert a.severity in (BLOCK, WARN), a.id
-        assert a.engine in ("cypher", "sql"), a.id
+        assert a.engine in ("cypher", "sql", "consistency"), a.id
         assert a.query.strip(), a.id
         assert callable(a.evaluate), a.id
 
@@ -63,6 +65,8 @@ def test_engine_matches_family():
     for a in ASSERTIONS:
         if a.family in (KEYS, REFS, VALUES, GOLDEN, COVERAGE, ORACLE):
             assert a.engine == "cypher", a.id
+        elif a.family == CONSISTENCY:
+            assert a.engine == "consistency", a.id
         else:
             assert a.engine == "sql", a.id
 
@@ -171,7 +175,9 @@ def _all_clean_sql(_q):
 
 
 def test_run_catalog_all_pass():
-    results = run_catalog(_all_clean_cypher, _all_clean_sql)
+    results = run_catalog(
+        _all_clean_cypher, _all_clean_sql,
+        consistency=lambda et: {"violations": 0, "total": 12, "detail": ""})
     assert len(results) == len(ASSERTIONS)
     assert all(r.status == PASS for r in results)
     assert exit_code(results) == 0
@@ -327,3 +333,70 @@ def test_critical_indexes_count_matches_pairs():
     assert int(m.group(1)) == len(pairs) > 0, (
         f"index assertion lists {len(pairs)} pairs but subtracts {m.group(1)}"
     )
+
+
+# ── cross-store consistency engine ────────────────────────────────────────
+_ONT = "http://data.fontem.eu/ontology#"
+
+
+class _FakeNeoSession:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, query):  # noqa: ARG002 - fake ignores the query
+        return iter(self._rows)
+
+
+class _FakeNeoClient:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def session(self):
+        return _FakeNeoSession(self._rows)
+
+
+class _FakeVirtuoso:
+    def __init__(self, by_iri):
+        self._by_iri = by_iri
+
+    def query(self, q):
+        m = re.search(r"<([^>]+)>", q)
+        return self._by_iri.get(m.group(1) if m else "", [])
+
+
+def test_consistency_check_passes_when_aligned_flags_when_not():
+    from src.data_quality.assertions import consistency  # pylint: disable=import-outside-toplevel
+    neo = _FakeNeoClient([
+        {"_key": "n1", "value_eur": 100.0, "procedure_type": "open"},   # aligned
+        {"_key": "n2", "value_eur": 200.0, "procedure_type": "open"},   # proc mismatch
+        {"_key": "n3", "value_eur": 300.0, "procedure_type": "open"},   # absent
+    ])
+    virt = _FakeVirtuoso({
+        "http://data.fontem.eu/id/Contract/n1": [
+            {"p": _ONT + "valueEur", "o": 100.0}, {"p": _ONT + "procedureType", "o": "open"}],
+        "http://data.fontem.eu/id/Contract/n2": [
+            {"p": _ONT + "valueEur", "o": 200.0}, {"p": _ONT + "procedureType", "o": "restricted"}],
+        # n3 has no triples -> absent
+    })
+    res = consistency.check(neo, virt, "Contract", n=3)
+    assert res["total"] == 3
+    assert res["violations"] == 2          # n2 (mismatch) + n3 (absent)
+    assert "n2.procedure_type" in res["detail"]
+
+
+def test_consistency_engine_dispatch_and_missing_runner():
+    a = next(x for x in ASSERTIONS if x.engine == "consistency")
+    # wired runner -> evaluates the returned row
+    ok = evaluate_assertion(
+        a, None, None,
+        consistency=lambda et: {"violations": 0, "total": 12, "detail": ""})
+    assert ok.status == PASS
+    # no runner wired -> WARN (not a crash)
+    miss = evaluate_assertion(a, None, None, consistency=None)
+    assert miss.status == WARN

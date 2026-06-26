@@ -41,9 +41,20 @@ def evaluate_assertion(
     assertion: Assertion,
     cypher: RowRunner,
     sql: RowRunner,
+    consistency: "RowRunner | None" = None,
 ) -> AssertionResult:
     """Run one assertion and classify the outcome."""
-    runner = cypher if assertion.engine == "cypher" else sql
+    runner = {"cypher": cypher, "sql": sql, "consistency": consistency}.get(
+        assertion.engine)
+    if runner is None:
+        # An assertion whose engine has no runner wired (e.g. the cross-store
+        # consistency engine when Virtuoso is unconfigured) is surfaced, not
+        # crashed: BLOCK errors, WARN warns.
+        status = ERROR if assertion.severity == BLOCK else WARN
+        return AssertionResult(
+            assertion.id, assertion.family, assertion.title,
+            assertion.severity, status, f"no runner for engine {assertion.engine!r}",
+        )
     try:
         row = runner(assertion.query) or {}
         held, observed = assertion.evaluate(row)
@@ -69,9 +80,11 @@ def run_catalog(
     cypher: RowRunner,
     sql: RowRunner,
     assertions: "list[Assertion] | None" = None,
+    consistency: "RowRunner | None" = None,
 ) -> "list[AssertionResult]":
     """Run every assertion (or a supplied subset) and return results."""
-    return [evaluate_assertion(a, cypher, sql) for a in (assertions or ASSERTIONS)]
+    return [evaluate_assertion(a, cypher, sql, consistency)
+            for a in (assertions or ASSERTIONS)]
 
 
 def summarise(results: "list[AssertionResult]") -> dict[str, int]:

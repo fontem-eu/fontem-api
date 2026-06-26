@@ -33,6 +33,7 @@ FRESHNESS = "freshness"  # source recency (events store)
 GOLDEN = "golden"        # known-true ground-truth facts (graph)
 COVERAGE = "coverage"    # field-population coverage (graph)
 ORACLE = "oracle"        # computed indicators validated vs published external figures
+CONSISTENCY = "consistency"  # Neo4j <-> Virtuoso cross-store agreement (sampled)
 
 Evaluator = Callable[[Mapping[str, Any]], "tuple[bool, str]"]
 
@@ -674,6 +675,26 @@ ASSERTIONS: list[Assertion] = [
         "A real-currency value that didn't convert to EUR is invisible to "
         "every aggregate. MDL/MKD/UAH/RSD have no free rate source (a known "
         "gap); the threshold surfaces growth beyond the current ~300.",
+    ),
+    Assertion(
+        "consistency.contract_neo4j_virtuoso", CONSISTENCY,
+        "Random contracts render identically in Neo4j + Virtuoso", WARN,
+        "consistency", "Contract",
+        zero_with_detail("inconsistent contracts (of 12 sampled)"),
+        "Both sinks project the same events.entity_events stream, so a "
+        "sampled contract whose value/currency/procedure/bidders/cpv differ "
+        "across stores means a sink dropped, lagged, or mis-rendered an event. "
+        "Sampling spot-check (random dozen) -> WARN, not BLOCK.",
+    ),
+    Assertion(
+        "consistency.company_neo4j_virtuoso", CONSISTENCY,
+        "Random companies render identically in Neo4j + Virtuoso", WARN,
+        "consistency", "Company",
+        zero_with_detail("inconsistent companies (of 12 sampled)"),
+        "Sampled companies must agree on name + country across stores. LEI and "
+        "other GLEIF enrichment are intentionally excluded -- that is a load-"
+        "coverage question (Neo4j leads Virtuoso by ~3.8% on LEI), not a sink-"
+        "render inconsistency.",
     ),
 ]
 

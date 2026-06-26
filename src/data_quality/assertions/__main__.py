@@ -69,6 +69,22 @@ def _build_sql_runner(dsn: str | None):
     return _run
 
 
+def _build_consistency_runner(client: Neo4jClient):
+    # Cross-store engine needs Neo4j (multi-row sample) + Virtuoso (SPARQL).
+    # Lazy imports keep this off the hot path; returns None when Virtuoso is
+    # unconfigured, so the runner reports the consistency assertions as WARN
+    # rather than failing.
+    from src.data.sparql.virtuoso_client import VirtuosoClient  # pylint: disable=import-outside-toplevel
+    from src.data_quality.assertions import consistency  # pylint: disable=import-outside-toplevel
+    virtuoso = VirtuosoClient.from_env()
+    if virtuoso is None:
+        return None
+
+    def _run(entity_type: str) -> Mapping[str, Any]:
+        return consistency.check(client, virtuoso, entity_type)
+    return _run
+
+
 def _select(families: str | None):
     if not families:
         return ASSERTIONS
@@ -93,7 +109,8 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         cypher = _build_cypher_runner(client)
         sql = _build_sql_runner(dsn)
-        results = run_catalog(cypher, sql, _select(args.family))
+        consistency_runner = _build_consistency_runner(client)
+        results = run_catalog(cypher, sql, _select(args.family), consistency_runner)
     finally:
         client.close()
 
