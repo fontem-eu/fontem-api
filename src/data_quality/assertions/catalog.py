@@ -628,16 +628,31 @@ ASSERTIONS: list[Assertion] = [
     # ---- FX exchange-rate health + new graph-integrity checks -------------
     Assertion(
         "keys.critical_indexes_present", KEYS,
-        "Critical Neo4j indexes exist (sink throughput + lookups)",
+        "Required Neo4j indexes exist for every sink-matched (label, key)",
         BLOCK, "cypher",
-        "SHOW INDEXES YIELD name WHERE name IN "
-        "['disclosure_system_id','company_gmr_id','contract_ted_notice_id'] "
-        "RETURN 3 - count(DISTINCT name) AS violations",
-        zero_violations("missing critical indexes"),
-        "A missing :Disclosure(system,disclosure_id) index turns every "
-        "cohesion/lobbying MERGE into an O(n) label scan and the sink crawls "
-        "(observed: ~0/sec in prod until the index was added). These indexes "
-        "are load-bearing; their absence is a prod incident, not a nicety.",
+        # Every (label, property) the neo4j-sink MATCHes/MERGEs on must have a
+        # covering index, else the MERGE degrades to an O(n) label scan. The
+        # required set mirrors neo4j_sink._KEY_FIELD_BY_LABEL + the
+        # extra_relationship targets (Listing.ticker, Authority.authority_id,
+        # ...). Checked by (label, first-property), not index name, so a
+        # differently-named index still satisfies it. Keep REQUIRED_INDEXES in
+        # sync with the sink when it learns a new label; the count literal
+        # below must equal the number of pairs listed.
+        "SHOW INDEXES YIELD labelsOrTypes, properties "
+        "WHERE labelsOrTypes IS NOT NULL AND [labelsOrTypes[0], properties[0]] IN "
+        "[['Company','gmr_id'],['Contract','ted_notice_id'],"
+        "['Authority','authority_id'],['Listing','ticker'],"
+        "['SanctionedEntity','entity_id'],['Cpv','code'],"
+        "['Disclosure','system'],['Programme','code'],"
+        "['Fund','code'],['NUTSRegion','code']] "
+        "RETURN 10 - count(DISTINCT [labelsOrTypes[0], properties[0]]) AS violations",
+        zero_violations("missing required indexes"),
+        "Every (label, key) the sink MATCHes/MERGEs on must be indexed. A "
+        "missing index turns each MERGE into an O(n) label scan and the sink "
+        "crawls — observed twice in prod (:Disclosure ~0/sec; "
+        ":Authority(authority_id) a 13s relationship batch, ~150x slower "
+        "drain). Derived from the sink key-field map + edge targets; this is a "
+        "prod incident, not a nicety.",
     ),
     Assertion(
         "coverage.cohesion_programme_financed", COVERAGE,

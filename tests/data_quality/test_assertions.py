@@ -8,6 +8,8 @@ drive every code path with in-memory fakes.
 # pylint: disable=protected-access,unused-argument
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from src.data_quality.assertions import catalog
@@ -312,3 +314,16 @@ def test_oracle_band_thin_sample_passes_with_note():
     ev = oracle_band(0.20, 0.60, 100, "HU single-bidder")
     ok, obs = ev({"sample": 12, "rate": 0.99})
     assert ok and "too thin" in obs
+
+
+def test_critical_indexes_count_matches_pairs():
+    """The generalized index assertion uses `RETURN N - count(DISTINCT ...)`;
+    N must equal the number of (label, key) pairs it lists, or a pair added
+    without bumping N would be silently unchecked."""
+    a = next(x for x in ASSERTIONS if x.id == "keys.critical_indexes_present")
+    pairs = re.findall(r"\['[A-Za-z]+', ?'[A-Za-z_]+'\]", a.query)
+    m = re.search(r"RETURN (\d+) - count\(DISTINCT", a.query)
+    assert m, "expected `RETURN N - count(DISTINCT ...)` form"
+    assert int(m.group(1)) == len(pairs) > 0, (
+        f"index assertion lists {len(pairs)} pairs but subtracts {m.group(1)}"
+    )
