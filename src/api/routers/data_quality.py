@@ -5,13 +5,32 @@ Endpoints for the platform health and data quality dashboard.
 """
 from __future__ import annotations
 
+import logging
+
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter
 
 from src.analysis.data_quality_source import DataQualitySource
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
+
+
+def _safe(label, fn):
+    """Run one dashboard section, degrading gracefully on failure.
+
+    The overview fans out ~20 Cypher queries against a large, occasionally
+    flaky graph. Without this guard a single transient Neo4j error (timeout,
+    ServiceUnavailable, a procedure/license blip) raised straight through and
+    500'd the *entire* dashboard. Now a failing section returns an error marker
+    and the rest of the dashboard still renders.
+    """
+    try:
+        return fn()
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("data-quality section %r failed", label)
+        return {"error": "unavailable"}
 
 
 @router.get("")
@@ -21,10 +40,10 @@ def data_quality_overview(
 ):
     """Full data quality overview for the dashboard."""
     return {
-        "graph": source.get_graph_stats(),
-        "matching": source.get_matching_stats(),
-        "freshness": source.get_data_freshness(),
-        "coverage": source.get_coverage_stats(),
+        "graph": _safe("graph", source.get_graph_stats),
+        "matching": _safe("matching", source.get_matching_stats),
+        "freshness": _safe("freshness", source.get_data_freshness),
+        "coverage": _safe("coverage", source.get_coverage_stats),
     }
 
 
