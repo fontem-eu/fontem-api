@@ -9,10 +9,13 @@ graph.
 Neo4j SanctionedEntity nodes are projected by the sink. The *auto*
 SANCTIONED edge stays retired — it once produced 8/8 false positives
 (short acronym names like "LRA"/"AMD" matching unrelated EU companies,
-a defamation risk). Instead, the sanction → company resolver runs and
-its confident, guarded matches (MIN_NAME_LEN>=6) are emitted as
-``AssertSameAs`` *review candidates*: UNREVIEWED ``:SAME_AS`` edges a
-human adjudicates via the consolidator review path — never an
+a defamation risk). Instead, for each confident, guarded resolver match
+(MIN_NAME_LEN>=6) we mint the sanctioned org as its OWN ``:Company``
+(the info we have: best name + country), link that company to the
+SanctionedEntity with a ``SANCTIONED`` edge, and emit an
+``AssertSameAs`` to the resolved existing company. That same_as is
+``:Company`` <-> ``:Company`` — the sink rejects cross-label same_as —
+and lands UNREVIEWED: a review candidate a human adjudicates, never an
 automatic attribution.
 
 GDPR note: this loader republishes identified-person data (sanctioned
@@ -267,6 +270,13 @@ def _resolve_sanction_to_company(entity: dict) -> dict | None:
     return None
 
 
+def _best_name(entity: dict) -> str:
+    """The most complete (longest) of the sanction's names — the full
+    legal name, not the short acronym the feed often lists first."""
+    names = [n for n in [entity.get("name")] + list(entity.get("aliases") or []) if n]
+    return max(names, key=len) if names else ""
+
+
 def resolve_company_links(entities):
     """Run each non-person entity through the guarded resolver and
     return its confident matches as same_as REVIEW candidates.
@@ -284,11 +294,19 @@ def resolve_company_links(entities):
     matched_via_alias = 0
     t0 = time.time()
     for entity in entities:
-        row = _resolve_sanction_to_company(entity)
-        if row is None:
+        match = _resolve_sanction_to_company(entity)
+        if match is None:
             continue
-        rows.append(row)
-        if row["matched_via_alias"]:
+        rows.append({
+            "entity_id": entity["entity_id"],
+            "name": _best_name(entity),
+            "country": entity.get("nationality") or None,
+            "resolved_gmr_id": match["gmr_id"],
+            "tier": match["tier"],
+            "confidence": match["confidence"],
+            "matched_via_alias": match["matched_via_alias"],
+        })
+        if match["matched_via_alias"]:
             matched_via_alias += 1
     summary = {
         "total": len(entities),
@@ -303,6 +321,55 @@ def resolve_company_links(entities):
 # main() owns the EU-sanctions ETL state inline: argparse, XML stream open,
 # event-log handle, batch counters, error capture, run summary. All loop-
 # locals of one sequential pass.
+def _emit_review_candidates(log: EventLog, review_rows: list[dict]) -> None:
+    """For each guarded resolver match, mint the sanctioned org as its
+    own :Company (best name + country), link it to the SanctionedEntity
+    with a SANCTIONED edge, and emit a :Company<->:Company AssertSameAs to
+    the resolved company — an UNREVIEWED review candidate (the sink sets
+    reviewed=false), never an automatic attribution."""
+    if not review_rows:
+        return
+    with log.batch(uuid.uuid4(), producer="load_eu_sanctions") as emit:
+        for row in review_rows:
+            # Mint the sanctioned org as its OWN :Company, keyed off the
+            # sanction id so it never implicitly converges with a same-name
+            # company (that silent merge is exactly the FP we must avoid).
+            company_gmr_id = str(
+                gmr_id.from_name(
+                    row["country"] or "EU", f"sanction:{row['entity_id']}"
+                )
+            )
+            company_iri = f"http://data.fontem.eu/id/Company/{company_gmr_id}"
+            sanction_iri = (
+                "http://data.fontem.eu/id/SanctionedEntity/"
+                f"{row['entity_id']}"
+            )
+            resolved_iri = (
+                f"http://data.fontem.eu/id/Company/{row['resolved_gmr_id']}"
+            )
+            emit.upsert(
+                "UpsertCompany", iri=company_iri, domain="sanctions",
+                payload=builders.upsert_company(
+                    gmr_id=company_gmr_id, name=row["name"], country=row["country"],
+                ),
+            )
+            emit.upsert(
+                "UpsertRelationship", iri=company_iri, domain="sanctions",
+                payload=builders.upsert_relationship(
+                    src_iri=company_iri, dst_iri=sanction_iri, predicate="sanctioned",
+                ),
+            )
+            emit.upsert(
+                "AssertSameAs", iri=company_iri, domain="sanctions",
+                payload=builders.assert_same_as(
+                    a_iri=company_iri, b_iri=resolved_iri,
+                    confidence=row["confidence"], method="eu_sanctions_name_country",
+                    tier=row["tier"], matched_via_alias=row["matched_via_alias"],
+                    rule="sanction_company_review",
+                ),
+            )
+
+
 def main(argv=None):  # pylint: disable=too-many-locals
     """CLI entry point.
 
@@ -402,38 +469,13 @@ def main(argv=None):  # pylint: disable=too-many-locals
         written, batch_id,
     )
 
-    # Resolve each entity (guarded) and emit its confident matches as
-    # AssertSameAs REVIEW candidates: an UNREVIEWED :SAME_AS edge between
-    # the SanctionedEntity and the resolved Company for a human to
-    # adjudicate. The auto SANCTIONED edge stays retired (8/8 historical
-    # false positives); the MIN_NAME_LEN guard keeps the acronym shapes
-    # out of the queue entirely.
+    # Resolve each entity (guarded); emit confident matches as review
+    # candidates (mint sanctioned-org :Company + SANCTIONED edge + a
+    # :Company<->:Company AssertSameAs to the resolved company, UNREVIEWED).
+    # The auto SANCTIONED edge stays retired (8/8 historical false
+    # positives); MIN_NAME_LEN keeps the acronym shapes out of the queue.
     review_rows, summary = resolve_company_links(entities)
-    if review_rows:
-        candidate_batch = uuid.uuid4()
-        with log.batch(candidate_batch, producer="load_eu_sanctions") as emit:
-            for row in review_rows:
-                sanction_iri = (
-                    "http://data.fontem.eu/id/SanctionedEntity/"
-                    f"{row['entity_id']}"
-                )
-                company_iri = (
-                    f"http://data.fontem.eu/id/Company/{row['gmr_id']}"
-                )
-                emit.upsert(
-                    "AssertSameAs",
-                    iri=sanction_iri,
-                    domain="sanctions",
-                    payload=builders.assert_same_as(
-                        a_iri=sanction_iri,
-                        b_iri=company_iri,
-                        confidence=row["confidence"],
-                        method="eu_sanctions_name_country",
-                        tier=row["tier"],
-                        matched_via_alias=row["matched_via_alias"],
-                        rule="sanction_company_review",
-                    ),
-                )
+    _emit_review_candidates(log, review_rows)
 
     logger.info(
         "Done: %d entities, %d same_as review candidates emitted "

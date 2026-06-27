@@ -257,7 +257,8 @@ def test_guarded_match_becomes_same_as_review_candidate():
     assert summary["matched"] == 1
     assert len(rows) == 1
     assert rows[0]["entity_id"] == "EU.X"
-    assert rows[0]["gmr_id"] == "gmr-x"
+    assert rows[0]["resolved_gmr_id"] == "gmr-x"
+    assert rows[0]["name"] == "Specific Long Entity Name"
     assert rows[0]["tier"] == "name_country"
 
 
