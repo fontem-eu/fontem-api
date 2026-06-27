@@ -6,11 +6,14 @@ and writes it to Virtuoso (authoritative store) as SHACL-validated
 Turtle, into the ``http://data.fontem.eu/graph/sanctions`` named
 graph.
 
-Phase 2 cutover is closed: Neo4j SanctionedEntity nodes + SANCTIONED
-edges no longer exist, and the loader no longer writes them. The
-sanction → company resolver call still runs (the ETL is a candidate
-emitter for review queues) but its output is logged-only until the
-review-queue refactor that targets Virtuoso lands.
+Neo4j SanctionedEntity nodes are projected by the sink. The *auto*
+SANCTIONED edge stays retired — it once produced 8/8 false positives
+(short acronym names like "LRA"/"AMD" matching unrelated EU companies,
+a defamation risk). Instead, the sanction → company resolver runs and
+its confident, guarded matches (MIN_NAME_LEN>=6) are emitted as
+``AssertSameAs`` *review candidates*: UNREVIEWED ``:SAME_AS`` edges a
+human adjudicates via the consolidator review path — never an
+automatic attribution.
 
 GDPR note: this loader republishes identified-person data (sanctioned
 individuals). The processing lawful basis is Art 6(1)(e) — public
@@ -261,36 +264,36 @@ def _resolve_sanction_to_company(entity: dict) -> dict | None:
 
 
 def resolve_company_links(entities):
-    """Run each non-person entity through /resolve and return summary.
+    """Run each non-person entity through the guarded resolver and
+    return its confident matches as same_as REVIEW candidates.
 
-    The resolver-driven sanction→company linkage was historically
-    written as Neo4j SANCTIONED edges. Phase 2 retired that table;
-    the linkage will land in Virtuoso once the review-queue path
-    moves across. Until then this loop just exercises the resolver
-    so we keep observability on its hit rate (logged + returned to
-    the CLI) and so any future regression there shows up in the
-    daily ETL run.
+    Each returned row is emitted by the caller as an ``AssertSameAs``
+    between the SanctionedEntity and the resolved Company, landing as
+    an UNREVIEWED ``:SAME_AS`` edge for human adjudication — never an
+    automatic SANCTIONED attribution. The resolver's MIN_NAME_LEN>=6
+    guard rejects the short-acronym shapes ("LRA", "AMD", …) that
+    caused the original 8 false-positive SANCTIONED edges.
+
+    Returns ``(rows, summary)`` — rows to emit, summary for the run log.
     """
-    matched = 0
+    rows = []
     matched_via_alias = 0
-    no_match = 0
     t0 = time.time()
     for entity in entities:
         row = _resolve_sanction_to_company(entity)
         if row is None:
-            no_match += 1
             continue
-        matched += 1
+        rows.append(row)
         if row["matched_via_alias"]:
             matched_via_alias += 1
-    elapsed = time.time() - t0
-    return {
+    summary = {
         "total": len(entities),
-        "matched": matched,
+        "matched": len(rows),
         "matched_via_alias": matched_via_alias,
-        "no_match": no_match,
-        "elapsed_s": round(elapsed, 1),
+        "no_match": len(entities) - len(rows),
+        "elapsed_s": round(time.time() - t0, 1),
     }
+    return rows, summary
 
 
 # main() owns the EU-sanctions ETL state inline: argparse, XML stream open,
@@ -395,14 +398,42 @@ def main(argv=None):  # pylint: disable=too-many-locals
         written, batch_id,
     )
 
-    # Resolver hit-rate logging only — the SANCTIONED edge to
-    # Neo4j was retired in the Phase 2 cutover, and the
-    # Virtuoso-side review-queue path lands separately.
-    summary = resolve_company_links(entities)
+    # Resolve each entity (guarded) and emit its confident matches as
+    # AssertSameAs REVIEW candidates: an UNREVIEWED :SAME_AS edge between
+    # the SanctionedEntity and the resolved Company for a human to
+    # adjudicate. The auto SANCTIONED edge stays retired (8/8 historical
+    # false positives); the MIN_NAME_LEN guard keeps the acronym shapes
+    # out of the queue entirely.
+    review_rows, summary = resolve_company_links(entities)
+    if review_rows:
+        candidate_batch = uuid.uuid4()
+        with log.batch(candidate_batch, producer="load_eu_sanctions") as emit:
+            for row in review_rows:
+                sanction_iri = (
+                    "http://data.fontem.eu/id/SanctionedEntity/"
+                    f"{row['entity_id']}"
+                )
+                company_iri = (
+                    f"http://data.fontem.eu/id/Company/{row['gmr_id']}"
+                )
+                emit.upsert(
+                    "AssertSameAs",
+                    iri=sanction_iri,
+                    domain="sanctions",
+                    payload=builders.assert_same_as(
+                        a_iri=sanction_iri,
+                        b_iri=company_iri,
+                        confidence=row["confidence"],
+                        method="eu_sanctions_name_country",
+                        tier=row["tier"],
+                        matched_via_alias=row["matched_via_alias"],
+                        rule="sanction_company_review",
+                    ),
+                )
 
     logger.info(
-        "Done: %d entities, %d resolver matches (%d via alias), "
-        "%d no_match in %.1fs",
+        "Done: %d entities, %d same_as review candidates emitted "
+        "(%d via alias), %d no_match in %.1fs",
         summary["total"],
         summary["matched"],
         summary["matched_via_alias"],

@@ -6,18 +6,19 @@ positives, where 3-4 letter Company names ("AMD", "TSA", "CRL",
 the same short code (the actual entity name lived in `aliases`).
 All 8 companies were unrelated EU entities — defamation risk.
 
-Phase 2 retired the Neo4j-side store entirely; SanctionedEntity
-nodes and SANCTIONED edges no longer exist. The resolver call
-still runs (the loader logs match hit-rate), but the Cypher
-guards that used to live here (MERGE_ENTITY, MERGE_SANCTIONED,
-the in-cypher matchers) are gone too. This file pins:
+The *auto* SANCTIONED edge stays retired. The resolver's confident,
+guarded matches are now emitted as ``AssertSameAs`` *review
+candidates* (unreviewed ``:SAME_AS``) for a human to adjudicate —
+never an automatic edge. The in-cypher Cypher guards (MERGE_ENTITY,
+MERGE_SANCTIONED, the in-cypher matchers) stay gone. This file pins:
 
   - the historical short-acronym false positives still resolve to
-    no-match (the resolver guards stand on their own)
+    no-match (the resolver guards stand on their own) and so produce
+    ZERO same_as review candidates
+  - a confident, guarded match becomes a same_as review candidate row
   - the resolver retries each alias when the primary fails
   - the in-cypher matchers (MATCH_COMPANY_EXACT/_FUZZY) and the
-    Neo4j MERGE templates do NOT come back — the loader is
-    Virtuoso-only now
+    Neo4j MERGE templates do NOT come back — the loader writes events
 """
 from __future__ import annotations
 
@@ -221,3 +222,67 @@ def test_parse_extracts_aliases():
     # Portal exposes alpha-2 ("IR"); loader normalises to alpha-3 ("IRN")
     # for fontem's internal convention.
     assert record["nationality"] == "IRN"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# New behaviour: confident matches become same_as REVIEW candidates,
+# acronym false-positives become nothing at all.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_guarded_match_becomes_same_as_review_candidate():
+    """A confident, guarded resolver match is returned as a same_as
+    REVIEW candidate row (entity_id + gmr_id + tier) — the caller emits
+    it as an AssertSameAs (unreviewed), never an automatic SANCTIONED
+    edge."""
+    entities = [{
+        "entity_id": "EU.X",
+        "name": "Specific Long Entity Name",
+        "aliases": [],
+        "nationality": "DE",
+        "designation_date": "2024-01-01",
+    }]
+    with patch(
+        "src.etl.load_eu_sanctions.resolve_entity",
+        return_value=ResolveResult(
+            hint="matched",
+            match=ResolveMatch(
+                gmr_id="gmr-x", name="Specific Long Entity Name",
+                country="DEU", lei=None, tier="name_country", confidence=0.95,
+            ),
+            candidates=[], normalised_country="DEU",
+        ),
+    ):
+        rows, summary = load_sanctions.resolve_company_links(entities)
+    assert summary["matched"] == 1
+    assert len(rows) == 1
+    assert rows[0]["entity_id"] == "EU.X"
+    assert rows[0]["gmr_id"] == "gmr-x"
+    assert rows[0]["tier"] == "name_country"
+
+
+@pytest.mark.parametrize(
+    "short_name,nationality", REGRESSION_FALSE_POSITIVE_CASES,
+)
+def test_acronym_fp_produces_no_same_as_candidate(short_name, nationality):
+    """The historical 8 false positives (short acronyms with no useful
+    alias) must produce ZERO same_as candidates — the guard keeps them
+    out of the review queue, not just out of an auto-edge."""
+    entities = [{
+        "entity_id": "x",
+        "name": short_name,
+        "aliases": [],
+        "nationality": nationality,
+        "designation_date": "2011-05-24",
+    }]
+    with patch(
+        "src.etl.load_eu_sanctions.resolve_entity",
+        return_value=ResolveResult(
+            hint="no_match", match=None, candidates=[],
+            normalised_country=nationality,
+        ),
+    ):
+        rows, summary = load_sanctions.resolve_company_links(entities)
+    assert not rows
+    assert summary["matched"] == 0
+    assert summary["no_match"] == 1
