@@ -286,3 +286,21 @@ def test_acronym_fp_produces_no_same_as_candidate(short_name, nationality):
     assert not rows
     assert summary["matched"] == 0
     assert summary["no_match"] == 1
+
+
+def test_enterprise_country_read_from_address():
+    """Enterprises have no <citizenship>; their country lives on
+    <address>. The loader must read it there — otherwise the
+    country-gated resolver can never match a non-person sanction
+    (the bug that left 0/1589 entities with a country)."""
+    xml = _wrap("""
+      <sanctionEntity euReferenceNumber="EU.9.9">
+        <subjectType code="enterprise"/>
+        <nameAlias wholeName="Some Trading Company LLC"/>
+        <address countryIso2Code="RU" countryDescription="Russia"/>
+        <regulation publicationDate="2022-03-01" programme="UKR"/>
+      </sanctionEntity>
+    """)
+    out = list(parse_sanctions_xml(xml))
+    assert len(out) == 1
+    assert out[0]["nationality"] == "RUS"  # alpha-2 RU -> alpha-3 RUS

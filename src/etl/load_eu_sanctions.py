@@ -139,21 +139,25 @@ def _collect_names(entity_el):
 
 
 def _find_nationality(entity_el):
-    """Extract nationality from citizenship child elements.
+    """Extract the entity's country as alpha-3.
 
-    The ``citizenship`` element has ``countryIso2Code`` and
-    ``countryDescription`` attributes. The portal stores ISO 3166-1
-    alpha-2 but fontem's internal convention is alpha-3, so normalise
-    on extraction; descriptions that aren't a code pass through as-is
-    (e.g. legacy "UNKNOWN-ish" strings).
+    Persons carry it on ``citizenship``; **enterprises — the only
+    subjects we keep (persons are GDPR-filtered) — have no citizenship
+    and instead carry their country on ``address`` (1337/1589 of them)
+    and often ``identification``.** Reading only ``citizenship`` left
+    every non-person entity country-less, so the country-gated resolver
+    matched nothing. Check all three, in that order; the portal stores
+    ISO 3166-1 alpha-2, normalise to alpha-3 (descriptions that aren't a
+    code pass through as-is, e.g. legacy "UNKNOWN-ish" strings).
     """
-    for cit_el in entity_el.findall(_tag("citizenship")):
-        country = (cit_el.attrib.get("countryIso2Code") or "").strip()
-        if country and country != "00":
-            return LocationService.to_alpha3(country) or country
-        desc = (cit_el.attrib.get("countryDescription") or "").strip()
-        if desc and desc != "UNKNOWN":
-            return desc
+    for el_name in ("citizenship", "address", "identification"):
+        for el in entity_el.findall(_tag(el_name)):
+            country = (el.attrib.get("countryIso2Code") or "").strip()
+            if country and country != "00":
+                return LocationService.to_alpha3(country) or country
+            desc = (el.attrib.get("countryDescription") or "").strip()
+            if desc and desc != "UNKNOWN":
+                return desc
     return ""
 
 
