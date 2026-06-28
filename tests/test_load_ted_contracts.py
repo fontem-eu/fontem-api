@@ -575,42 +575,34 @@ def test_skip_pub_num_lookup_skips_ted_v3_search(
 # ── --year/--month default to current calendar month ────────────────
 
 
-def test_main_defaults_year_month_to_current_calendar_month(monkeypatch):
-    """Regression: the cronjob args used to be `--year $(date +%Y)
-    --month $(date +%m)` baked into argv. The container entrypoint
-    runs `python` directly (no /bin/sh wrap) so those tokens reached
-    argparse as literal strings and aborted with `invalid int value`.
-    The fix is to default the loader to the current calendar month
-    when neither flag is set, and drop the literal args from the
-    cronjob template — this test pins that contract.
-    """
+def test_main_no_args_runs_incremental_from_watermark(monkeypatch):
+    """No-args (the daily cron shape) now runs the incremental search-API
+    path from the watermark forward — NOT the old current-month monthly
+    download. TED doesn't publish a month's package until the month ends,
+    so that default 404-ed every single day."""
+    from datetime import date, timedelta  # pylint: disable=import-outside-toplevel
     captured: dict = {}
 
-    def _fake_download(year, month, dest):
-        captured["year"] = year
-        captured["month"] = month
-        captured["dest"] = dest
-        # Stop right after — we just want to assert what _download was
-        # called with; everything past it does Neo4j+events writes.
-        raise SystemExit(0)
+    def _fake_incremental(driver, log, since, until, **kw):  # pylint: disable=unused-argument
+        captured["since"] = since
+        captured["until"] = until
 
-    monkeypatch.setattr(load_ted_contracts, "_download_monthly", _fake_download)
-    # Skip the driver+event-log setup; the SystemExit raises before
-    # load_contracts is reached.
+    def _must_not_download(*a, **kw):
+        raise AssertionError("monthly download must not run for the no-args default")
+
+    monkeypatch.setattr(load_ted_contracts, "load_contracts_incremental", _fake_incremental)
+    monkeypatch.setattr(load_ted_contracts, "_download_monthly", _must_not_download)
+    monkeypatch.setattr(load_ted_contracts, "_read_watermark", lambda session: "2026-06-20")
+    monkeypatch.setattr("src.etl.load_cpv.load_cpv", lambda *a, **kw: None)
     monkeypatch.setattr(load_ted_contracts.GraphDatabase, "driver",
                         lambda *a, **kw: MagicMock())
     monkeypatch.setattr(load_ted_contracts.EventLog, "from_env",
                         classmethod(lambda cls: MagicMock()))
 
-    try:
-        load_ted_contracts.main([])
-    except SystemExit:
-        pass
+    load_ted_contracts.main([])
 
-    from datetime import datetime  # pylint: disable=import-outside-toplevel
-    today = datetime.now().astimezone()
-    assert captured["year"] == today.year
-    assert captured["month"] == today.month
+    assert captured["since"] == date(2026, 6, 20) + timedelta(days=1)
+    assert captured["until"] == date.today()
 
 
 def test_main_overrides_year_month_when_explicit(monkeypatch):

@@ -25,7 +25,7 @@ import os
 import re
 import time
 import uuid
-from datetime import date as _date, datetime
+from datetime import date as _date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -34,6 +34,7 @@ from fontem_events import EventLog
 from neo4j import GraphDatabase
 
 from eforms.filters import awards_only
+from eforms.parser import parse as parse_notice_xml
 from eforms.stream import stream_notices
 
 from ..services.currency.client import CurrencyClient
@@ -43,6 +44,7 @@ from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .contract_confidence import score_contract_value
 from .ted_matcher import TedMatcher
+from . import ted_search
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +293,8 @@ def _amount_to_eur(currency_svc, resolved_currency, rate_date_obj, raw):
 def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
     notice, emit, matcher, seen_authorities, seen_companies,
     currency_svc, skip_pub_num_lookup: bool,
+    *, pub_num_override: str | None = None,
+    extra_props: dict | None = None,
 ):
     """Process a single TED notice within an already-open
     ``log.batch(...)`` context — the caller owns commit semantics.
@@ -348,7 +352,12 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     # avoids paying it before the first award when skip_pub_num_lookup
     # is False. With the flag, this is always None and the backfill
     # picks it up later.
-    if skip_pub_num_lookup:
+    if pub_num_override is not None:
+        # The incremental search-API path already carries the
+        # publication-number from the search response — no per-notice
+        # UUID->pub-num lookup needed.
+        ted_publication_number = pub_num_override
+    elif skip_pub_num_lookup:
         ted_publication_number = None
     else:
         ted_publication_number = _resolve_pub_num_or_none(ted_notice_id)
@@ -464,14 +473,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             )
             seen_companies.add(match.gmr_id)
 
-        emit.upsert(
-            "UpsertContract",
-            # IRI keyed by the stable UUID (notice_id) so it doesn't
-            # change once TED assigns / revises a publication-number
-            # after first ingest.
-            iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
-            domain="contract",
-            payload=builders.upsert_contract(
+        contract_payload = builders.upsert_contract(
                 ted_notice_id=ted_notice_id,
                 ted_publication_number=ted_publication_number,
                 title=notice.title or None,
@@ -506,8 +508,150 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 is_framework=notice.is_framework,
                 eu_funded=notice.eu_funded,
                 funding_programme=notice.funding_programme,
-            ),
+            )
+        # Incremental/modification stamps (procedure_id, notice_type,
+        # modifies_publication_number) are added to the payload dict
+        # directly: the fixed builder signature can't carry them without a
+        # schema-version bump, and both sinks read these keys from props.
+        if extra_props:
+            contract_payload.update(
+                {k: v for k, v in extra_props.items() if v is not None}
+            )
+        emit.upsert(
+            "UpsertContract",
+            # IRI keyed by the stable UUID (notice_id) so it doesn't
+            # change once TED assigns / revises a publication-number
+            # after first ingest.
+            iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
+            domain="contract",
+            payload=contract_payload,
         )
+
+
+_WATERMARK_ID = "ted-incremental"
+_MODIFICATION_NOTICE_TYPE = "can-modif"
+
+
+def _read_watermark(session) -> str | None:
+    """Last publication-date (YYYY-MM-DD) the incremental loader fully
+    ingested, or None if it has never run."""
+    row = session.run(
+        "MATCH (w:TedWatermark {id: $id}) RETURN w.last_publication_date AS d",
+        id=_WATERMARK_ID,
+    ).single()
+    return row["d"] if row and row["d"] else None
+
+
+def _advance_watermark(session, day_iso: str) -> None:
+    """Record ``day_iso`` (YYYY-MM-DD) as the latest fully-loaded date.
+    Sticky-forward: never moves backwards."""
+    session.run(
+        "MERGE (w:TedWatermark {id: $id}) "
+        "SET w.last_publication_date = CASE "
+        "  WHEN coalesce(w.last_publication_date, '') < $day THEN $day "
+        "  ELSE w.last_publication_date END",
+        id=_WATERMARK_ID, day=day_iso,
+    )
+
+
+def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+    driver,
+    log: EventLog,
+    since: _date,
+    until: _date,
+    currency_svc: CurrencyClient | None = None,
+    notice_types: tuple[str, ...] = ted_search.NOTICE_TYPES,
+):
+    """Incrementally load award + modification notices via TED's search
+    API, one calendar day at a time from ``since`` to ``until`` inclusive.
+
+    Per day: query the search API, skip notices already in the graph
+    (cheap pre-check by notice-identifier), download + parse the rest, and
+    emit Authority/Company/Contract events. Each contract is stamped with
+    its publication-number (free from the search response), procedure_id,
+    and notice_type; modifications also carry modifies_publication_number.
+    The watermark advances one day at a time, only after that day fully
+    loads, so an interrupted run resumes from the next unfinished day. A
+    day that errors on *every* notice (e.g. API outage) stops the run
+    without advancing, so we never silently skip a date.
+    """
+    totals = {"days": 0, "emitted": 0, "skipped": 0, "modifications": 0, "errors": 0}
+    http = httpx.Client(timeout=ted_search.SEARCH_TIMEOUT)
+    try:
+        with driver.session() as session:
+            matcher = TedMatcher(session)
+            seen_authorities: set[str] = set()
+            seen_companies: set[str] = set()
+            day = since
+            while day <= until:
+                ymd = day.strftime("%Y%m%d")
+                iso = day.isoformat()
+                t0 = time.time()
+                d_emit = d_skip = d_mod = d_err = 0
+                for rec in ted_search.search_day(ymd, notice_types, client=http):
+                    nid = rec.get("notice-identifier")
+                    if nid and _already_loaded(session, nid):
+                        d_skip += 1
+                        continue
+                    url = ted_search.xml_url(rec)
+                    if not url:
+                        continue
+                    is_mod = rec.get("notice-type") == _MODIFICATION_NOTICE_TYPE
+                    try:
+                        notice = parse_notice_xml(ted_search.fetch_xml(url, client=http))
+                        extra = {
+                            "procedure_id": rec.get("procedure-identifier"),
+                            "notice_type": rec.get("notice-type"),
+                            "modifies_publication_number": (
+                                ted_search.modifies_publication_number(rec)
+                                if is_mod else None
+                            ),
+                        }
+                        with log.batch(
+                            uuid.uuid4(), producer="load_ted_contracts",
+                        ) as emit:
+                            _emit_notice(
+                                notice, emit, matcher,
+                                seen_authorities, seen_companies, currency_svc,
+                                skip_pub_num_lookup=True,
+                                pub_num_override=rec.get("publication-number"),
+                                extra_props=extra,
+                            )
+                        d_emit += 1
+                        d_mod += 1 if is_mod else 0
+                    except Exception:  # pylint: disable=broad-except
+                        d_err += 1
+                        logger.exception(
+                            "FAILED notice %s (pub=%s) on %s",
+                            nid, rec.get("publication-number"), iso,
+                        )
+                day_all_errored = d_err > 0 and d_emit == 0 and d_skip == 0
+                logger.info(
+                    "Day %s: %d emitted (%d modif), %d skipped, %d errors in %.0fs",
+                    iso, d_emit, d_skip, d_mod, d_err, time.time() - t0,
+                )
+                totals["days"] += 1
+                totals["emitted"] += d_emit
+                totals["skipped"] += d_skip
+                totals["modifications"] += d_mod
+                totals["errors"] += d_err
+                if day_all_errored:
+                    logger.error(
+                        "Day %s errored on every notice — stopping without "
+                        "advancing the watermark (will retry next run)", iso,
+                    )
+                    break
+                _advance_watermark(session, iso)
+                day += timedelta(days=1)
+    finally:
+        http.close()
+    logger.info(
+        "Incremental done: %d days, %d emitted (%d modifications), "
+        "%d skipped, %d errors",
+        totals["days"], totals["emitted"], totals["modifications"],
+        totals["skipped"], totals["errors"],
+    )
+    return totals
 
 
 def main(argv=None):
@@ -557,6 +701,20 @@ def main(argv=None):
             "faster for bulk historical loads."
         ),
     )
+    parser.add_argument(
+        "--since", help="Incremental start date YYYY-MM-DD (overrides watermark)",
+    )
+    parser.add_argument(
+        "--until", help="Incremental end date YYYY-MM-DD (default: today)",
+    )
+    parser.add_argument(
+        "--lookback-days", type=int, default=7,
+        help="Initial incremental window (days) when no watermark exists yet",
+    )
+    parser.add_argument(
+        "--modifications-only", action="store_true",
+        help="Incremental: load only can-modif notices (the modification backfill)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -580,33 +738,67 @@ def main(argv=None):
     log = EventLog.from_env()
 
     try:
-        if args.file:
-            archive = Path(args.file)
-        else:
-            # Default to the current calendar month when --year/--month
-            # are omitted. The cronjob used to bake `--year $(date +%Y)
-            # --month $(date +%m)` into argv expecting shell expansion,
-            # but the container entrypoint runs `python` directly (no
-            # /bin/sh wrap) so the literal string `$(date +%Y)` reached
-            # argparse and aborted with `invalid int value`. Defaulting
-            # in code makes the cronjob args empty + the daily run
-            # always picks the current month, which is exactly what
-            # the previous shape was trying to achieve.
-            today = datetime.now().astimezone()
-            year = args.year or today.year
-            month = args.month or today.month
-            archive = _download_monthly(year, month, Path("/tmp"))
-
         # CPV bootstrap: emits UpsertTaxonomyCode events. Idempotent;
         # re-runs are MERGE on (system='cpv', code) at the sink.
         from .load_cpv import load_cpv  # pylint: disable=import-outside-toplevel
         load_cpv(log, lang="en")
 
-        load_contracts(
-            driver, log, archive, currency_svc=currency_svc,
-            skip_pub_num_lookup=args.skip_pub_num_lookup,
-            rescore=args.rescore,
-        )
+        if args.file or args.year or args.month:
+            # Bulk path: a local archive or a specific monthly package
+            # (historical backfill of a COMPLETED month — TED only
+            # publishes a month's package after the month ends).
+            if args.file:
+                archive = Path(args.file)
+            else:
+                today = datetime.now().astimezone()
+                archive = _download_monthly(
+                    args.year or today.year, args.month or today.month, Path("/tmp"),
+                )
+            load_contracts(
+                driver, log, archive, currency_svc=currency_svc,
+                skip_pub_num_lookup=args.skip_pub_num_lookup,
+                rescore=args.rescore,
+            )
+        else:
+            # Daily/incremental default: search-API by publication-date
+            # from the watermark forward. Replaces the old current-month
+            # monthly-package default, which 404-ed every day because TED
+            # doesn't publish a month's package until the month is over.
+            notice_types = (
+                (_MODIFICATION_NOTICE_TYPE,) if args.modifications_only
+                else ted_search.NOTICE_TYPES
+            )
+            until = _date.fromisoformat(args.until) if args.until else _date.today()
+            if args.since:
+                since = _date.fromisoformat(args.since)
+            else:
+                with driver.session() as session:
+                    wm = _read_watermark(session)
+                since = (
+                    _date.fromisoformat(wm) + timedelta(days=1) if wm
+                    else until - timedelta(days=args.lookback_days)
+                )
+            if since > until:
+                logger.info(
+                    "TED incremental: watermark already current (%s) — "
+                    "nothing to load", since.isoformat(),
+                )
+            else:
+                logger.info(
+                    "TED incremental: %s..%s (%s)",
+                    since.isoformat(), until.isoformat(),
+                    "modifications-only" if args.modifications_only
+                    else "awards+modifications",
+                )
+                load_contracts_incremental(
+                    driver, log, since, until,
+                    currency_svc=currency_svc, notice_types=notice_types,
+                )
+                # Link the freshly-loaded modifications to their awards.
+                from .link_ted_modifications import (  # pylint: disable=import-outside-toplevel
+                    link_modifications,
+                )
+                link_modifications(driver, log)
     finally:
         currency_svc.close()
         log.close()
