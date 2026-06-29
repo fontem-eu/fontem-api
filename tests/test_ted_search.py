@@ -2,6 +2,7 @@
 from eforms.filters import _AWARD_TYPES, _MODIFICATION_TYPES
 
 from src.etl import ted_search
+from src.etl.link_ted_modifications import _resolve_awards_for_procedures
 
 
 def test_notice_types_match_eforms_filters():
@@ -35,3 +36,30 @@ def test_modifies_publication_number_first_of_list_or_scalar():
         {"modification-previous-notice-identifier": "65c1c820-01"}
     ) == "65c1c820-01"
     assert ted_search.modifies_publication_number({}) is None
+
+
+def test_resolve_awards_for_procedures_batches_and_maps():
+    """The batched award resolver builds one query with all procedures + the
+    award notice-types, and maps procedure_id -> the first award UUID."""
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"notices": [
+                {"procedure-identifier": "P1", "notice-identifier": "award-1"},
+                {"procedure-identifier": "P1", "notice-identifier": "award-1b"},
+            ]}
+
+    class _Client:
+        def post(self, url, json):  # pylint: disable=redefined-outer-name,unused-argument
+            captured["query"] = json["query"]
+            return _Resp()
+
+    out = _resolve_awards_for_procedures(["P1", "P2"], _Client())
+    assert out == {"P1": "award-1"}  # first award per procedure
+    assert 'procedure-identifier="P1"' in captured["query"]
+    assert 'procedure-identifier="P2"' in captured["query"]
+    assert 'notice-type="can-standard"' in captured["query"]

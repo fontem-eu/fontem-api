@@ -592,7 +592,10 @@ def test_main_no_args_runs_incremental_from_watermark(monkeypatch):
 
     monkeypatch.setattr(load_ted_contracts, "load_contracts_incremental", _fake_incremental)
     monkeypatch.setattr(load_ted_contracts, "_download_monthly", _must_not_download)
-    monkeypatch.setattr(load_ted_contracts, "_read_watermark", lambda session: "2026-06-20")
+    monkeypatch.setattr(
+        load_ted_contracts, "_read_watermark",
+        lambda session, wmid=None: "2026-06-20",
+    )
     monkeypatch.setattr("src.etl.load_cpv.load_cpv", lambda *a, **kw: None)
     monkeypatch.setattr(load_ted_contracts.GraphDatabase, "driver",
                         lambda *a, **kw: MagicMock())

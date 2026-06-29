@@ -534,25 +534,25 @@ _WATERMARK_ID = "ted-incremental"
 _MODIFICATION_NOTICE_TYPE = "can-modif"
 
 
-def _read_watermark(session) -> str | None:
-    """Last publication-date (YYYY-MM-DD) the incremental loader fully
-    ingested, or None if it has never run."""
+def _read_watermark(session, watermark_id: str = _WATERMARK_ID) -> str | None:
+    """Last publication-date (YYYY-MM-DD) this watermark's incremental
+    loader fully ingested, or None if it has never run."""
     row = session.run(
         "MATCH (w:TedWatermark {id: $id}) RETURN w.last_publication_date AS d",
-        id=_WATERMARK_ID,
+        id=watermark_id,
     ).single()
     return row["d"] if row and row["d"] else None
 
 
-def _advance_watermark(session, day_iso: str) -> None:
-    """Record ``day_iso`` (YYYY-MM-DD) as the latest fully-loaded date.
-    Sticky-forward: never moves backwards."""
+def _advance_watermark(session, watermark_id: str, day_iso: str) -> None:
+    """Record ``day_iso`` (YYYY-MM-DD) as this watermark's latest
+    fully-loaded date. Sticky-forward: never moves backwards."""
     session.run(
         "MERGE (w:TedWatermark {id: $id}) "
         "SET w.last_publication_date = CASE "
         "  WHEN coalesce(w.last_publication_date, '') < $day THEN $day "
         "  ELSE w.last_publication_date END",
-        id=_WATERMARK_ID, day=day_iso,
+        id=watermark_id, day=day_iso,
     )
 
 
@@ -563,6 +563,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     until: _date,
     currency_svc: CurrencyClient | None = None,
     notice_types: tuple[str, ...] = ted_search.NOTICE_TYPES,
+    watermark_id: str = _WATERMARK_ID,
 ):
     """Incrementally load award + modification notices via TED's search
     API, one calendar day at a time from ``since`` to ``until`` inclusive.
@@ -643,7 +644,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                         "advancing the watermark (will retry next run)", iso,
                     )
                     break
-                _advance_watermark(session, iso)
+                _advance_watermark(session, watermark_id, iso)
                 day += timedelta(days=1)
     finally:
         http.close()
@@ -656,7 +657,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     return totals
 
 
-def main(argv=None):
+def main(argv=None):  # pylint: disable=too-many-statements
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Emit UpsertAuthority + UpsertContract events for TED awards",
@@ -717,6 +718,11 @@ def main(argv=None):
         "--modifications-only", action="store_true",
         help="Incremental: load only can-modif notices (the modification backfill)",
     )
+    parser.add_argument(
+        "--watermark-id", default=_WATERMARK_ID,
+        help="Watermark node id. Use a distinct id for backfills so they "
+             "don't move the forward daily cron's watermark.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -775,7 +781,7 @@ def main(argv=None):
                 since = _date.fromisoformat(args.since)
             else:
                 with driver.session() as session:
-                    wm = _read_watermark(session)
+                    wm = _read_watermark(session, args.watermark_id)
                 since = (
                     _date.fromisoformat(wm) + timedelta(days=1) if wm
                     else until - timedelta(days=args.lookback_days)
@@ -795,6 +801,7 @@ def main(argv=None):
                 load_contracts_incremental(
                     driver, log, since, until,
                     currency_svc=currency_svc, notice_types=notice_types,
+                    watermark_id=args.watermark_id,
                 )
                 # Link the freshly-loaded modifications to their awards.
                 from .link_ted_modifications import (  # pylint: disable=import-outside-toplevel
