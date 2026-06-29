@@ -511,8 +511,10 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             )
         # Incremental/modification stamps (procedure_id, notice_type,
         # modifies_publication_number) are added to the payload dict
-        # directly: the fixed builder signature can't carry them without a
-        # schema-version bump, and both sinks read these keys from props.
+        # directly. These three are optional fields in the UpsertContract
+        # schema (UpsertContract.json), so the payload validates; both sinks
+        # read them from props. Augmenting here keeps the builder signature
+        # stable while the schema stays the single source of truth.
         if extra_props:
             contract_payload.update(
                 {k: v for k, v in extra_props.items() if v is not None}
