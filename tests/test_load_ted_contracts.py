@@ -100,6 +100,8 @@ def _stub_notice(*, awards, organizations):
     notice.notice_type = "can-standard"
     notice.currency = "EUR"
     notice.total_value = None
+    notice.modification_value_before = None
+    notice.modifies_publication_number = None
     notice.place_nuts = "FR101"
     notice.language = "fr"
     buyer = MagicMock()
@@ -1042,3 +1044,51 @@ def test_emit_notice_without_override_keeps_notice_id_key():
     )
     assert contract_call.kwargs["payload"]["ted_notice_id"] == \
         "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+
+
+def test_emit_notice_stamps_modification_before_value():
+    """A legacy modification's pre-modification total is converted and
+    stamped as value_before_eur / value_before_original — the before->after
+    delta consumers use to flag suspicious value changes. (Degraded mode:
+    no currency service, so EUR proxies the original.)"""
+    contractor = MagicMock()
+    contractor.name = "S.C. Fortat-House S.R.L."
+    contractor.country = "RO"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    notice.notice_type = "can-modif"
+    notice.total_value = 2925919.96              # after
+    notice.modification_value_before = 2821075.49  # before
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["value_before_eur"] == 2821075.49
+    assert payload["value_before_original"] == 2821075.49
+
+
+def test_emit_notice_no_before_value_for_plain_contract():
+    """A normal (non-modification) contract carries no before-value."""
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert "value_before_eur" not in payload
+    assert "value_before_original" not in payload

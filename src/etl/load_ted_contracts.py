@@ -434,6 +434,14 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         pay_orig, pay_eur = _amount_to_eur(
             currency_svc, resolved_currency, rate_date_obj, payable_raw,
         )
+        # Pre-modification total: legacy F20 modification notices
+        # self-contain before+after, so a modification self-describes its
+        # value change. Convert at the same rate as the after-value so the
+        # before->after delta is a pure value change, free of FX drift.
+        before_orig, before_eur = _amount_to_eur(
+            currency_svc, resolved_currency, rate_date_obj,
+            getattr(notice, "modification_value_before", None),
+        )
 
         score = score_contract_value(
             estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
@@ -489,6 +497,8 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 value_eur=value_eur_float,
                 value_currency=resolved_currency,
                 value_original=value_original_float,
+                value_before_eur=before_eur,
+                value_before_original=before_orig,
                 estimated_value_eur=est_eur,
                 value_payable_eur=pay_eur,
                 value_confidence=score.confidence,
@@ -617,7 +627,11 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                             "procedure_id": rec.get("procedure-identifier"),
                             "notice_type": rec.get("notice-type"),
                             "modifies_publication_number": (
-                                ted_search.modifies_publication_number(rec)
+                                (ted_search.modifies_publication_number(rec)
+                                 or getattr(
+                                     notice, "modifies_publication_number",
+                                     None,
+                                 ))
                                 if is_mod else None
                             ),
                         }
