@@ -294,6 +294,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     notice, emit, matcher, seen_authorities, seen_companies,
     currency_svc, skip_pub_num_lookup: bool,
     *, pub_num_override: str | None = None,
+    notice_id_override: str | None = None,
     extra_props: dict | None = None,
 ):
     """Process a single TED notice within an already-open
@@ -346,7 +347,12 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         )
         seen_authorities.add(authority_id)
 
-    ted_notice_id = notice.notice_id
+    # Legacy TED notices carry no eForms UUID; the incremental loader
+    # passes the machine publication-number as the key so the Contract
+    # IRI + ted_notice_id stay stable and match the _already_loaded
+    # pre-check. For eForms this override equals notice.notice_id, so
+    # it is a no-op there.
+    ted_notice_id = notice_id_override or notice.notice_id
     # Pub-num lookup is per-notice, not per-award — the LRU cache
     # would coalesce repeated awards anyway, but doing it here also
     # avoids paying it before the first award when skip_pub_num_lookup
@@ -592,7 +598,12 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                 t0 = time.time()
                 d_emit = d_skip = d_mod = d_err = 0
                 for rec in ted_search.search_day(ymd, notice_types, client=http):
-                    nid = rec.get("notice-identifier")
+                    # Legacy TED notices have no notice-identifier (UUID);
+                    # fall back to the publication-number as the stable key.
+                    nid = (
+                        rec.get("notice-identifier")
+                        or rec.get("publication-number")
+                    )
                     if nid and _already_loaded(session, nid):
                         d_skip += 1
                         continue
@@ -618,6 +629,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                                 seen_authorities, seen_companies, currency_svc,
                                 skip_pub_num_lookup=True,
                                 pub_num_override=rec.get("publication-number"),
+                                notice_id_override=nid,
                                 extra_props=extra,
                             )
                         d_emit += 1
@@ -631,7 +643,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                 day_all_errored = d_err > 0 and d_emit == 0 and d_skip == 0
                 logger.info(
                     "Day %s: %d emitted (%d modif), %d skipped, %d errors in %.0fs",
-                    iso, d_emit, d_skip, d_mod, d_err, time.time() - t0,
+                    iso, d_emit, d_mod, d_skip, d_err, time.time() - t0,
                 )
                 totals["days"] += 1
                 totals["emitted"] += d_emit

@@ -1,4 +1,5 @@
 """Tests for the TED contract loader (post-event-log)."""
+# pylint: disable=too-many-lines
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -988,3 +989,56 @@ def test_value_typical_contract_unaffected(
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
     assert payload["value_eur"] == 207_117.44
+
+
+def test_emit_notice_uses_notice_id_override_for_key():
+    """Legacy TED (<TED_EXPORT>) notices carry no eForms UUID; the
+    incremental loader passes the machine publication-number as
+    notice_id_override. _emit_notice must key the Contract IRI and
+    ted_notice_id on the override, not the parsed notice.notice_id
+    (which for legacy is the human OJS number, not a stable key)."""
+    contractor = MagicMock()
+    contractor.name = "S.C. Fortat-House S.R.L."
+    contractor.country = "RO"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    notice.notice_id = "2024/S 010-024047"  # legacy OJS ref, not a UUID
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+        pub_num_override="24047-2024",
+        notice_id_override="24047-2024",
+    )
+    contract_call = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    )
+    assert contract_call.kwargs["iri"].endswith("/24047-2024")
+    assert contract_call.kwargs["payload"]["ted_notice_id"] == "24047-2024"
+
+
+def test_emit_notice_without_override_keeps_notice_id_key():
+    """eForms (the default path) still keys on notice.notice_id — the
+    override defaults to None and must not shift existing Contract IRIs."""
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+    )
+    contract_call = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    )
+    assert contract_call.kwargs["iri"].endswith(
+        "/912f1717-1ace-413d-aa61-cd21cd6b95e7"
+    )
+    assert contract_call.kwargs["payload"]["ted_notice_id"] == \
+        "912f1717-1ace-413d-aa61-cd21cd6b95e7"
