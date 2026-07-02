@@ -234,3 +234,19 @@ def test_prune_old_caches_keeps_newest_only(tmp_path):
     remaining = sorted(p.name for p in tmp_path.glob("isin-lei-*.zip"))
     # Newest two by mtime are the last two we touched
     assert remaining == [files[-2].name, files[-1].name]
+
+
+# ── proxy bypass for the bulk host ────────────────────────────────────
+
+
+def test_streaming_client_bypasses_proxy():
+    """The GLEIF bulk host (mapping.gleif.org) is NOT on the ESMA-proxy
+    allow-list, and openfigi sets HTTP(S)_PROXY for its rate-limited API
+    calls. The streaming client must ignore that proxy (trust_env=False)
+    so the bulk fetch goes direct (~0.8s) instead of hanging until the 60s
+    read timeout and failing the whole enrichment run."""
+    client = _gleif_isin_bulk._client_for_streaming()  # pylint: disable=protected-access
+    try:
+        assert client.trust_env is False
+    finally:
+        client.close()

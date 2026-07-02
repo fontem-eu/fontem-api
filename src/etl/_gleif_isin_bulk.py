@@ -68,12 +68,21 @@ csv.field_size_limit(10 * 1024 * 1024)
 
 
 def _client_for_streaming() -> httpx.Client:
+    # trust_env=False bypasses HTTP(S)_PROXY. The GLEIF bulk host
+    # (mapping.gleif.org) is a public CDN reachable directly (~0.8s), and
+    # it is NOT on the ESMA-proxy allow-list — routing it through that
+    # proxy (which openfigi sets for the rate-limited api.gleif.org /
+    # api.openfigi.com endpoints) makes the request hang until the 60s
+    # read timeout, failing the whole enrichment run. The bulk download
+    # doesn't need the proxy's egress-IP rotation; the API calls still get
+    # it via their own httpx.get/post (which honour the env).
     return httpx.Client(
         timeout=httpx.Timeout(
             connect=15.0, read=60.0, write=15.0, pool=15.0,
         ),
         headers=HTTP_HEADERS,
         follow_redirects=True,
+        trust_env=False,
     )
 
 
