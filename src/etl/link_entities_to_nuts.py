@@ -75,12 +75,32 @@ MERGE (e)-[:LOCATED_IN]->(n)
 # deadlock partway through. Driving the batches sequentially from
 # Python gives identical throughput on a single-writer Neo4j without
 # the lock contention.
+# Country candidates for ONE page. Two changes vs the old single-shot
+# read that timed out at prod scale:
+#   1. ``e.country IN $linkable`` restricts to countries that actually
+#      HAVE a NUTS-0 region (~38 EU members). The old query fetched every
+#      unlinked entity with any country — at prod scale ~1.56M Company
+#      rows, of which ~1.42M are non-EU (US, …) and can NEVER link to a
+#      NUTS region. Streaming + attempting to write all 1.56M on a single
+#      read transaction blew past db.transaction.timeout (90s in prod).
+#      Filtering leaves only the ~137k genuinely-linkable rows.
+#   2. ``LIMIT $limit`` pages the read: link_label_country drives one
+#      bounded read transaction per page (see there), so no single tx is
+#      ever held open across the whole label + all writes.
 _FETCH_COUNTRY_CANDIDATES = """
 MATCH (e:{label})
-WHERE e.country IS NOT NULL
+WHERE e.country IN $linkable
   AND NOT (e)-[:LOCATED_IN]->(:NUTSRegion)
 RETURN elementId(e) AS eid, e.country AS a3
+LIMIT $limit
 """
+
+# The countries that have a NUTS-0 region — the only ones a country-level
+# fallback can link. ~38 EU members; computed once per label pass.
+_NUTS0_COUNTRIES = (
+    "MATCH (n:NUTSRegion {level: 0}) "
+    "RETURN collect(n.country_alpha3) AS countries"
+)
 
 _MERGE_COUNTRY_EDGES = """
 UNWIND $rows AS row
@@ -175,36 +195,50 @@ def link_label_postcode(  # pylint: disable=too-many-locals
     return after - before
 
 
-def link_label_country(driver, label: str) -> int:  # pylint: disable=too-many-locals
+def link_label_country(driver, label: str) -> int:
     """Country-level (NUTS-0) fallback for entities the postcode pass missed.
 
-    Mirrors ``link_label_postcode``'s two-session UNWIND-batch shape:
-    stream candidates on a read session, send sequential UNWIND
-    batches on a write session. Sequential batching is intentional —
-    only ~38 NUTS-0 nodes exist; running batches in parallel (the old
-    CALL IN TRANSACTIONS shape) caused Forseti deadlocks where two
-    batches MERGE'd the same LOCATED_IN edge target concurrently.
-    Single-writer Neo4j can't really exploit batch parallelism here
-    anyway, so we trade nothing for crash-free behaviour.
+    Paginated: each iteration reads ONE bounded page (``LIMIT``, filtered
+    to countries that have a NUTS-0 region) on a fresh read session, then
+    MERGEs that page's edges on a fresh write session. Because every
+    fetched row is genuinely linkable, the write links all of them, so the
+    ``NOT (e)-[:LOCATED_IN]->(:NUTSRegion)`` predicate excludes them from
+    the next page — progress is guaranteed and the loop terminates when a
+    page comes back empty.
+
+    Why pages instead of one streaming read: the old single-transaction
+    read stayed open across the whole label scan + every write and, at
+    prod scale (~1.56M unlinked Company, most of them non-EU and
+    unlinkable), ran past db.transaction.timeout (90s) and died. One
+    bounded tx per page keeps every transaction short; the ``$linkable``
+    filter drops the ~1.42M rows that could never link anyway.
+
+    Batches run sequentially (fresh write session each time) — only ~38
+    NUTS-0 nodes exist, so concurrent batches contend on the same handful
+    of edge targets (the old CALL-IN-TRANSACTIONS shape deadlocked on
+    exactly that). Single-writer Neo4j gains nothing from parallelism here.
     """
     count_query = _COUNT_LABEL_TEMPLATE.format(label=label)
     fetch_query = _FETCH_COUNTRY_CANDIDATES.format(label=label)
 
-    with driver.session() as count_sess:
-        before = count_sess.run(count_query).single()["n"]
+    with driver.session() as sess:
+        before = sess.run(count_query).single()["n"]
+        linkable = sess.run(_NUTS0_COUNTRIES).single()["countries"]
 
-    batch: list[dict] = []
     written = 0
-    with driver.session() as read_sess, driver.session() as write_sess:
-        for rec in read_sess.run(fetch_query):
-            batch.append({"eid": rec["eid"], "a3": rec["a3"]})
-            if len(batch) >= COUNTRY_BATCH_SIZE:
-                write_sess.run(_MERGE_COUNTRY_EDGES, rows=batch).consume()
-                written += len(batch)
-                batch = []
-        if batch:
-            write_sess.run(_MERGE_COUNTRY_EDGES, rows=batch).consume()
-            written += len(batch)
+    while True:
+        with driver.session() as read_sess:
+            page = [
+                {"eid": rec["eid"], "a3": rec["a3"]}
+                for rec in read_sess.run(
+                    fetch_query, linkable=linkable, limit=COUNTRY_BATCH_SIZE,
+                )
+            ]
+        if not page:
+            break
+        with driver.session() as write_sess:
+            write_sess.run(_MERGE_COUNTRY_EDGES, rows=page).consume()
+        written += len(page)
 
     with driver.session() as count_sess:
         after = count_sess.run(count_query).single()["n"]

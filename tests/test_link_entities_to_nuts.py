@@ -270,3 +270,40 @@ def test_run_loads_real_lookup_when_none_passed(monkeypatch):
     driver, _session, _ = _mock_driver(edges_per_pass=[0] * 6)
     run(driver)
     assert seen.get("loaded") is True
+
+
+# ── Country-pass timeout fix (linkable filter + pagination) ───────────
+
+
+def test_country_fetch_filters_linkable_countries_and_pages():
+    """The fix for the prod tx-timeout: the country fetch restricts to
+    countries that have a NUTS-0 region and pages with LIMIT. The old
+    query streamed ALL ~1.56M unlinked rows — ~1.42M of them non-EU and
+    unlinkable — on one read transaction and blew past
+    db.transaction.timeout (90s)."""
+    from src.etl.link_entities_to_nuts import (  # pylint: disable=import-outside-toplevel
+        _FETCH_COUNTRY_CANDIDATES, _NUTS0_COUNTRIES)
+    assert "e.country IN $linkable" in _FETCH_COUNTRY_CANDIDATES
+    assert "LIMIT $limit" in _FETCH_COUNTRY_CANDIDATES
+    assert "level: 0" in _NUTS0_COUNTRIES
+    assert "collect(n.country_alpha3)" in _NUTS0_COUNTRIES
+
+
+def test_link_label_country_paginates_until_empty():
+    """The country pass reads bounded pages until one comes back empty,
+    MERGE-ing each page in its own write session — no single tx held open
+    across the whole label + writes."""
+    page1 = [{"eid": "e1", "a3": "PRT"}, {"eid": "e2", "a3": "DEU"}]
+    page2 = [{"eid": "e3", "a3": "FRA"}]
+    driver, session, _ = _mock_driver(
+        edges_per_pass=[3], fetch_pages=[page1, page2],
+    )
+    delta = link_label_country(driver, "Company")
+    assert delta == 3
+    merge_calls = [c for c in session.run.call_args_list
+                   if "UNWIND" in c.args[0]]
+    assert len(merge_calls) == 2  # one write per non-empty page
+    # every candidate read is a bounded LIMIT page (limit kwarg present)
+    fetch_calls = [c for c in session.run.call_args_list
+                   if "RETURN elementId(e)" in c.args[0]]
+    assert fetch_calls and all("limit" in c.kwargs for c in fetch_calls)
