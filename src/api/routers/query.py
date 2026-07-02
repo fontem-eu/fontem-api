@@ -14,6 +14,7 @@ import datetime as _dt
 import decimal
 import logging
 import os
+import time
 from typing import Annotated
 
 import psycopg
@@ -21,6 +22,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Body, HTTPException
 
 from src.data.graph.neo4j_client import Neo4jClient
+from src.data.sparql.virtuoso_client import VirtuosoClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/query", tags=["query"])
@@ -99,6 +101,14 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
     return {"columns": cols, "rows": rows, "row_count": len(rows), "truncated": truncated}
 
 
+def _stats_dsn() -> str | None:
+    dsn = os.environ.get("STATS_DATABASE_URL")
+    if not dsn:
+        return None
+    return (dsn.replace("postgresql+asyncpg://", "postgresql://")
+            .replace("postgresql+psycopg://", "postgresql://"))
+
+
 @router.post(
     "/sql",
     responses={
@@ -110,14 +120,12 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
 def sql_query(body: Annotated[dict, Body(...)]) -> dict:
     """Run a read-only SQL query against the stats Postgres. Returns { columns, rows }."""
     query = _validate((body or {}).get("query") or "", _SQL_FORBIDDEN, "SQL")
-    dsn = os.environ.get("STATS_DATABASE_URL")
+    dsn = _stats_dsn()
     if not dsn:
         raise HTTPException(
             status_code=503,
             detail="SQL studio not configured (STATS_DATABASE_URL unset)",
         )
-    dsn = (dsn.replace("postgresql+asyncpg://", "postgresql://")
-           .replace("postgresql+psycopg://", "postgresql://"))
     try:
         with psycopg.connect(dsn, connect_timeout=5) as conn:
             conn.read_only = True  # engine-enforced: any write raises
@@ -132,3 +140,123 @@ def sql_query(body: Annotated[dict, Body(...)]) -> dict:
     except psycopg.Error as exc:
         raise HTTPException(status_code=400, detail=f"SQL error: {str(exc)[:300]}") from exc
     return {"columns": cols, "rows": rows, "row_count": len(rows), "truncated": truncated}
+
+
+# ── Schema introspection ────────────────────────────────────────────
+# Powers the editor's syntax-aware autocomplete + a browsable schema panel.
+# Read-only metadata; cached because it changes rarely and some stores
+# (Virtuoso) are expensive to introspect.
+_SCHEMA_CACHE: dict = {}
+_SCHEMA_TTL = 600  # seconds
+
+
+def _cached(key, builder):
+    now = time.time()
+    hit = _SCHEMA_CACHE.get(key)
+    if hit and now - hit[0] < _SCHEMA_TTL:
+        return hit[1]
+    payload = builder()
+    _SCHEMA_CACHE[key] = (now, payload)
+    return payload
+
+
+def _cypher_schema(neo4j: Neo4jClient) -> dict:
+    def _labels(tx):
+        return [r["label"] for r in
+                tx.run("CALL db.labels() YIELD label RETURN label ORDER BY label")]
+
+    def _rels(tx):
+        return [r["relationshipType"] for r in
+                tx.run("CALL db.relationshipTypes() YIELD relationshipType "
+                       "RETURN relationshipType ORDER BY relationshipType")]
+
+    def _node_props(tx):
+        out: dict = {}
+        for r in tx.run("CALL db.schema.nodeTypeProperties() YIELD nodeLabels, propertyName "
+                        "RETURN nodeLabels, propertyName"):
+            name = r["propertyName"]
+            if not name:
+                continue
+            for lbl in (r["nodeLabels"] or []):
+                out.setdefault(lbl, set()).add(name)
+        return {k: sorted(v) for k, v in out.items()}
+
+    def _keys(tx):
+        return [r["propertyKey"] for r in tx.run(
+                "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey ORDER BY propertyKey")]
+
+    with neo4j.session() as session:
+        labels = session.execute_read(_labels)
+        rels = session.execute_read(_rels)
+        try:
+            label_props = session.execute_read(_node_props)
+        except Exception:  # pylint: disable=broad-exception-caught
+            label_props = {}  # proc unavailable on this Neo4j version
+        props = sorted({p for ps in label_props.values() for p in ps})
+        if not props:
+            props = session.execute_read(_keys)
+    return {"lang": "cypher", "labels": labels, "relationshipTypes": rels,
+            "labelProperties": label_props, "properties": props}
+
+
+def _sql_schema() -> dict:
+    dsn = _stats_dsn()
+    if not dsn:
+        raise HTTPException(status_code=503,
+                            detail="SQL studio not configured (STATS_DATABASE_URL unset)")
+    tables: dict = {}
+    with psycopg.connect(dsn, connect_timeout=5) as conn:
+        conn.read_only = True
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = {_TIMEOUT_MS}")
+            cur.execute(
+                "SELECT table_name, column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' ORDER BY table_name, ordinal_position"
+            )
+            for tname, cname, dtype in cur.fetchall():
+                tables.setdefault(tname, []).append({"name": cname, "type": dtype})
+    return {"lang": "sql", "tables": [{"name": t, "columns": c} for t, c in sorted(tables.items())]}
+
+
+def _sparql_term(val):
+    # VirtuosoClient bindings map var -> value (URI/literal string, or an
+    # envelope dict). Reduce to the bare IRI/literal string.
+    if isinstance(val, dict):
+        return val.get("value", "")
+    return val
+
+
+def _sparql_schema(virtuoso: VirtuosoClient | None) -> dict:
+    if virtuoso is None:
+        return {"lang": "sparql", "classes": [], "predicates": []}
+    classes: list = []
+    predicates: list = []
+    try:
+        classes = [_sparql_term(b.get("c")) for b in
+                   virtuoso.query("SELECT DISTINCT ?c WHERE { ?s a ?c } LIMIT 300")]
+        predicates = [_sparql_term(b.get("p")) for b in
+                      virtuoso.query("SELECT DISTINCT ?p WHERE { ?s ?p ?o } LIMIT 500")]
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass  # introspection is best-effort; degrade to keyword-only autocomplete
+    return {"lang": "sparql", "classes": [c for c in classes if c],
+            "predicates": [p for p in predicates if p]}
+
+
+@router.get(
+    "/schema/{lang}",
+    responses={400: {"description": "unknown language"}, 503: {"description": "store unset"}},
+)
+@inject
+def query_schema(
+    lang: str,
+    neo4j: FromDishka[Neo4jClient],
+    virtuoso: FromDishka[VirtuosoClient | None],
+) -> dict:
+    """Read-only schema of a store for editor autocomplete + browsing."""
+    if lang == "cypher":
+        return _cached("cypher", lambda: _cypher_schema(neo4j))
+    if lang == "sql":
+        return _cached("sql", _sql_schema)
+    if lang == "sparql":
+        return _cached("sparql", lambda: _sparql_schema(virtuoso))
+    raise HTTPException(status_code=400, detail=f"Unknown query language '{lang}'")
