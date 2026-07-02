@@ -16,6 +16,7 @@ modifications back to the original award.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 
 import httpx
@@ -42,6 +43,50 @@ _FIELDS = [
 
 _PAGE_SIZE = 100
 
+# TED rate-limits sustained querying: a multi-year modification backfill
+# reliably trips a 429 after hours of day-by-day requests. Retry transient
+# statuses with backoff so a single rate-limit doesn't kill the whole run
+# (a hard daily quota still surfaces after the retries — the loader's
+# watermark lets a killed backfill resume where it left off).
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_MAX_ATTEMPTS = 6
+_BACKOFF_CAP = 300.0
+
+
+def _backoff_seconds(resp: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retrying: honor ``Retry-After`` when TED
+    sends one, else exponential backoff (5, 10, 20, 40, 80 s), capped."""
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return min(float(retry_after), _BACKOFF_CAP)
+        except ValueError:
+            pass
+    return min(5.0 * (2 ** attempt), _BACKOFF_CAP)
+
+
+def _send_with_retry(
+    client: httpx.Client, method: str, url: str, **kwargs
+) -> httpx.Response:
+    """Issue a request, retrying on 429/5xx with backoff. A raised 429
+    would otherwise abort a long backfill mid-flight."""
+    last = None
+    for attempt in range(_MAX_ATTEMPTS):
+        resp = client.request(method, url, **kwargs)
+        if resp.status_code not in _RETRY_STATUSES:
+            resp.raise_for_status()
+            return resp
+        last = resp
+        if attempt < _MAX_ATTEMPTS - 1:
+            wait = _backoff_seconds(resp, attempt)
+            logger.warning(
+                "TED %s -> %d (attempt %d/%d); backing off %.0fs",
+                method, resp.status_code, attempt + 1, _MAX_ATTEMPTS, wait,
+            )
+            time.sleep(wait)
+    last.raise_for_status()  # retries exhausted — surface the last error
+    return last
+
 
 def _day_query(day: str, notice_types: tuple[str, ...]) -> str:
     """Expert query: award/modification notices published on ``day`` (YYYYMMDD)."""
@@ -62,12 +107,11 @@ def search_day(
         query = _day_query(day, notice_types)
         page, seen, total = 1, 0, None
         while True:
-            resp = client.post(SEARCH_URL, json={
+            resp = _send_with_retry(client, "POST", SEARCH_URL, json={
                 "query": query, "fields": _FIELDS,
                 "limit": _PAGE_SIZE, "page": page,
                 "paginationMode": "PAGE_NUMBER",
             })
-            resp.raise_for_status()
             body = resp.json()
             notices = body.get("notices", [])
             if total is None:
@@ -93,8 +137,7 @@ def fetch_xml(url: str, client: httpx.Client | None = None) -> bytes:
     own = client is None
     client = client or httpx.Client(timeout=_TIMEOUT)
     try:
-        resp = client.get(url, follow_redirects=True)
-        resp.raise_for_status()
+        resp = _send_with_retry(client, "GET", url, follow_redirects=True)
         return resp.content
     finally:
         if own:

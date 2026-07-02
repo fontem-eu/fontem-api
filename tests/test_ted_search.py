@@ -1,4 +1,6 @@
 """Tests for the TED search-API client + incremental wiring."""
+import httpx
+import pytest
 from eforms.filters import _AWARD_TYPES, _MODIFICATION_TYPES
 
 from src.etl import ted_search
@@ -63,3 +65,69 @@ def test_resolve_awards_for_procedures_batches_and_maps():
     assert 'procedure-identifier="P1"' in captured["query"]
     assert 'procedure-identifier="P2"' in captured["query"]
     assert 'notice-type="can-standard"' in captured["query"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 429 / transient retry — a multi-year backfill trips TED's rate limit;
+# a single 429 must not kill the whole run.
+# ─────────────────────────────────────────────────────────────────────
+class _FakeResp:
+    def __init__(self, status, body=None):
+        self.status_code = status
+        self._body = body or {}
+        self.headers = {}
+
+    def json(self):
+        return self._body
+
+    @property
+    def content(self):
+        return b"<xml/>"
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"{self.status_code}",
+                request=httpx.Request("GET", "http://ted"),
+                response=httpx.Response(self.status_code),
+            )
+
+
+class _FakeClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def request(self, _method, _url, **_kw):
+        resp = self._responses[self.calls]
+        self.calls += 1
+        return resp
+
+
+def test_send_with_retry_recovers_from_429(monkeypatch):
+    """Two 429s then a 200 → the request succeeds after backing off."""
+    monkeypatch.setattr(ted_search.time, "sleep", lambda _s: None)
+    client = _FakeClient([_FakeResp(429), _FakeResp(429), _FakeResp(200, {"ok": 1})])
+    resp = ted_search._send_with_retry(  # pylint: disable=protected-access
+        client, "POST", ted_search.SEARCH_URL, json={})
+    assert resp.status_code == 200
+    assert client.calls == 3
+
+
+def test_send_with_retry_raises_after_exhausting(monkeypatch):
+    """Persistent 429 (a hard quota) surfaces after the retries — the
+    loader's watermark lets the killed backfill resume later."""
+    monkeypatch.setattr(ted_search.time, "sleep", lambda _s: None)
+    client = _FakeClient(
+        [_FakeResp(429)] * ted_search._MAX_ATTEMPTS)  # pylint: disable=protected-access
+    with pytest.raises(httpx.HTTPStatusError):
+        ted_search._send_with_retry(  # pylint: disable=protected-access
+            client, "GET", "http://ted")
+
+
+def test_send_with_retry_passes_through_success(monkeypatch):
+    monkeypatch.setattr(ted_search.time, "sleep", lambda _s: None)
+    client = _FakeClient([_FakeResp(200, {"ok": 1})])
+    resp = ted_search._send_with_retry(  # pylint: disable=protected-access
+        client, "POST", ted_search.SEARCH_URL, json={})
+    assert resp.status_code == 200 and client.calls == 1

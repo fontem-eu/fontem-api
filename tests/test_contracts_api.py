@@ -596,3 +596,72 @@ def test_cohesion_grants_endpoint():
     assert resp.status_code == 200
     assert resp.json()["grant_count"] == 1
     assert resp.json()["grants"][0]["fund"] == "ERDF"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Modification (errata) fields flow through the real Cypher->dict mapping
+# so the contracts panel can show an errata icon + before→after modal.
+# ─────────────────────────────────────────────────────────────────────
+def _run_result(single=None, data=None):
+    r = MagicMock()
+    r.single.return_value = single
+    r.data.return_value = data or []
+    return r
+
+
+def _source_returning_row(row):
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    neo4j = MagicMock()
+    session = MagicMock()
+    session.run.side_effect = [
+        _run_result(single={"name": "ACME", "country": "FR"}),
+        _run_result(data=[row]),
+        _run_result(single={"total": row["value_eur"], "cnt": 1}),
+    ]
+    neo4j.session.return_value.__enter__ = MagicMock(return_value=session)
+    neo4j.session.return_value.__exit__ = MagicMock(return_value=False)
+    return GraphContractSource(neo4j)
+
+
+def test_company_contracts_expose_modification_fields():
+    """A can-modif row's before→after values + modifies ref reach the
+    response so the UI can render the errata icon/modal."""
+    row = {
+        "notice_id": "24082-2024", "publication_number": "24082-2024",
+        "title": "Modif", "value_eur": 2184.6, "award_date": "2024-01-15",
+        "cpv": "33760000", "value_low_confidence": False,
+        "value_quality_flag": "ok", "value_payable_discrepancy": False,
+        "estimated_value_eur": None, "procedure_type": "open", "ted_url": None,
+        "authority": "Ayto", "authority_country": "ES", "authority_id": "a1",
+        "cpv_description": None,
+        "notice_type": "can-modif", "value_currency": "EUR",
+        "value_original": 2184.6, "value_before_eur": 1092.3,
+        "value_before_original": 1092.3,
+        "modifies_publication_number": "061165-2023",
+    }
+    out = _source_returning_row(row).get_company_contracts("gmr-1")
+    c = out["contracts"][0]
+    assert c["notice_type"] == "can-modif"
+    assert c["value_before_eur"] == 1092.3
+    assert c["value_before_original"] == 1092.3
+    assert c["value_eur"] == 2184.6
+    assert c["value_currency"] == "EUR"
+    assert c["modifies_publication_number"] == "061165-2023"
+
+
+def test_plain_contract_has_no_before_value():
+    """A normal award row carries null modification fields (no icon)."""
+    row = {
+        "notice_id": "1-2026", "publication_number": "1-2026", "title": "Award",
+        "value_eur": 1000.0, "award_date": "2026-01-01", "cpv": "72000000",
+        "value_low_confidence": False, "value_quality_flag": "ok",
+        "value_payable_discrepancy": False, "estimated_value_eur": None,
+        "procedure_type": "open", "ted_url": None, "authority": "A",
+        "authority_country": "FR", "authority_id": "a1", "cpv_description": None,
+        "notice_type": "can-standard", "value_currency": "EUR",
+        "value_original": 1000.0, "value_before_eur": None,
+        "value_before_original": None, "modifies_publication_number": None,
+    }
+    out = _source_returning_row(row).get_company_contracts("gmr-1")
+    assert out["contracts"][0]["value_before_eur"] is None

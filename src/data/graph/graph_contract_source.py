@@ -64,6 +64,16 @@ class GraphContractSource(ContractDataSource):
                 "  ct.value_quality_flag AS value_quality_flag, "
                 "  ct.value_payable_discrepancy AS value_payable_discrepancy, "
                 "  ct.estimated_value_eur AS estimated_value_eur, "
+                # Modification (errata) fields: a can-modif contract
+                # self-contains the value change (value_before_eur ->
+                # value_eur). notice_type flags it; modifies_publication_
+                # number points at the original notice it amends.
+                "  ct.notice_type AS notice_type, "
+                "  ct.value_currency AS value_currency, "
+                "  ct.value_original AS value_original, "
+                "  ct.value_before_eur AS value_before_eur, "
+                "  ct.value_before_original AS value_before_original, "
+                "  ct.modifies_publication_number AS modifies_publication_number, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
                 f"  {auth_name} AS authority, a.country AS authority_country, "
@@ -96,6 +106,12 @@ class GraphContractSource(ContractDataSource):
                 "title": r["title"],
                 "value_eur": r["value_eur"],
                 "estimated_value_eur": r.get("estimated_value_eur"),
+                "notice_type": r.get("notice_type"),
+                "value_currency": r.get("value_currency"),
+                "value_original": r.get("value_original"),
+                "value_before_eur": r.get("value_before_eur"),
+                "value_before_original": r.get("value_before_original"),
+                "modifies_publication_number": r.get("modifies_publication_number"),
                 "value_low_confidence": r.get("value_low_confidence"),
                 "value_quality_flag": r.get("value_quality_flag"),
                 "value_payable_discrepancy": r.get("value_payable_discrepancy"),
@@ -147,6 +163,16 @@ class GraphContractSource(ContractDataSource):
                 "  ct.value_quality_flag AS value_quality_flag, "
                 "  ct.value_payable_discrepancy AS value_payable_discrepancy, "
                 "  ct.estimated_value_eur AS estimated_value_eur, "
+                # Modification (errata) fields: a can-modif contract
+                # self-contains the value change (value_before_eur ->
+                # value_eur). notice_type flags it; modifies_publication_
+                # number points at the original notice it amends.
+                "  ct.notice_type AS notice_type, "
+                "  ct.value_currency AS value_currency, "
+                "  ct.value_original AS value_original, "
+                "  ct.value_before_eur AS value_before_eur, "
+                "  ct.value_before_original AS value_before_original, "
+                "  ct.modifies_publication_number AS modifies_publication_number, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
                 "  c.name AS contractor, c.country AS contractor_country, "
@@ -174,6 +200,12 @@ class GraphContractSource(ContractDataSource):
                 "title": r["title"],
                 "value_eur": r["value_eur"],
                 "estimated_value_eur": r.get("estimated_value_eur"),
+                "notice_type": r.get("notice_type"),
+                "value_currency": r.get("value_currency"),
+                "value_original": r.get("value_original"),
+                "value_before_eur": r.get("value_before_eur"),
+                "value_before_original": r.get("value_before_original"),
+                "modifies_publication_number": r.get("modifies_publication_number"),
                 "value_low_confidence": r.get("value_low_confidence"),
                 "value_quality_flag": r.get("value_quality_flag"),
                 "value_payable_discrepancy": r.get("value_payable_discrepancy"),
