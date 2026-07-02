@@ -153,6 +153,16 @@ def test_nuts_boundaries_level_0_returns_feature_collection():
         props = data["features"][0]["properties"]
         assert "nuts_code" in props
         assert "name" in props
+        # Every feature carries the country alpha-3 (the platform's canonical
+        # country key) so alpha-3 datasets can join, e.g. UK -> GBR, EL -> GRC.
+        codes = {f["properties"]["nuts_code"]: f["properties"].get("country_a3")
+                 for f in data["features"]}
+        assert all(v for v in codes.values())        # every feature has one
+        assert all(len(v) == 3 for v in codes.values())
+        if "UK" in codes:
+            assert codes["UK"] == "GBR"
+        if "EL" in codes:
+            assert codes["EL"] == "GRC"
     finally:
         cleanup_dishka()
 

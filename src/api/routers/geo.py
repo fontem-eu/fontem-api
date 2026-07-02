@@ -19,6 +19,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
 from src.analysis.geo_source import GeoSource
+from src.services.location_service import LocationService
 
 
 router = APIRouter(prefix="/geo", tags=["geo"])
@@ -120,4 +121,13 @@ def nuts_boundaries(
             detail=f"Boundaries for NUTS {level} are not bundled yet.",
         )
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    # Enrich each feature with the country's alpha-3 code (derived from the NUTS
+    # 2-letter prefix). Alpha-3 is the platform's canonical country key, so this
+    # lets alpha-3 datasets join to boundaries — not only NUTS codes.
+    for feat in data.get("features", []):
+        code = (feat.get("properties") or {}).get("nuts_code") or ""
+        a3 = LocationService.alpha2_to_alpha3(code[:2]) if len(code) >= 2 else None
+        if a3:
+            feat["properties"]["country_a3"] = a3
+    return data
