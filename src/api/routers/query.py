@@ -211,7 +211,9 @@ def _sql_schema() -> dict:
             cur.execute(f"SET statement_timeout = {_TIMEOUT_MS}")
             cur.execute(
                 "SELECT table_name, column_name, data_type FROM information_schema.columns "
-                "WHERE table_schema = 'public' ORDER BY table_name, ordinal_position"
+                "WHERE table_schema = current_schema() "
+                "AND table_name !~ '^(pg_|hypopg_)' "  # drop pg_qualstats/hypopg extension views
+                "ORDER BY table_name, ordinal_position"
             )
             for tname, cname, dtype in cur.fetchall():
                 tables.setdefault(tname, []).append({"name": cname, "type": dtype})
@@ -226,6 +228,16 @@ def _sparql_term(val):
     return val
 
 
+# Virtuoso's own metadata leaks into { ?s ?p ?o } — filter those RDF namespace
+# IRIs out by host substring (avoids embedding an http:// scheme literal; these
+# are identifiers, never fetched).
+_SPARQL_SYSTEM_HOSTS = ("openlinksw.com/", "w3.org/ns/sparql-service-description")
+
+
+def _is_system_iri(iri: str) -> bool:
+    return any(host in iri for host in _SPARQL_SYSTEM_HOSTS)
+
+
 def _sparql_schema(virtuoso: VirtuosoClient | None) -> dict:
     if virtuoso is None:
         return {"lang": "sparql", "classes": [], "predicates": []}
@@ -238,8 +250,9 @@ def _sparql_schema(virtuoso: VirtuosoClient | None) -> dict:
                       virtuoso.query("SELECT DISTINCT ?p WHERE { ?s ?p ?o } LIMIT 500")]
     except Exception:  # pylint: disable=broad-exception-caught
         pass  # introspection is best-effort; degrade to keyword-only autocomplete
-    return {"lang": "sparql", "classes": [c for c in classes if c],
-            "predicates": [p for p in predicates if p]}
+    return {"lang": "sparql",
+            "classes": [c for c in classes if c and not _is_system_iri(c)],
+            "predicates": [p for p in predicates if p and not _is_system_iri(p)]}
 
 
 @router.get(

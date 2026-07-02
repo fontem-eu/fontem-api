@@ -160,6 +160,7 @@ class _FakeVirtuoso:
     def query(self, q):
         if "?c" in q:
             return [{"c": "https://schema.org/Organization"},
+                    {"c": "http://www.openlinksw.com/schemas/virtrdf#QuadMap"},
                     {"c": "http://data.fontem.eu/Company"}]
         return [{"p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"}]
 
@@ -190,6 +191,7 @@ def test_sparql_schema_with_client_and_without():
     try:
         b = c.get("/query/schema/sparql").json()
         assert "https://schema.org/Organization" in b["classes"]
+        assert not any("openlinksw" in cls for cls in b["classes"])  # system IRIs filtered
         assert any("rdf-syntax" in p for p in b["predicates"])
     finally:
         cleanup_dishka()
