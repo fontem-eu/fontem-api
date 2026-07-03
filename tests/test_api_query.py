@@ -220,3 +220,33 @@ def test_schema_unknown_lang_400():
         assert c.get("/query/schema/klingon").status_code == 400
     finally:
         cleanup_dishka()
+
+
+def test_cypher_rejects_admin_procedures():
+    """Pentest leak (DAST): `CALL dbms.listConfig()` disclosed Neo4j config.
+    dbms.*/apoc.* are now rejected; safe read procedures (db.*) still pass."""
+    c = _client()
+    try:
+        for q in ("CALL dbms.listConfig()", "CALL dbms.components()",
+                  "CALL dbms.security.listRoles()",
+                  "CALL apoc.load.json('file:///etc/passwd')"):
+            assert c.post("/query/cypher", json={"query": q}).status_code == 400, q
+        # legit schema-introspection procedure is NOT over-blocked
+        assert c.post("/query/cypher", json={"query": "CALL db.labels()"}).status_code == 200
+    finally:
+        cleanup_dishka()
+
+
+def test_sql_rejects_filesystem_functions():
+    """Pentest CRITICAL (DAST): `pg_read_file('/etc/passwd')` read server files +
+    `/proc/1/environ` secrets under the old superuser DSN. The least-privilege
+    reader role denies these at the DB; the filter also rejects them up front."""
+    c = _client()
+    try:
+        for q in ("SELECT pg_read_file('/etc/passwd')",
+                  "SELECT pg_read_binary_file('/proc/1/environ')",
+                  "SELECT pg_ls_dir('.')",
+                  "SELECT lo_import('/etc/passwd')"):
+            assert c.post("/query/sql", json={"query": q}).status_code == 400, q
+    finally:
+        cleanup_dishka()

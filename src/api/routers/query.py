@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import decimal
+import re
 import logging
 import os
 import time
@@ -36,7 +37,16 @@ _CYPHER_FORBIDDEN = ("CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "DR
 _SQL_FORBIDDEN = (
     "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE",
     "GRANT", "REVOKE", "COPY", "MERGE", "VACUUM", "COMMENT", "REINDEX",
+    # filesystem / program / large-object functions — the read-only reader
+    # role already rejects these, but block them up front too (defense in depth):
+    "PG_READ_FILE", "PG_READ_BINARY_FILE", "PG_LS_DIR", "PG_STAT_FILE",
+    "PG_LS_LOGDIR", "PG_LS_WALDIR", "PG_LS_TMPDIR", "LO_IMPORT", "LO_EXPORT", "LO_GET",
 )
+
+# Neo4j admin / file-access procedures — a reader-role Neo4j user can't call
+# them, but block by name too so it holds on Community (no RBAC). Safe read
+# procedures (db.labels / db.relationshipTypes for schema) keep the `db.` prefix.
+_CYPHER_PROC_DENY = re.compile(r"\b(dbms|apoc)\s*\.", re.IGNORECASE)
 
 
 def _validate(query: str, forbidden: tuple, lang: str) -> str:
@@ -79,6 +89,11 @@ def _jsonable(v):
 def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient]) -> dict:
     """Run a read-only Cypher query against Neo4j. Returns { columns, rows }."""
     query = _validate((body or {}).get("query") or "", _CYPHER_FORBIDDEN, "Cypher")
+    if _CYPHER_PROC_DENY.search(query):
+        raise HTTPException(
+            status_code=400,
+            detail="Cypher: dbms.*/apoc.* procedures are not allowed (read-only studio).",
+        )
 
     def _run(tx):
         res = tx.run(query, timeout=_TIMEOUT_MS / 1000)
