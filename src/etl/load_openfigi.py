@@ -35,14 +35,19 @@ Usage::
     python -m src.etl.load_openfigi --mode isin   # legacy FIRDS enrichment
 
 """
+# pylint: disable=too-many-lines  # cohesive single-mode loader; the
+# concurrency path pushed it just over 1000 lines and splitting the
+# ISIN/LEI runners into separate modules isn't worth the indirection.
 from __future__ import annotations
 
 import argparse
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import httpx
 from fontem_event_schemas import builders
@@ -83,6 +88,36 @@ def _api_limits(api_key: str | None) -> tuple[int, float]:
     if api_key:
         return API_BATCH_SIZE_KEYED, RATE_LIMIT_SLEEP_KEYED
     return API_BATCH_SIZE_ANON, RATE_LIMIT_SLEEP_ANON
+
+
+# Aggregate OpenFIGI request ceiling used when LEI resolution runs
+# concurrently. The keyed tier allows 600 req/min; we pace to 500 to
+# keep headroom, because query_openfigi does NOT retry 429s — it drops
+# that LEI's enrichment — so overrunning the ceiling loses data rather
+# than merely slowing down.
+_CONCURRENT_RATE_PER_MIN = 500
+
+
+class _RateLimiter:
+    """Thread-safe global pacer for OpenFIGI calls under concurrency.
+
+    Reserves evenly-spaced slots (one every ``60 / rate_per_min`` s) so
+    the aggregate request rate across all worker threads stays under the
+    keyed ceiling regardless of how many workers call it."""
+
+    def __init__(self, rate_per_min: float):
+        self._interval = 60.0 / rate_per_min
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            target = self._next if self._next > now else now
+            self._next = target + self._interval
+        delay = target - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
 
 # Equity-ish market sectors. OpenFIGI returns ETFs, bonds, options,
 # warrants, etc. against the same LEI; we only want shares so the
@@ -579,6 +614,7 @@ def _resolve_lei_to_canonicals(  # pylint: disable=too-many-arguments,too-many-p
     row: dict, batch_size: int, api_key: str | None,
     bulk_isins: dict[str, list[str]] | None = None,
     sleep_between_batches: float = 0.0,
+    rate_limiter: "_RateLimiter | None" = None,
 ) -> tuple[list[dict], str]:
     """Resolve one LEI to its canonical equity Listings.
 
@@ -626,7 +662,9 @@ def _resolve_lei_to_canonicals(  # pylint: disable=too-many-arguments,too-many-p
     # it a multi-batch issuer fires N POSTs in <1 s and 429s the
     # whole sequence.
     for i in range(0, len(isins), batch_size):
-        if i > 0 and sleep_between_batches > 0:
+        if rate_limiter is not None:
+            rate_limiter.wait()
+        elif i > 0 and sleep_between_batches > 0:
             time.sleep(sleep_between_batches)
         chunk = isins[i:i + batch_size]
         payload = [{"idType": "ID_ISIN", "idValue": v} for v in chunk]
@@ -652,10 +690,11 @@ def _process_batch(cfg, batch, id_to_company, api_key):
     return results
 
 
-def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-many-arguments,too-many-positional-arguments
+def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-many-arguments,too-many-positional-arguments,too-many-statements
     mode: str, driver, log: EventLog, limit: int, api_key: str | None,
     bulk_isins_enabled: bool = True,
     bulk_isins: dict[str, list[str]] | None = None,
+    concurrency: int = 1,
 ) -> dict:
     """Runner for LEI-routed modes (``lei`` + ``lei-reeval``).
 
@@ -714,60 +753,93 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
         }
         bulk_isins = _gleif_isin_bulk.load_isin_mapping(target_leis)
 
-    via_witness = 0
-    via_gleif = 0
-    via_none = 0
-    enriched_total = 0
-    emitted_total = 0
-    retired_total = 0
-    for i, row in enumerate(rows):
-        canonicals, source = _resolve_lei_to_canonicals(
-            row, batch_size, api_key, bulk_isins=bulk_isins,
-            sleep_between_batches=sleep_s,
-        )
+    st = {"witness": 0, "gleif": 0, "none": 0,
+          "enriched": 0, "emitted": 0, "retired": 0, "processed": 0}
+
+    def _consume(row, canonicals, source):
+        """Update counters + emit for one resolved LEI. Runs only on the
+        calling (main) thread, so the EventLog stays single-writer even
+        when resolution is parallelised."""
         if source == "witness":
-            via_witness += 1
+            st["witness"] += 1
         elif source in ("gleif", "gleif_bulk"):
-            via_gleif += 1
+            st["gleif"] += 1
         else:
-            via_none += 1
-        enriched_total += len(canonicals)
+            st["none"] += 1
+        st["enriched"] += len(canonicals)
         if canonicals:
-            emitted_total += emit_listing_events(log, canonicals)
+            st["emitted"] += emit_listing_events(log, canonicals)
         if cfg.get("retire_suspects"):
-            # Per-row retire computation. Identical result to the
-            # batched call as long as the row is the source-of-truth
-            # for its own suspect_tickers, which it is.
+            # Per-row retire computation. Identical result to the batched
+            # call as long as the row is the source-of-truth for its own
+            # suspect_tickers, which it is.
             retires = _retires_for_suspects([row], canonicals)
             if retires:
-                retired_total += emit_retire_events(log, retires)
-        # Only pace when we actually called OpenFIGI. With the bulk-file
-        # path most rows resolve to "no ISINs" (~89 % of a 10 k cohort
-        # in prod) and would otherwise burn 3 s of anonymous-tier sleep
-        # each — turning a ~1 h run into a ~7 h one for zero
-        # rate-limit benefit (the sleep paces OpenFIGI; we didn't call
-        # OpenFIGI). The legacy REST path always made a GLEIF call per
-        # LEI so the sleep had its own justification then; with bulk it
-        # only matters when source != "none".
-        if source != "none":
-            time.sleep(sleep_s)
-        if (i + 1) % 100 == 0:
+                st["retired"] += emit_retire_events(log, retires)
+        st["processed"] += 1
+        if st["processed"] % 100 == 0:
             logger.info(
                 "  %s: %d / %d processed, %d %s "
                 "(witness=%d gleif=%d none=%d)",
-                cfg["log_label"], i + 1, len(rows),
-                enriched_total, cfg["progress_phrase"],
-                via_witness, via_gleif, via_none,
+                cfg["log_label"], st["processed"], len(rows),
+                st["enriched"], cfg["progress_phrase"],
+                st["witness"], st["gleif"], st["none"],
             )
+
+    if concurrency > 1 and api_key:
+        # Parallelise the OpenFIGI round-trips (I/O-bound) across a
+        # bounded pool; a shared limiter keeps the aggregate under the
+        # keyed ceiling. Emission stays on this thread via _consume, so
+        # the EventLog is never written concurrently. Completion order
+        # (not row order) drives emission — fine, each LEI's Listings are
+        # independent and idempotent.
+        limiter = _RateLimiter(_CONCURRENT_RATE_PER_MIN)
+
+        def _resolve(row):
+            return row, _resolve_lei_to_canonicals(
+                row, batch_size, api_key, bulk_isins=bulk_isins,
+                sleep_between_batches=0.0, rate_limiter=limiter,
+            )
+
+        rows_it = iter(rows)
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            inflight = set()
+            for _ in range(concurrency * 2):
+                nxt = next(rows_it, None)
+                if nxt is None:
+                    break
+                inflight.add(pool.submit(_resolve, nxt))
+            while inflight:
+                done, pending = wait(inflight, return_when=FIRST_COMPLETED)
+                inflight = set(pending)
+                for fut in done:
+                    row, (canonicals, source) = fut.result()
+                    _consume(row, canonicals, source)
+                    nxt = next(rows_it, None)
+                    if nxt is not None:
+                        inflight.add(pool.submit(_resolve, nxt))
+    else:
+        for row in rows:
+            canonicals, source = _resolve_lei_to_canonicals(
+                row, batch_size, api_key, bulk_isins=bulk_isins,
+                sleep_between_batches=sleep_s,
+            )
+            _consume(row, canonicals, source)
+            # Only pace when we actually called OpenFIGI. With the
+            # bulk-file path most rows resolve to "no ISINs" and would
+            # otherwise burn a sleep each for zero rate-limit benefit
+            # (the sleep paces OpenFIGI; we didn't call it).
+            if source != "none":
+                time.sleep(sleep_s)
 
     if cfg.get("retire_suspects"):
         logger.info("  %s: retired %d suspect tickers",
-                    cfg["log_label"], retired_total)
+                    cfg["log_label"], st["retired"])
     logger.info("  %s: source mix witness=%d gleif=%d none=%d",
-                cfg["log_label"], via_witness, via_gleif, via_none)
+                cfg["log_label"], st["witness"], st["gleif"], st["none"])
     return {
-        "queried": len(rows), "enriched": enriched_total,
-        "emitted": emitted_total + retired_total, "errors": 0,
+        "queried": len(rows), "enriched": st["enriched"],
+        "emitted": st["emitted"] + st["retired"], "errors": 0,
     }
 
 
@@ -775,6 +847,7 @@ def _run_mode(  # pylint: disable=too-many-locals,too-many-arguments,too-many-po
     mode, driver, log, limit, api_key,
     bulk_isins_enabled: bool = True,
     bulk_isins: dict[str, list[str]] | None = None,
+    concurrency: int = 1,
 ):
     """Run one OpenFIGI mode end-to-end. Mode-specific wiring lives in
     ``_MODES`` so this body can stay generic.
@@ -797,6 +870,7 @@ def _run_mode(  # pylint: disable=too-many-locals,too-many-arguments,too-many-po
             mode, driver, log, limit, api_key,
             bulk_isins_enabled=bulk_isins_enabled,
             bulk_isins=bulk_isins,
+            concurrency=concurrency,
         )
     rows = cfg["fetch"](driver, limit)
     logger.info("%s mode: %d %s",
@@ -841,6 +915,7 @@ def _run_mode(  # pylint: disable=too-many-locals,too-many-arguments,too-many-po
 def load_openfigi(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     driver, log: EventLog, *, mode: str, limit: int,
     api_key: str | None, bulk_isins_enabled: bool = True,
+    concurrency: int = 1,
 ) -> dict:
     """Run the requested mode(s) end to end. Returns a per-mode
     summary dict suitable for logging + the Kuma push-line.
@@ -877,18 +952,21 @@ def load_openfigi(  # pylint: disable=too-many-arguments,too-many-positional-arg
             "isin", driver, log, limit, api_key,
             bulk_isins_enabled=bulk_isins_enabled,
             bulk_isins=bulk_isins,
+            concurrency=concurrency,
         )
     if mode in ("lei", "both"):
         summary["lei"] = _run_mode(
             "lei", driver, log, limit, api_key,
             bulk_isins_enabled=bulk_isins_enabled,
             bulk_isins=bulk_isins,
+            concurrency=concurrency,
         )
     if mode in ("lei-reeval", "both"):
         summary["lei-reeval"] = _run_mode(
             "lei-reeval", driver, log, limit, api_key,
             bulk_isins_enabled=bulk_isins_enabled,
             bulk_isins=bulk_isins,
+            concurrency=concurrency,
         )
     elapsed = time.time() - t0
     for m, s in summary.items():
@@ -924,6 +1002,15 @@ def main(argv=None):
     parser.add_argument(
         "--limit", type=int, default=10000,
         help="Max IDs to process per mode (default: 10000)",
+    )
+    parser.add_argument(
+        "--concurrency", type=int,
+        default=int(os.environ.get("OPENFIGI_CONCURRENCY", "1") or "1"),
+        help=("Parallel OpenFIGI requests for LEI-routed modes "
+              "(default: 1 = serial). Only applied with an API key; a "
+              "shared limiter keeps the aggregate under the keyed "
+              "600 req/min ceiling. OPENFIGI_CONCURRENCY sets the "
+              "env default."),
     )
     parser.add_argument(
         "--neo4j-uri",
@@ -972,6 +1059,7 @@ def main(argv=None):
             driver, log, mode=args.mode, limit=args.limit,
             api_key=args.api_key or None,
             bulk_isins_enabled=args.bulk_isins_enabled,
+            concurrency=args.concurrency,
         )
     except httpx.HTTPError:
         logger.exception("Fatal HTTP error during OpenFIGI enrichment")

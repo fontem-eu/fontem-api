@@ -1127,3 +1127,97 @@ def test_resolve_lei_to_canonicals_no_inter_batch_sleep_when_disabled(
         # sleep_between_batches default = 0
     )
     assert not sleeps
+
+
+# ── Concurrency: rate limiter + parallel LEI resolution ───────────
+
+
+def test_rate_limiter_spaces_calls_by_interval(monkeypatch):
+    """_RateLimiter reserves evenly-spaced slots: after the first
+    (free) grant, every subsequent wait() sleeps exactly one interval
+    (60/rate_per_min) so the aggregate rate can't exceed the ceiling."""
+    clock = {"t": 0.0}
+    slept: list[float] = []
+    monkeypatch.setattr(load_openfigi.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(d):
+        slept.append(d)
+        clock["t"] += d  # sleeping advances the (fake) clock
+
+    monkeypatch.setattr(load_openfigi.time, "sleep", fake_sleep)
+
+    limiter = load_openfigi._RateLimiter(rate_per_min=600)  # 0.1s interval
+    for _ in range(5):
+        limiter.wait()
+
+    # First grant is immediate (no sleep); the next four each wait one
+    # 0.1s interval.
+    assert slept == pytest.approx([0.1, 0.1, 0.1, 0.1])
+
+
+def _lei_rows(n, with_isin):
+    return [
+        {"lei": f"L{i}", "company_gmr_id": f"g{i}",
+         "witness_isins": ([f"I{i}"] if with_isin(i) else []),
+         "suspect_tickers": []}
+        for i in range(n)
+    ]
+
+
+def test_run_mode_via_lei_concurrent_emits_every_canonical(monkeypatch):
+    """With concurrency>1 and an API key, resolution runs in a thread
+    pool but every LEI's canonical is still emitted exactly once (on the
+    main thread), so no enrichment is dropped or double-counted."""
+    rows = _lei_rows(12, lambda i: True)
+    monkeypatch.setitem(load_openfigi._MODES["lei"], "fetch",
+                        lambda _d, _l: rows)
+
+    def fake_query_openfigi(payload, _api_key):
+        isin = payload[0]["idValue"]
+        return [{"data": [{"ticker": f"T{isin}", "exchCode": "XX",
+                           "marketSector": "Equity"}]}]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+
+    log, emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei", driver=MagicMock(), log=log, limit=12,
+        api_key="KEY", concurrency=4,
+    )
+    assert summary["queried"] == 12
+    assert summary["enriched"] == 12
+    assert emit.upsert.call_count == 12
+
+
+def test_run_mode_via_lei_concurrent_matches_serial(monkeypatch):
+    """The parallel path is behaviour-preserving: same summary counts
+    and same multiset of emitted envelopes as the serial path, for an
+    identical mixed cohort (some LEIs resolve, some don't)."""
+    rows = _lei_rows(20, lambda i: i % 3 == 0)  # ~1/3 have a witness ISIN
+
+    def fake_query_openfigi(payload, _api_key):
+        isin = payload[0]["idValue"]
+        return [{"data": [{"ticker": f"T{isin}", "exchCode": "XX",
+                           "marketSector": "Equity"}]}]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+
+    def run(concurrency):
+        monkeypatch.setitem(load_openfigi._MODES["lei"], "fetch",
+                            lambda _d, _l: rows)
+        log, emit = _mock_log()
+        summary = load_openfigi._run_mode_via_lei(
+            "lei", driver=MagicMock(), log=log, limit=20,
+            api_key="KEY", concurrency=concurrency,
+        )
+        types = sorted(c.args[0] for c in emit.upsert.call_args_list)
+        return summary, types
+
+    serial_summary, serial_types = run(1)
+    conc_summary, conc_types = run(8)
+
+    assert conc_summary == serial_summary
+    assert conc_types == serial_types
+    assert serial_summary["enriched"] == 7  # ceil(20/3) LEIs with an ISIN
