@@ -198,7 +198,10 @@ def firds_stats(source: FromDishka[DataQualitySource]):
     return source.get_firds_stats()
 
 
-@router.get("/prices")
+# NOTE: not "/prices" — the legacy GMR router registers /{ticker}/prices
+# first, which would swallow /data-quality/prices as ticker="data-quality"
+# and 404. /price-layer dodges the pattern.
+@router.get("/price-layer")
 def prices_stats():
     """Price-layer freshness: fetcher index vs the graph-exported
     universe. File-based (NFS), no graph round-trip."""
