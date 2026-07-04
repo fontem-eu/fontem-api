@@ -100,7 +100,7 @@ spec:
                 {{- range .extraEnv }}
                 - {{ toYaml . | nindent 18 | trim }}
                 {{- end }}
-              {{- if or .needsEdgarData .needsEsefData .needsFirdsCache }}
+              {{- if or .needsEdgarData .needsEdgarDataRW .needsEsefData .needsFirdsCache }}
               # edgar-data / esef-data PVCs are owned by the main fontem-api
               # chart (RO mount; API workers write). firds-cache is owned by
               # this ETL chart (RW mount; the FIRDS cronjob writes downloaded
@@ -111,6 +111,13 @@ spec:
                 - name: edgar-data
                   mountPath: /edgar-data
                   readOnly: true
+                {{- end }}
+                {{- if .needsEdgarDataRW }}
+                # RW: the price-universe exporter writes
+                # /edgar-data/prices/universe_graph.json for the
+                # price fetcher to consume.
+                - name: edgar-data
+                  mountPath: /edgar-data
                 {{- end }}
                 {{- if .needsEsefData }}
                 - name: esef-data
@@ -146,9 +153,9 @@ spec:
                 {{- range .args }}
                 - {{ . | quote }}
                 {{- end }}
-          {{- if or .needsEdgarData .needsEsefData .needsFirdsCache }}
+          {{- if or .needsEdgarData .needsEdgarDataRW .needsEsefData .needsFirdsCache }}
           volumes:
-            {{- if .needsEdgarData }}
+            {{- if or .needsEdgarData .needsEdgarDataRW }}
             - name: edgar-data
               persistentVolumeClaim:
                 claimName: edgar-data

@@ -45,6 +45,11 @@ cronjobs:
   openfigi:
     limit: ""
 
+# Price-universe exporter (see cronjob-price-universe.yaml). Off by
+# default: needs the edgar-data PVC, which only prod mounts today.
+priceUniverse:
+  enabled: false
+
 # FIRDS-specific knobs. See cronjob-firds.yaml for the wiring.
 #
 # proxyEnabled — wires the cronjob to use the per-node tinyproxy

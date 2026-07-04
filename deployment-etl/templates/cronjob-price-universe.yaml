@@ -1,0 +1,28 @@
+{{- /*
+  Price-universe exporter: writes the graph's listed entities (one
+  primary Yahoo-format symbol per Company/InvestmentFund) to
+  /edgar-data/prices/universe_graph.json on the shared NFS. The
+  usa-stock-price-fetcher cron (03:00) consumes that file as a ticker
+  source — this is what makes the price layer graph-driven instead of
+  frozen on a static SEC list. Runs daily at 02:30 so the universe is
+  fresh before the fetcher starts.
+
+  Gated on .Values.priceUniverse.enabled so environments without the
+  edgar-data PVC (golden chart tests) don't render an unmountable job.
+*/}}
+{{- $pu := default (dict) .Values.priceUniverse }}
+{{- if $pu.enabled }}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"             "etl-price-universe"
+      "schedule"         "30 2 * * *"
+      "module"           "src.etl.export_price_universe"
+      "args"             (list)
+      "deadlineSeconds"  1800
+      "cpuRequest"       "100m"
+      "cpuLimit"         "1"
+      "memRequest"       "256Mi"
+      "memLimit"         "1Gi"
+      "needsEdgarDataRW" true
+      "Values"           .Values
+      "Release"          .Release) -}}
+{{- end }}
