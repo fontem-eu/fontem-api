@@ -1258,13 +1258,14 @@ def test_equity_canonicals_tags_company_and_fund_classes():
     assert unknown == {"Equity WRT": 1}
 
 
-def test_run_mode_via_lei_does_not_emit_fund_class_listings(monkeypatch):
-    """Fund-class instruments are counted in the summary but NOT
-    emitted as Company listings — that cohort belongs to the
-    :InvestmentFund model (UpsertInvestmentFund, Track B)."""
+def test_run_mode_via_lei_emits_fund_entity_and_unit_listing(monkeypatch):
+    """Fund-class instruments in lei mode become an UpsertInvestmentFund
+    (same gmr_id — sinks relabel in place) plus a unit UpsertListing;
+    they are never emitted as Company listings."""
     rows = [
         {"lei": "L1", "company_gmr_id": "g1", "witness_isins": ["I1"]},
-        {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"]},
+        {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"],
+         "name": "EXAMPLE UCITS FUND", "country": "LU"},
     ]
     monkeypatch.setitem(load_openfigi._MODES["lei"], "fetch",
                         lambda _d, _l: rows)
@@ -1272,9 +1273,11 @@ def test_run_mode_via_lei_does_not_emit_fund_class_listings(monkeypatch):
     def fake_query_openfigi(payload, _api_key):
         isin = payload[0]["idValue"]
         sec2 = "Common Stock" if isin == "I1" else "Mutual Fund"
+        sec = "Common Stock" if isin == "I1" else "Open-End Fund"
         return [{"data": [{"ticker": f"T{isin}", "exchCode": "XX",
                            "marketSector": "Equity",
-                           "securityType2": sec2}]}]
+                           "securityType2": sec2,
+                           "securityType": sec}]}]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
     monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
@@ -1284,4 +1287,76 @@ def test_run_mode_via_lei_does_not_emit_fund_class_listings(monkeypatch):
     )
     assert summary["enriched"] == 1      # only the Common Stock
     assert summary["funds"] == 1
-    assert emit.upsert.call_count == 1
+    # 1 company listing + (1 fund entity + 1 fund unit listing)
+    assert emit.upsert.call_count == 3
+    types = [c.args[0] for c in emit.upsert.call_args_list]
+    assert types.count("UpsertInvestmentFund") == 1
+    fund_call = next(c for c in emit.upsert.call_args_list
+                     if c.args[0] == "UpsertInvestmentFund")
+    assert fund_call.kwargs["payload"]["gmr_id"] == "g2"
+    assert fund_call.kwargs["payload"]["fund_type"] == "Open-End Fund"
+    assert fund_call.kwargs["payload"]["name"] == "EXAMPLE UCITS FUND"
+    unit_call = [c for c in emit.upsert.call_args_list
+                 if c.args[0] == "UpsertListing"
+                 and c.kwargs["payload"].get("security_type")
+                 == "Open-End Fund"]
+    assert len(unit_call) == 1
+
+
+def test_run_mode_via_lei_reeval_holds_funds_back(monkeypatch):
+    """lei-reeval does NOT emit funds: its cohort already has Listings,
+    so a fund there means reclassifying a live entity — an explicit
+    follow-up, not a side effect of ticker re-evaluation."""
+    rows = [{"lei": "L1", "company_gmr_id": "g1",
+             "suspect_tickers": [], "witness_isins": ["I1"]}]
+    monkeypatch.setitem(load_openfigi._MODES["lei-reeval"], "fetch",
+                        lambda _d, _l: rows)
+
+    def fake_query_openfigi(_payload, _api_key):
+        return [{"data": [{"ticker": "TFUND", "exchCode": "XX",
+                           "marketSector": "Equity",
+                           "securityType2": "Mutual Fund",
+                           "securityType": "Open-End Fund"}]}]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei-reeval", driver=MagicMock(), log=log, limit=1, api_key=None,
+    )
+    assert summary["funds"] == 1
+    assert emit.upsert.call_count == 0
+
+
+def test_emit_fund_events_payload_shapes():
+    """One batch per LEI: the fund entity first, then one unit listing
+    per record, all sharing the fund's gmr_id."""
+    log, emit = _mock_log()
+    row = {"lei": "L1" * 10, "company_gmr_id": "g1",
+           "name": "F", "country": "LU", "active": True,
+           "legal_form": "8888"}
+    records = [
+        {"ticker": "U1", "exchange_code": "LX", "isin": "LU0000000001",
+         "company_gmr_id": "g1", "entity_class": "fund",
+         "security_type": "Open-End Fund"},
+        {"ticker": "U2", "exchange_code": "LX", "isin": "LU0000000002",
+         "company_gmr_id": "g1", "entity_class": "fund",
+         "security_type": ""},
+    ]
+    total = load_openfigi.emit_fund_events(log, row, records)
+    assert total == 3           # entity + 2 unit listings
+    types = [c.args[0] for c in emit.upsert.call_args_list]
+    assert types == ["UpsertInvestmentFund", "UpsertListing",
+                     "UpsertListing"]
+    fund_payload = emit.upsert.call_args_list[0].kwargs["payload"]
+    assert fund_payload["fund_type"] == "Open-End Fund"
+    assert fund_payload["legal_form"] == "8888"
+    assert load_openfigi.emit_fund_events(log, row, []) == 0
+
+
+def test_lei_fetch_returns_entity_fields():
+    """The LEI fetch must carry the Company node's identity fields so
+    the fund upsert doesn't need a second graph round-trip."""
+    for field in ("c.name AS name", "c.country AS country",
+                  "c.active AS active", "c.legal_form AS legal_form"):
+        assert field in load_openfigi.FETCH_LEIS_NO_LISTING

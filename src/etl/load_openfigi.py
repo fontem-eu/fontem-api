@@ -179,6 +179,8 @@ MATCH (c:Company)
 WHERE c.lei IS NOT NULL
   AND NOT EXISTS { (c)-[:LISTED_AS]->(:Listing) }
 RETURN c.lei AS lei, c.gmr_id AS company_gmr_id,
+       c.name AS name, c.country AS country,
+       c.active AS active, c.legal_form AS legal_form,
        [] AS witness_isins
 LIMIT $limit
 """
@@ -241,6 +243,10 @@ def fetch_leis_no_listing(driver, limit):
             {
                 "lei": r["lei"],
                 "company_gmr_id": r["company_gmr_id"],
+                "name": r["name"],
+                "country": r["country"],
+                "active": r["active"],
+                "legal_form": r["legal_form"],
                 "witness_isins": list(r["witness_isins"]),
             }
             for r in result
@@ -557,6 +563,61 @@ def emit_listing_events(log: EventLog, enriched: list[dict]) -> int:
                     isin=rec.get("isin"),
                     mic=rec.get("mic"),
                     active=True,
+                    security_type=rec.get("security_type") or None,
+                ),
+            )
+            total += 1
+    return total
+
+
+def emit_fund_events(log: EventLog, row: dict,
+                     fund_records: list[dict]) -> int:
+    """Emit one LEI's fund identity + its unit listings.
+
+    The entity goes out as UpsertInvestmentFund (same gmr_id the
+    entity had as a Company — the sinks relabel in place), each unit
+    as an UpsertListing whose ``security_type`` routes it at the fund
+    in the sinks. ``fund_type`` is the first granular securityType
+    seen — funds overwhelmingly carry one unit class."""
+    if not fund_records:
+        return 0
+    fund_type = next(
+        (r["security_type"] for r in fund_records
+         if r.get("security_type")),
+        None,
+    )
+    batch_id = uuid.uuid4()
+    total = 0
+    with log.batch(batch_id, producer="load_openfigi") as emit:
+        emit.upsert(
+            "UpsertInvestmentFund",
+            iri=("http://data.fontem.eu/id/InvestmentFund/"
+                 f"{row['company_gmr_id']}"),
+            domain="fund",
+            payload=builders.upsert_investment_fund(
+                gmr_id=row["company_gmr_id"],
+                name=row.get("name"),
+                country=row.get("country"),
+                lei=row.get("lei"),
+                active=row.get("active"),
+                legal_form=row.get("legal_form"),
+                fund_type=fund_type,
+            ),
+        )
+        total += 1
+        for rec in fund_records:
+            emit.upsert(
+                "UpsertListing",
+                iri=f"http://data.fontem.eu/id/Listing/{rec['ticker']}",
+                domain="listing",
+                payload=builders.upsert_listing(
+                    ticker=rec["ticker"],
+                    company_gmr_id=rec["company_gmr_id"],
+                    exchange=rec.get("exchange_code") or None,
+                    isin=rec.get("isin"),
+                    mic=rec.get("mic"),
+                    active=True,
+                    security_type=rec.get("security_type") or None,
                 ),
             )
             total += 1
@@ -587,6 +648,12 @@ _MODES = {
         # ISIN-mediated path is the only working option. See memory:
         # openfigi-no-id-lei.
         "via_lei": True,
+        # Fund-class instruments found here become InvestmentFund
+        # entities + unit listings. lei-reeval deliberately does NOT
+        # opt in: its cohort already has Listings, so a fund there
+        # means reclassifying a live entity — an explicit follow-up,
+        # not a side effect of ticker re-evaluation.
+        "emit_funds": True,
     },
     "lei-reeval": {
         "fetch": fetch_leis_with_suspect_listings,
@@ -799,7 +866,7 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
 
     st = {"witness": 0, "gleif": 0, "none": 0,
           "enriched": 0, "emitted": 0, "retired": 0, "processed": 0,
-          "funds": 0, "unknown": {}}
+          "funds": 0, "fund_emitted": 0, "unknown": {}}
 
     def _consume(row, records, source, unknown):
         """Update counters + emit for one resolved LEI. Runs only on the
@@ -817,10 +884,14 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
             st["unknown"][k] = st["unknown"].get(k, 0) + v
         canonicals = [r for r in records
                       if r.get("entity_class", "company") == "company"]
-        st["funds"] += len(records) - len(canonicals)
+        fund_records = [r for r in records
+                        if r.get("entity_class") == "fund"]
+        st["funds"] += len(fund_records)
         st["enriched"] += len(canonicals)
         if canonicals:
             st["emitted"] += emit_listing_events(log, canonicals)
+        if fund_records and cfg.get("emit_funds"):
+            st["fund_emitted"] += emit_fund_events(log, row, fund_records)
         if cfg.get("retire_suspects"):
             # Per-row retire computation. Identical result to the batched
             # call as long as the row is the source-of-truth for its own
@@ -891,16 +962,23 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
     logger.info("  %s: source mix witness=%d gleif=%d none=%d",
                 cfg["log_label"], st["witness"], st["gleif"], st["none"])
     if st["funds"]:
-        logger.info(
-            "  %s: %d fund-class instruments (securityType2 Mutual "
-            "Fund) held for the :InvestmentFund path",
-            cfg["log_label"], st["funds"])
+        if cfg.get("emit_funds"):
+            logger.info(
+                "  %s: %d fund-class instruments → %d InvestmentFund "
+                "events emitted (entities + unit listings)",
+                cfg["log_label"], st["funds"], st["fund_emitted"])
+        else:
+            logger.info(
+                "  %s: %d fund-class instruments (securityType2 Mutual "
+                "Fund) held — this mode does not emit funds",
+                cfg["log_label"], st["funds"])
     if st["unknown"]:
         logger.info("  %s: skipped unknown securityType2s: %s",
                     cfg["log_label"], st["unknown"])
     return {
         "queried": len(rows), "enriched": st["enriched"],
-        "emitted": st["emitted"] + st["retired"], "errors": 0,
+        "emitted": st["emitted"] + st["retired"] + st["fund_emitted"],
+        "errors": 0,
         "funds": st["funds"],
     }
 
