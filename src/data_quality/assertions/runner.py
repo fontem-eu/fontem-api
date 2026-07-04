@@ -42,10 +42,11 @@ def evaluate_assertion(
     cypher: RowRunner,
     sql: RowRunner,
     consistency: "RowRunner | None" = None,
+    prices: "RowRunner | None" = None,
 ) -> AssertionResult:
     """Run one assertion and classify the outcome."""
-    runner = {"cypher": cypher, "sql": sql, "consistency": consistency}.get(
-        assertion.engine)
+    runner = {"cypher": cypher, "sql": sql, "consistency": consistency,
+              "prices": prices}.get(assertion.engine)
     if runner is None:
         # An assertion whose engine has no runner wired (e.g. the cross-store
         # consistency engine when Virtuoso is unconfigured) is surfaced, not
@@ -81,9 +82,10 @@ def run_catalog(
     sql: RowRunner,
     assertions: "list[Assertion] | None" = None,
     consistency: "RowRunner | None" = None,
+    prices: "RowRunner | None" = None,
 ) -> "list[AssertionResult]":
     """Run every assertion (or a supplied subset) and return results."""
-    return [evaluate_assertion(a, cypher, sql, consistency)
+    return [evaluate_assertion(a, cypher, sql, consistency, prices)
             for a in (assertions or ASSERTIONS)]
 
 

@@ -696,6 +696,71 @@ ASSERTIONS: list[Assertion] = [
         "coverage question (Neo4j leads Virtuoso by ~3.8% on LEI), not a sink-"
         "render inconsistency.",
     ),
+    # ── InvestmentFund model (funds are not companies) ────────────────
+    Assertion(
+        "keys.investmentfund_gmr_id", KEYS,
+        "Every InvestmentFund has a gmr_id", BLOCK,
+        "cypher",
+        "MATCH (f:InvestmentFund) WHERE f.gmr_id IS NULL "
+        "RETURN count(f) AS violations",
+        zero_violations(),
+        "gmr_id is the merge key; a fund without one can never be "
+        "updated or relabeled again.",
+    ),
+    Assertion(
+        "refs.no_dual_company_fund_label", REFS,
+        "No node is both :Company and :InvestmentFund", BLOCK,
+        "cypher",
+        "MATCH (n) WHERE n:Company AND n:InvestmentFund "
+        "RETURN count(n) AS violations",
+        zero_violations(),
+        "The neo4j-sink relabels in place (SET :InvestmentFund REMOVE "
+        ":Company, and UpsertCompany refreshes never relabel back). A "
+        "dual-labeled node means that invariant broke and queries "
+        "would double-count the entity on both surfaces.",
+    ),
+    Assertion(
+        "coverage.fund_unit_security_type", COVERAGE,
+        "Fund unit listings carry security_type", WARN,
+        "cypher",
+        "MATCH (:InvestmentFund)-[:LISTED_AS]->(l:Listing) "
+        "RETURN sum(CASE WHEN l.security_type IS NULL THEN 1 ELSE 0 "
+        "END) AS violations, count(l) AS total",
+        zero_violations(total_key="total"),
+        "Fund units are only routed at the fund BECAUSE of "
+        "security_type; a unit without it was attached by some other "
+        "path and deserves a look.",
+    ),
+    # ── Price layer (NFS index vs graph universe) ─────────────────────
+    Assertion(
+        "freshness.price_index_present", FRESHNESS,
+        "Price index + graph universe exist on the NFS", WARN,
+        "prices",
+        "index_present,universe_present",
+        lambda row: (
+            bool(row.get("index_present")) and bool(row.get("universe_present")),
+            f"index_present={row.get('index_present')} "
+            f"universe_present={row.get('universe_present')}",
+        ),
+        "Both files are produced nightly (etl-price-universe 02:30, "
+        "usa-stock-price-fetcher 03:00). Either missing means the "
+        "price pipeline is stranded again — exactly the 2026-03..07 "
+        "outage this cron chain fixed.",
+    ),
+    Assertion(
+        "freshness.price_data_fresh", FRESHNESS,
+        "Tracked tickers are mostly fresh (7d)", WARN,
+        "prices",
+        "fresh_ratio",
+        lambda row: (
+            float(row.get("fresh_ratio") or 0) >= 0.5,
+            f"fresh_ratio={row.get('fresh_ratio')} "
+            f"(fresh={row.get('fresh_7d')}/with_data={row.get('with_data')})",
+        ),
+        "Yahoo throttling or a dead cron shows up here first. 0.5 is "
+        "deliberately loose while the initial multi-night backlog "
+        "clears; tighten once universe_backlog approaches zero.",
+    ),
 ]
 
 

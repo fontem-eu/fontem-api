@@ -92,6 +92,22 @@ def _select(families: str | None):
     return [a for a in ASSERTIONS if a.family in wanted]
 
 
+def _build_prices_runner():
+    """Prices-engine runner: every query gets the same stats row,
+    computed from the NFS price index + graph universe. Returns None
+    (engine unwired → assertions WARN, not crash) when the price dir
+    isn't mounted in this environment."""
+    data_dir = os.environ.get("GMR_PRICE_DATA_DIR", "/edgar-data/prices")
+    if not os.path.isdir(data_dir):
+        return None
+    # lazy import: keeps the graph-only path import-light
+    from src.data_quality import price_index  # pylint: disable=import-outside-toplevel
+
+    def _run(_query: str) -> Mapping[str, Any]:
+        return price_index.get_price_stats(data_dir)
+    return _run
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(prog="dq-assert", description=__doc__)
     parser.add_argument(
@@ -110,7 +126,9 @@ def main(argv: "list[str] | None" = None) -> int:
         cypher = _build_cypher_runner(client)
         sql = _build_sql_runner(dsn)
         consistency_runner = _build_consistency_runner(client)
-        results = run_catalog(cypher, sql, _select(args.family), consistency_runner)
+        prices_runner = _build_prices_runner()
+        results = run_catalog(cypher, sql, _select(args.family),
+                              consistency_runner, prices_runner)
     finally:
         client.close()
 

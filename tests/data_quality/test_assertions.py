@@ -40,7 +40,7 @@ def test_families_and_severities_valid():
     for a in ASSERTIONS:
         assert a.family in fams, a.id
         assert a.severity in (BLOCK, WARN), a.id
-        assert a.engine in ("cypher", "sql", "consistency"), a.id
+        assert a.engine in ("cypher", "sql", "consistency", "prices"), a.id
         assert a.query.strip(), a.id
         assert callable(a.evaluate), a.id
 
@@ -68,7 +68,9 @@ def test_engine_matches_family():
         elif a.family == CONSISTENCY:
             assert a.engine == "consistency", a.id
         else:
-            assert a.engine == "sql", a.id
+            # events families are sql; the price-layer freshness pair
+            # reads the NFS index via the dedicated prices engine.
+            assert a.engine in ("sql", "prices"), a.id
 
 
 def test_freshness_query_includes_known_cronjobs():
@@ -177,7 +179,9 @@ def _all_clean_sql(_q):
 def test_run_catalog_all_pass():
     results = run_catalog(
         _all_clean_cypher, _all_clean_sql,
-        consistency=lambda et: {"violations": 0, "total": 12, "detail": ""})
+        consistency=lambda et: {"violations": 0, "total": 12, "detail": ""},
+        prices=lambda q: {"index_present": True, "universe_present": True,
+                          "fresh_ratio": 1.0, "fresh_7d": 1, "with_data": 1})
     assert len(results) == len(ASSERTIONS)
     assert all(r.status == PASS for r in results)
     assert exit_code(results) == 0
@@ -400,3 +404,36 @@ def test_consistency_engine_dispatch_and_missing_runner():
     # no runner wired -> WARN (not a crash)
     miss = evaluate_assertion(a, None, None, consistency=None)
     assert miss.status == WARN
+
+
+def test_prices_engine_unwired_warns_not_crashes():
+    """Environments without the price mount leave the prices engine
+    unwired — its WARN assertions must degrade to WARN, never ERROR."""
+    prices_assertions = [a for a in ASSERTIONS if a.engine == "prices"]
+    assert prices_assertions, "expected price-layer assertions"
+    for a in prices_assertions:
+        res = evaluate_assertion(a, cypher=lambda q: {}, sql=lambda q: {})
+        assert res.status == "warn", (a.id, res.status)
+
+
+def test_price_freshness_evaluators():
+    fresh = by_id()["freshness.price_data_fresh"]
+    ok, _ = fresh.evaluate({"fresh_ratio": 0.9, "fresh_7d": 9, "with_data": 10})
+    assert ok
+    bad, _ = fresh.evaluate({"fresh_ratio": 0.1})
+    assert not bad
+    present = by_id()["freshness.price_index_present"]
+    ok, _ = present.evaluate({"index_present": True, "universe_present": True})
+    assert ok
+    missing, _ = present.evaluate({"index_present": False,
+                                   "universe_present": True})
+    assert not missing
+
+
+def test_fund_assertions_shapes():
+    dual = by_id()["refs.no_dual_company_fund_label"]
+    assert dual.severity == BLOCK
+    ok, _ = dual.evaluate({"violations": 0})
+    assert ok
+    bad, _ = dual.evaluate({"violations": 3})
+    assert not bad

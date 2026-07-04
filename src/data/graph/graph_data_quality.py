@@ -856,10 +856,52 @@ class GraphDataQualitySource(DataQualitySource):
                 "RETURN count(l) AS n"
             ).single()["n"]
             without_ticker = total - with_ticker
+            with_security_type = session.run(
+                "MATCH (l:Listing) WHERE l.security_type IS NOT NULL "
+                "RETURN count(l) AS n"
+            ).single()["n"]
+            by_security_type = session.run(
+                "MATCH (l:Listing) WHERE l.security_type IS NOT NULL "
+                "RETURN l.security_type AS security_type, count(l) AS count "
+                "ORDER BY count DESC LIMIT 10"
+            ).data()
+            companies_listed = session.run(
+                "MATCH (c:Company)-[:LISTED_AS]->(:Listing) "
+                "RETURN count(DISTINCT c) AS n"
+            ).single()["n"]
+            funds_total = session.run(
+                "MATCH (f:InvestmentFund) RETURN count(f) AS n"
+            ).single()["n"]
+            funds_by_type = session.run(
+                "MATCH (f:InvestmentFund) "
+                "RETURN coalesce(f.fund_type, 'unknown') AS fund_type, "
+                "count(f) AS count ORDER BY count DESC LIMIT 10"
+            ).data()
+            fund_unit_listings = session.run(
+                "MATCH (:InvestmentFund)-[:LISTED_AS]->(l:Listing) "
+                "RETURN count(l) AS n"
+            ).single()["n"]
+            dual_label = session.run(
+                "MATCH (n) WHERE n:Company AND n:InvestmentFund "
+                "RETURN count(n) AS n"
+            ).single()["n"]
         return {
             "total_listings": total, "with_ticker": with_ticker,
             "without_ticker": without_ticker,
             "enrichment_rate": round(with_ticker / max(total, 1) * 100, 1),
+            "with_security_type": with_security_type,
+            "security_type_rate": round(
+                with_security_type / max(total, 1) * 100, 1),
+            "by_security_type": by_security_type,
+            "companies_with_listing": companies_listed,
+            "funds": {
+                "total": funds_total,
+                "by_type": funds_by_type,
+                "unit_listings": fund_unit_listings,
+                # invariant guarded by dq-assert too: relabel-in-place
+                # must never leave a node with both labels
+                "dual_label_violations": dual_label,
+            },
         }
 
     def get_cdp_stats(self) -> dict:

@@ -6,11 +6,13 @@ Endpoints for the platform health and data quality dashboard.
 from __future__ import annotations
 
 import logging
+import os
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter
 
 from src.analysis.data_quality_source import DataQualitySource
+from src.data_quality import price_index
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +198,14 @@ def firds_stats(source: FromDishka[DataQualitySource]):
     return source.get_firds_stats()
 
 
+@router.get("/prices")
+def prices_stats():
+    """Price-layer freshness: fetcher index vs the graph-exported
+    universe. File-based (NFS), no graph round-trip."""
+    data_dir = os.environ.get("GMR_PRICE_DATA_DIR", "/edgar-data/prices")
+    return price_index.get_price_stats(data_dir)
+
+
 @router.get("/openfigi")
 @inject
 def openfigi_stats(source: FromDishka[DataQualitySource]):
@@ -267,7 +277,7 @@ def eurostat_freshness():
     # of the module init path — the stats layer is a separately-deployable
     # add-on (different Postgres), so loading it eagerly would force every
     # API instance to carry the stats client even when it's unused.
-    import os  # pylint: disable=import-outside-toplevel
+
     if "STATS_DATABASE_URL" not in os.environ:
         from fastapi import HTTPException  # pylint: disable=import-outside-toplevel
         raise HTTPException(

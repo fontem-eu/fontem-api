@@ -90,6 +90,9 @@ dqAssert:
   runId: "manual"
   family: ""
   deadlineSeconds: 600
+  # Mount the NFS price index (RO) so the "prices" engine assertions
+  # run; leave off where the edgar-data PVC doesn't exist.
+  mountEdgarData: false
 
 # One-off TED contract backfill/re-ingest. Off by default; render with
 # --set tedBackfill.enabled=true --set tedBackfill.year=2026

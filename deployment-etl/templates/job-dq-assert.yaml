@@ -81,4 +81,20 @@ spec:
             - --family
             - {{ .Values.dqAssert.family | quote }}
             {{- end }}
+          {{- if .Values.dqAssert.mountEdgarData }}
+          # RO price-index mount for the "prices" engine assertions
+          # (freshness.price_*). Off by default: environments without
+          # the edgar-data PVC (golden chart tests, dast) must still
+          # render + run the graph-only families.
+          volumeMounts:
+            - name: edgar-data
+              mountPath: /edgar-data
+              readOnly: true
+          {{- end }}
+      {{- if .Values.dqAssert.mountEdgarData }}
+      volumes:
+        - name: edgar-data
+          persistentVolumeClaim:
+            claimName: edgar-data
+      {{- end }}
 {{- end }}
