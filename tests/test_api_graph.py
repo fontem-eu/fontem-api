@@ -601,11 +601,11 @@ def test_since_filter_excludes_old_contracts():
 
 
 def test_traversal_excludes_only_internal_bookkeeping_rels():
-    """Only the internal-bookkeeping rels (REPORTED / LISTED_AS /
-    CATEGORIZED_AS / SAME_AS) should be filtered out of the explorer.
-    AWARDED / AWARDED_TO must come through so contract relationships
-    are visible — they used to be hidden behind a CLIENT_OF /
-    SUPPLIER_OF summary toggle that has since been deleted."""
+    """Internal-bookkeeping rels (REPORTED / LISTED_AS / CATEGORIZED_AS
+    / SAME_AS) and the RETIRED trade-summary rels (CLIENT_OF /
+    SUPPLIER_OF, whose materialiser was deleted) are filtered out of
+    the explorer. AWARDED / AWARDED_TO must come through so contract
+    relationships stay visible."""
     entities = {
         "comp-aaa": (COMPANY_A, "Company", "gmr_id"),
     }
@@ -625,8 +625,9 @@ def test_traversal_excludes_only_internal_bookkeeping_rels():
             excluded = set(kwargs.get("excluded", []))
             assert "AWARDED" not in excluded
             assert "AWARDED_TO" not in excluded
-            assert "CLIENT_OF" not in excluded
-            assert "SUPPLIER_OF" not in excluded
+            # retired summary layer: leftovers must never leak through
+            assert "CLIENT_OF" in excluded
+            assert "SUPPLIER_OF" in excluded
             assert "REPORTED" in excluded
             assert "SAME_AS" in excluded
             return FakeResult([])

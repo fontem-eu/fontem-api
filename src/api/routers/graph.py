@@ -22,12 +22,18 @@ from ..schemas.graph import (
 router = APIRouter(prefix="/graph", tags=["graph"])
 
 NODE_CAP = 500
-# Always excluded (internal bookkeeping). CLIENT_OF / SUPPLIER_OF
-# used to be pre-aggregated summary edges produced by a now-deleted
-# materialiser; the per-contract AWARDED / AWARDED_TO edges carry the
-# same information (with a time dimension), so the explorer just
-# traverses those directly.
-_ALWAYS_EXCLUDED = {"REPORTED", "LISTED_AS", "CATEGORIZED_AS", "SAME_AS"}
+# Always excluded. REPORTED / LISTED_AS / CATEGORIZED_AS / SAME_AS are
+# internal bookkeeping. CLIENT_OF / SUPPLIER_OF are the retired summary
+# edges of the deleted trade-edges materialiser — the per-contract
+# AWARDED / AWARDED_TO edges carry the same information (with a time
+# dimension). Excluding them here is defence in depth: stale leftovers
+# (or a merge tool that still re-creates them) must never resurface a
+# cache the API stopped maintaining — the graph view would show totals
+# the contracts list cannot reproduce.
+_ALWAYS_EXCLUDED = {
+    "REPORTED", "LISTED_AS", "CATEGORIZED_AS", "SAME_AS",
+    "CLIENT_OF", "SUPPLIER_OF",
+}
 _EXCLUDED = _ALWAYS_EXCLUDED
 _LABEL_ID = {
     "Company": "gmr_id",
