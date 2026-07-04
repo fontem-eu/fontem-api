@@ -136,8 +136,8 @@ _EQUITY_SECTORS = {"Equity", "Pref Equity"}
 # unrecognised is skipped AND counted so a new type shows up in the run
 # summary instead of silently polluting the graph.
 _COMPANY_SECURITY_TYPES2 = {
-    "Common Stock", "Preferred Stock", "Depositary Receipt", "REIT",
-    "Partnership Shares",
+    "Common Stock", "Preferred Stock", "Preference", "Depositary Receipt",
+    "REIT", "Partnership Shares",
 }
 _FUND_SECURITY_TYPES2 = {"Mutual Fund"}
 
@@ -179,10 +179,19 @@ MATCH (c:Company)
 WHERE c.lei IS NOT NULL
   AND NOT EXISTS { (c)-[:LISTED_AS]->(:Listing) }
 RETURN c.lei AS lei, c.gmr_id AS company_gmr_id,
-       c.name AS name, c.country AS country,
-       c.active AS active, c.legal_form AS legal_form,
        [] AS witness_isins
 LIMIT $limit
+"""
+
+# Point-read of one entity's identity fields, used lazily when a row
+# turns out to be a fund. Deliberately NOT part of the cohort fetch:
+# carrying name/country/... on all 3.3M cohort rows added >1 GiB of
+# Python string overhead and OOM-killed the 4 GiB backfill pod — funds
+# are ~1% of rows, so per-fund point reads are ~35k indexed lookups.
+FETCH_ENTITY_PROPS = """
+MATCH (c:Company {gmr_id: $gmr_id})
+RETURN c.name AS name, c.country AS country,
+       c.active AS active, c.legal_form AS legal_form
 """
 
 
@@ -243,14 +252,22 @@ def fetch_leis_no_listing(driver, limit):
             {
                 "lei": r["lei"],
                 "company_gmr_id": r["company_gmr_id"],
-                "name": r["name"],
-                "country": r["country"],
-                "active": r["active"],
-                "legal_form": r["legal_form"],
                 "witness_isins": list(r["witness_isins"]),
             }
             for r in result
         ]
+
+
+def fetch_entity_props(driver, gmr_id: str) -> dict:
+    """Identity fields for one entity, for the fund upsert. Returns an
+    empty dict when the node is missing (payload then carries only
+    gmr_id + fund_type, which still validates)."""
+    with driver.session() as session:
+        record = session.run(FETCH_ENTITY_PROPS, gmr_id=gmr_id).single()
+        if record is None:
+            return {}
+        return {k: record[k] for k in
+                ("name", "country", "active", "legal_form")}
 
 
 def fetch_leis_with_suspect_listings(driver, limit):
@@ -891,7 +908,8 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
         if canonicals:
             st["emitted"] += emit_listing_events(log, canonicals)
         if fund_records and cfg.get("emit_funds"):
-            st["fund_emitted"] += emit_fund_events(log, row, fund_records)
+            entity = {**row, **fetch_entity_props(driver, row["company_gmr_id"])}
+            st["fund_emitted"] += emit_fund_events(log, entity, fund_records)
         if cfg.get("retire_suspects"):
             # Per-row retire computation. Identical result to the batched
             # call as long as the row is the source-of-truth for its own

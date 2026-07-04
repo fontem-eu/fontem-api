@@ -1264,8 +1264,7 @@ def test_run_mode_via_lei_emits_fund_entity_and_unit_listing(monkeypatch):
     they are never emitted as Company listings."""
     rows = [
         {"lei": "L1", "company_gmr_id": "g1", "witness_isins": ["I1"]},
-        {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"],
-         "name": "EXAMPLE UCITS FUND", "country": "LU"},
+        {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"]},
     ]
     monkeypatch.setitem(load_openfigi._MODES["lei"], "fetch",
                         lambda _d, _l: rows)
@@ -1281,6 +1280,11 @@ def test_run_mode_via_lei_emits_fund_entity_and_unit_listing(monkeypatch):
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
     monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        load_openfigi, "fetch_entity_props",
+        lambda _driver, gmr_id: {"name": "EXAMPLE UCITS FUND",
+                                 "country": "LU"},
+    )
     log, emit = _mock_log()
     summary = load_openfigi._run_mode_via_lei(
         "lei", driver=MagicMock(), log=log, limit=2, api_key=None,
@@ -1354,9 +1358,26 @@ def test_emit_fund_events_payload_shapes():
     assert load_openfigi.emit_fund_events(log, row, []) == 0
 
 
-def test_lei_fetch_returns_entity_fields():
-    """The LEI fetch must carry the Company node's identity fields so
-    the fund upsert doesn't need a second graph round-trip."""
+def test_lei_fetch_stays_slim_and_props_are_lazy():
+    """The 3.3M-row cohort fetch must stay slim (wide rows OOM-killed
+    the 4 GiB backfill pod); the fund upsert's identity fields come
+    from the per-fund point read instead."""
+    for field in ("c.name", "c.country", "c.active", "c.legal_form"):
+        assert field not in load_openfigi.FETCH_LEIS_NO_LISTING
     for field in ("c.name AS name", "c.country AS country",
                   "c.active AS active", "c.legal_form AS legal_form"):
-        assert field in load_openfigi.FETCH_LEIS_NO_LISTING
+        assert field in load_openfigi.FETCH_ENTITY_PROPS
+
+
+def test_fetch_entity_props_missing_node_returns_empty():
+    driver = MagicMock()
+    driver.session.return_value.__enter__.return_value.run.return_value \
+        .single.return_value = None
+    assert load_openfigi.fetch_entity_props(driver, "gX") == {}
+
+
+def test_preference_shares_classify_as_company():
+    """The equity backfill skipped 482 'Preference' instruments as
+    unknown — preference shares are company equity."""
+    assert load_openfigi._classify_instrument(
+        {"securityType2": "Preference"}) == "company"
