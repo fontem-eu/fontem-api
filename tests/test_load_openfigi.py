@@ -116,7 +116,7 @@ def test_lei_results_filters_non_equity_instruments():
     response = [
         {"data": [
             {"ticker": "SIE", "exchCode": "GR", "micCode": "XETR",
-             "figi": "BBG000PRJ717", "marketSector": "Equity"},
+             "figi": "BBG000PRJ717", "marketSector": "Equity", "securityType2": "Common Stock"},
             {"ticker": "SIE-BOND", "exchCode": "DE",
              "figi": "BBG000BOND00", "marketSector": "Corp"},
             {"ticker": "SIE.PFD", "exchCode": "GR", "micCode": "XETR",
@@ -135,11 +135,11 @@ def test_lei_results_dedupes_on_ticker_and_exchange():
     response = [
         {"data": [
             {"ticker": "SAP", "exchCode": "GR", "micCode": "XETR",
-             "figi": "BBG000BB1RM2", "marketSector": "Equity"},
+             "figi": "BBG000BB1RM2", "marketSector": "Equity", "securityType2": "Common Stock"},
             {"ticker": "SAP", "exchCode": "GR", "micCode": "XETR",
-             "figi": "BBG000BB1RM3", "marketSector": "Equity"},
+             "figi": "BBG000BB1RM3", "marketSector": "Equity", "securityType2": "Common Stock"},
             {"ticker": "SAP", "exchCode": "GY", "micCode": "XFRA",
-             "figi": "BBG000BB1RM4", "marketSector": "Equity"},
+             "figi": "BBG000BB1RM4", "marketSector": "Equity", "securityType2": "Common Stock"},
         ]},
     ]
     out = load_openfigi._lei_results(response, ["LEI-SAP"])
@@ -156,7 +156,7 @@ def test_lei_results_skips_entries_without_data():
         {"warning": "no match"},
         {"data": []},
         {"data": [{"ticker": "VOW3", "exchCode": "GR",
-                   "marketSector": "Equity"}]},
+                   "marketSector": "Equity", "securityType2": "Common Stock"}]},
     ]
     out = load_openfigi._lei_results(response, ["L1", "L2", "L3"])
     assert len(out) == 1
@@ -440,7 +440,7 @@ def test_equity_canonicals_filters_bonds_and_attaches_isin():
     response = [
         {"data": [
             {"ticker": "EGL", "exchCode": "PL",
-             "marketSector": "Equity", "micCode": "XLIS",
+             "marketSector": "Equity", "securityType2": "Common Stock", "micCode": "XLIS",
              "figi": "BBG000BV96Y8"},
         ]},
         {"data": [
@@ -465,11 +465,11 @@ def test_equity_canonicals_dedupes_across_isins_of_same_lei():
     response = [
         {"data": [
             {"ticker": "EGL", "exchCode": "PL",
-             "marketSector": "Equity", "figi": "F1"},
+             "marketSector": "Equity", "securityType2": "Common Stock", "figi": "F1"},
         ]},
         {"data": [
             {"ticker": "EGL", "exchCode": "PL",
-             "marketSector": "Equity", "figi": "F2"},
+             "marketSector": "Equity", "securityType2": "Common Stock", "figi": "F2"},
         ]},
     ]
     out = load_openfigi._equity_canonicals_from_response(
@@ -489,7 +489,7 @@ def test_resolve_uses_witness_isins_when_present(monkeypatch):
     def fake_query_openfigi(_payload, _api_key):
         calls["openfigi"] += 1
         return [{"data": [{"ticker": "EGL", "exchCode": "PL",
-                           "marketSector": "Equity"}]}]
+                           "marketSector": "Equity", "securityType2": "Common Stock"}]}]
 
     def fake_gleif(_lei, client=None):  # pragma: no cover  # pylint: disable=unused-argument
         calls["gleif"] += 1
@@ -501,7 +501,7 @@ def test_resolve_uses_witness_isins_when_present(monkeypatch):
 
     row = {"lei": "L1", "company_gmr_id": "g1",
            "witness_isins": ["PTMEN0AE0005"], "suspect_tickers": []}
-    canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+    canonicals, source, _unknown = load_openfigi._resolve_lei_to_canonicals(
         row, batch_size=10, api_key=None,
     )
     assert source == "witness"
@@ -516,7 +516,7 @@ def test_resolve_falls_back_to_gleif_when_no_witness(monkeypatch):
     def fake_query_openfigi(_payload, _api_key):
         calls["openfigi"] += 1
         return [{"data": [{"ticker": "ACME", "exchCode": "XX",
-                           "marketSector": "Equity"}]}]
+                           "marketSector": "Equity", "securityType2": "Common Stock"}]}]
 
     def fake_gleif(_lei, client=None):  # pylint: disable=unused-argument
         calls["gleif"] += 1
@@ -528,7 +528,7 @@ def test_resolve_falls_back_to_gleif_when_no_witness(monkeypatch):
 
     row = {"lei": "L1", "company_gmr_id": "g1",
            "witness_isins": [], "suspect_tickers": []}
-    canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+    canonicals, source, _unknown = load_openfigi._resolve_lei_to_canonicals(
         row, batch_size=10, api_key=None,
     )
     assert source == "gleif"
@@ -542,7 +542,7 @@ def test_resolve_returns_none_source_when_no_isins(monkeypatch):
     monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
     row = {"lei": "L1", "company_gmr_id": "g1",
            "witness_isins": [], "suspect_tickers": []}
-    canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+    canonicals, source, _unknown = load_openfigi._resolve_lei_to_canonicals(
         row, batch_size=10, api_key=None,
     )
     assert not canonicals
@@ -594,7 +594,7 @@ def test_run_mode_via_lei_emits_canonicals_and_retires_suspect(monkeypatch):
     def fake_query_openfigi(_payload, _api_key):
         return [{"data": [
             {"ticker": "EGL", "exchCode": "LS",
-             "marketSector": "Equity", "micCode": "XLIS"},
+             "marketSector": "Equity", "securityType2": "Common Stock", "micCode": "XLIS"},
         ]}]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
@@ -670,7 +670,7 @@ def test_run_mode_via_lei_opens_one_batch_per_lei_with_canonicals(monkeypatch):
             isin = entry["idValue"]
             out.append({"data": [{
                 "ticker": f"T-{isin}", "exchCode": "LS",
-                "marketSector": "Equity", "micCode": "XLIS",
+                "marketSector": "Equity", "securityType2": "Common Stock", "micCode": "XLIS",
             }]})
         return out
 
@@ -708,7 +708,7 @@ def test_run_mode_via_lei_skips_batch_open_for_lei_with_no_canonicals(monkeypatc
     def fake_query_openfigi(payload, _api_key):
         return [{"data": [{
             "ticker": "T-I2", "exchCode": "LS",
-            "marketSector": "Equity", "micCode": "XLIS",
+            "marketSector": "Equity", "securityType2": "Common Stock", "micCode": "XLIS",
         }]} for _ in payload]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
@@ -744,7 +744,7 @@ def test_run_mode_via_lei_reeval_emits_listing_batch_and_retire_batch_per_lei(
         # One canonical per ISIN so each row's retire has a replacement.
         return [{"data": [{
             "ticker": f"CANON-{entry['idValue']}", "exchCode": "LS",
-            "marketSector": "Equity", "micCode": "XLIS",
+            "marketSector": "Equity", "securityType2": "Common Stock", "micCode": "XLIS",
         }]} for entry in payload]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
@@ -782,7 +782,7 @@ def test_run_mode_isin_opens_one_batch_per_openfigi_batch(monkeypatch):
     def fake_query_openfigi(payload, _api_key):
         return [{"data": [{
             "ticker": entry["idValue"], "exchCode": "US",
-            "marketSector": "Equity", "micCode": "XNAS",
+            "marketSector": "Equity", "securityType2": "Common Stock", "micCode": "XNAS",
         }]} for entry in payload]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
@@ -822,7 +822,7 @@ def test_run_mode_via_lei_uses_bulk_mapping_no_rest_call(monkeypatch):
         captured["payload"] = payload
         return [{"data": [{
             "ticker": f"T-{entry['idValue']}", "exchCode": "LS",
-            "marketSector": "Equity", "micCode": "XLIS",
+            "marketSector": "Equity", "securityType2": "Common Stock", "micCode": "XLIS",
         }]} for entry in payload]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
@@ -854,7 +854,7 @@ def test_resolve_lei_to_canonicals_bulk_source_label():
     with patch.object(
         load_openfigi, "query_openfigi", return_value=[],
     ):
-        _canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+        _canonicals, source, _unknown = load_openfigi._resolve_lei_to_canonicals(
             {"lei": "L1", "company_gmr_id": "g1", "witness_isins": []},
             batch_size=10, api_key=None,
             bulk_isins={"L1": ["I1"]},
@@ -876,7 +876,7 @@ def test_resolve_lei_to_canonicals_falls_back_to_rest_when_bulk_none(
     with patch.object(
         load_openfigi, "query_openfigi", return_value=[],
     ):
-        _canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+        _canonicals, source, _unknown = load_openfigi._resolve_lei_to_canonicals(
             {"lei": "L1", "company_gmr_id": "g1", "witness_isins": []},
             batch_size=10, api_key=None,
             bulk_isins=None,
@@ -1086,13 +1086,13 @@ def test_resolve_lei_to_canonicals_paces_between_batches(monkeypatch):
         load_openfigi, "query_openfigi",
         lambda payload, _api_key: [
             {"data": [{"ticker": "T", "exchCode": "X",
-                       "marketSector": "Equity"}]}
+                       "marketSector": "Equity", "securityType2": "Common Stock"}]}
             for _ in payload
         ],
     )
     # 25 ISINs / batch_size=10 → 3 batches → 2 inter-batch sleeps
     bulk = {"MASS_ISSUER": [f"ISIN{i}" for i in range(25)]}
-    _canonicals, source = load_openfigi._resolve_lei_to_canonicals(
+    _canonicals, source, _unknown = load_openfigi._resolve_lei_to_canonicals(
         {"lei": "MASS_ISSUER", "company_gmr_id": "g1",
          "witness_isins": []},
         batch_size=10, api_key=None, bulk_isins=bulk,
@@ -1116,7 +1116,7 @@ def test_resolve_lei_to_canonicals_no_inter_batch_sleep_when_disabled(
         load_openfigi, "query_openfigi",
         lambda payload, _api_key: [
             {"data": [{"ticker": "T", "exchCode": "X",
-                       "marketSector": "Equity"}]}
+                       "marketSector": "Equity", "securityType2": "Common Stock"}]}
             for _ in payload
         ],
     )
@@ -1175,7 +1175,7 @@ def test_run_mode_via_lei_concurrent_emits_every_canonical(monkeypatch):
     def fake_query_openfigi(payload, _api_key):
         isin = payload[0]["idValue"]
         return [{"data": [{"ticker": f"T{isin}", "exchCode": "XX",
-                           "marketSector": "Equity"}]}]
+                           "marketSector": "Equity", "securityType2": "Common Stock"}]}]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
     monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
@@ -1199,7 +1199,7 @@ def test_run_mode_via_lei_concurrent_matches_serial(monkeypatch):
     def fake_query_openfigi(payload, _api_key):
         isin = payload[0]["idValue"]
         return [{"data": [{"ticker": f"T{isin}", "exchCode": "XX",
-                           "marketSector": "Equity"}]}]
+                           "marketSector": "Equity", "securityType2": "Common Stock"}]}]
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
     monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
@@ -1221,3 +1221,67 @@ def test_run_mode_via_lei_concurrent_matches_serial(monkeypatch):
     assert conc_summary == serial_summary
     assert conc_types == serial_types
     assert serial_summary["enriched"] == 7  # ceil(20/3) LEIs with an ISIN
+
+
+# ── securityType2 classification (company vs fund) ────────────────
+
+
+def test_equity_canonicals_tags_company_and_fund_classes():
+    """securityType2 drives entity_class: Common Stock → company,
+    Mutual Fund (open/closed-end funds, ETPs, fund-of-funds) → fund.
+    Unknown types are skipped AND counted — never silently kept."""
+    response = [
+        {"data": [
+            {"ticker": "ACME", "exchCode": "LN",
+             "marketSector": "Equity",
+             "securityType2": "Common Stock",
+             "securityType": "Common Stock"},
+            {"ticker": "ACMEFND", "exchCode": "LN",
+             "marketSector": "Equity",
+             "securityType2": "Mutual Fund",
+             "securityType": "Open-End Fund"},
+            {"ticker": "WEIRD", "exchCode": "LN",
+             "marketSector": "Equity",
+             "securityType2": "Equity WRT",
+             "securityType": "Equity WRT"},
+        ]},
+    ]
+    unknown: dict = {}
+    out = load_openfigi._equity_canonicals_from_response(
+        response, ["ISIN1"], lei="LEI", company_gmr_id="gid",
+        unknown_types=unknown,
+    )
+    assert [(r["ticker"], r["entity_class"]) for r in out] == [
+        ("ACME", "company"), ("ACMEFND", "fund"),
+    ]
+    assert out[1]["security_type"] == "Open-End Fund"
+    assert unknown == {"Equity WRT": 1}
+
+
+def test_run_mode_via_lei_does_not_emit_fund_class_listings(monkeypatch):
+    """Fund-class instruments are counted in the summary but NOT
+    emitted as Company listings — that cohort belongs to the
+    :InvestmentFund model (UpsertInvestmentFund, Track B)."""
+    rows = [
+        {"lei": "L1", "company_gmr_id": "g1", "witness_isins": ["I1"]},
+        {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"]},
+    ]
+    monkeypatch.setitem(load_openfigi._MODES["lei"], "fetch",
+                        lambda _d, _l: rows)
+
+    def fake_query_openfigi(payload, _api_key):
+        isin = payload[0]["idValue"]
+        sec2 = "Common Stock" if isin == "I1" else "Mutual Fund"
+        return [{"data": [{"ticker": f"T{isin}", "exchCode": "XX",
+                           "marketSector": "Equity",
+                           "securityType2": sec2}]}]
+
+    monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
+    monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
+    log, emit = _mock_log()
+    summary = load_openfigi._run_mode_via_lei(
+        "lei", driver=MagicMock(), log=log, limit=2, api_key=None,
+    )
+    assert summary["enriched"] == 1      # only the Common Stock
+    assert summary["funds"] == 1
+    assert emit.upsert.call_count == 1

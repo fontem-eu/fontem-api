@@ -126,6 +126,31 @@ class _RateLimiter:
 # some venues. Anything else (Govt, Corp, MMkt, ...) is filtered out.
 _EQUITY_SECTORS = {"Equity", "Pref Equity"}
 
+# Within marketSector Equity, OpenFIGI's coarse ``securityType2`` cleanly
+# separates operating-company equity from pooled-vehicle units (surveyed
+# against prod cohorts 2026-07-04: FIRDS-era real listings are Common
+# Stock / REIT / Depositary Receipt; the LEI-backfill noise was 100%
+# securityType2 "Mutual Fund" — open/closed-end funds, ETPs, fund-of-
+# funds all map there). Company classes go on the :Company listing
+# path; fund classes are routed to the :InvestmentFund model; anything
+# unrecognised is skipped AND counted so a new type shows up in the run
+# summary instead of silently polluting the graph.
+_COMPANY_SECURITY_TYPES2 = {
+    "Common Stock", "Preferred Stock", "Depositary Receipt", "REIT",
+    "Partnership Shares",
+}
+_FUND_SECURITY_TYPES2 = {"Mutual Fund"}
+
+
+def _classify_instrument(inst) -> str | None:
+    """``company`` / ``fund`` / None (= unknown, caller counts + skips)."""
+    sec_type2 = (inst.get("securityType2") or "").strip()
+    if sec_type2 in _COMPANY_SECURITY_TYPES2:
+        return "company"
+    if sec_type2 in _FUND_SECURITY_TYPES2:
+        return "fund"
+    return None
+
 
 # ── ISIN mode ─────────────────────────────────────────────────────
 #
@@ -578,17 +603,31 @@ _MODES = {
 
 def _equity_canonicals_from_response(
     response, isins: list[str], lei: str, company_gmr_id: str,
+    unknown_types: dict | None = None,
 ) -> list[dict]:
-    """Reshape an OpenFIGI ID_ISIN batch response into per-equity
+    """Reshape an OpenFIGI ID_ISIN batch response into per-instrument
     canonical Listing records. Inputs are positional so we walk
     ``zip(response, isins)`` to attach the original ISIN to each
     instrument. De-dupes on ``(ticker, exchange_code)`` so one issuer
-    listed under several FIGIs on the same venue is one Listing."""
+    listed under several FIGIs on the same venue is one record.
+
+    Each record carries ``entity_class`` from ``_classify_instrument``:
+    ``company`` (operating-company equity) or ``fund`` (pooled-vehicle
+    units). Unrecognised securityType2s are skipped and tallied into
+    ``unknown_types`` (when given) so new types surface in the run
+    summary instead of silently entering the graph."""
     canonicals: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for entry, isin in zip(response, isins):
         for inst in entry.get("data") or []:
             if (inst.get("marketSector") or "") not in _EQUITY_SECTORS:
+                continue
+            entity_class = _classify_instrument(inst)
+            if entity_class is None:
+                if unknown_types is not None:
+                    label = (inst.get("securityType2")
+                             or inst.get("securityType") or "?")
+                    unknown_types[label] = unknown_types.get(label, 0) + 1
                 continue
             ticker = (inst.get("ticker") or "").strip().upper()
             exch = (inst.get("exchCode") or "").strip()
@@ -606,6 +645,8 @@ def _equity_canonicals_from_response(
                 "figi": (inst.get("figi") or "").strip(),
                 "isin": isin,
                 "company_gmr_id": company_gmr_id,
+                "entity_class": entity_class,
+                "security_type": (inst.get("securityType") or "").strip(),
             })
     return canonicals
 
@@ -622,8 +663,9 @@ def _resolve_lei_to_canonicals(  # pylint: disable=too-many-arguments,too-many-p
     Company) take priority over GLEIF — they're more reliable for EU
     equities since GLEIF's ``/isins`` endpoint sometimes returns only
     bond ISINs for an issuer (Mota-Engil being the canonical example).
-    Returns ``(canonicals, source_label)``; the label is used by the
-    runner for the progress log.
+    Returns ``(records, source_label, unknown_type_counts)``; the label
+    is used by the runner for the progress log, the counts feed the
+    run-summary "skipped unknown securityType2" line.
 
     ``bulk_isins`` is the LEI→ISINs dict prebuilt from GLEIF's daily
     bulk file (see ``_gleif_isin_bulk.load_isin_mapping``). When
@@ -652,9 +694,10 @@ def _resolve_lei_to_canonicals(  # pylint: disable=too-many-arguments,too-many-p
             source = "gleif"
             time.sleep(GLEIF_REQUEST_SLEEP)
     if not isins:
-        return [], "none"
+        return [], "none", {}
 
     canonicals: list[dict] = []
+    unknown: dict[str, int] = {}
     # OpenFIGI batch limit varies by tier — split here so a LEI with
     # many ISINs (15+ for Mota) still respects the per-request cap.
     # ``sleep_between_batches`` keeps the per-batch cadence inside
@@ -673,8 +716,9 @@ def _resolve_lei_to_canonicals(  # pylint: disable=too-many-arguments,too-many-p
             continue
         canonicals.extend(_equity_canonicals_from_response(
             response, chunk, row["lei"], row["company_gmr_id"],
+            unknown_types=unknown,
         ))
-    return canonicals, source
+    return canonicals, source, unknown
 
 
 def _process_batch(cfg, batch, id_to_company, api_key):
@@ -754,25 +798,34 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
         bulk_isins = _gleif_isin_bulk.load_isin_mapping(target_leis)
 
     st = {"witness": 0, "gleif": 0, "none": 0,
-          "enriched": 0, "emitted": 0, "retired": 0, "processed": 0}
+          "enriched": 0, "emitted": 0, "retired": 0, "processed": 0,
+          "funds": 0, "unknown": {}}
 
-    def _consume(row, canonicals, source):
+    def _consume(row, records, source, unknown):
         """Update counters + emit for one resolved LEI. Runs only on the
         calling (main) thread, so the EventLog stays single-writer even
-        when resolution is parallelised."""
+        when resolution is parallelised. Fund-class records are counted
+        but NOT emitted as Company listings — they belong to the
+        :InvestmentFund model (see UpsertInvestmentFund)."""
         if source == "witness":
             st["witness"] += 1
         elif source in ("gleif", "gleif_bulk"):
             st["gleif"] += 1
         else:
             st["none"] += 1
+        for k, v in unknown.items():
+            st["unknown"][k] = st["unknown"].get(k, 0) + v
+        canonicals = [r for r in records
+                      if r.get("entity_class", "company") == "company"]
+        st["funds"] += len(records) - len(canonicals)
         st["enriched"] += len(canonicals)
         if canonicals:
             st["emitted"] += emit_listing_events(log, canonicals)
         if cfg.get("retire_suspects"):
             # Per-row retire computation. Identical result to the batched
             # call as long as the row is the source-of-truth for its own
-            # suspect_tickers, which it is.
+            # suspect_tickers, which it is. Fund-class records are kept
+            # out so a fund unit can never become a retire replacement.
             retires = _retires_for_suspects([row], canonicals)
             if retires:
                 st["retired"] += emit_retire_events(log, retires)
@@ -780,10 +833,10 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
         if st["processed"] % 100 == 0:
             logger.info(
                 "  %s: %d / %d processed, %d %s "
-                "(witness=%d gleif=%d none=%d)",
+                "(witness=%d gleif=%d none=%d funds=%d)",
                 cfg["log_label"], st["processed"], len(rows),
                 st["enriched"], cfg["progress_phrase"],
-                st["witness"], st["gleif"], st["none"],
+                st["witness"], st["gleif"], st["none"], st["funds"],
             )
 
     if concurrency > 1 and api_key:
@@ -813,18 +866,18 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
                 done, pending = wait(inflight, return_when=FIRST_COMPLETED)
                 inflight = set(pending)
                 for fut in done:
-                    row, (canonicals, source) = fut.result()
-                    _consume(row, canonicals, source)
+                    row, (records, source, unknown) = fut.result()
+                    _consume(row, records, source, unknown)
                     nxt = next(rows_it, None)
                     if nxt is not None:
                         inflight.add(pool.submit(_resolve, nxt))
     else:
         for row in rows:
-            canonicals, source = _resolve_lei_to_canonicals(
+            records, source, unknown = _resolve_lei_to_canonicals(
                 row, batch_size, api_key, bulk_isins=bulk_isins,
                 sleep_between_batches=sleep_s,
             )
-            _consume(row, canonicals, source)
+            _consume(row, records, source, unknown)
             # Only pace when we actually called OpenFIGI. With the
             # bulk-file path most rows resolve to "no ISINs" and would
             # otherwise burn a sleep each for zero rate-limit benefit
@@ -837,9 +890,18 @@ def _run_mode_via_lei(  # pylint: disable=too-many-locals,too-many-branches,too-
                     cfg["log_label"], st["retired"])
     logger.info("  %s: source mix witness=%d gleif=%d none=%d",
                 cfg["log_label"], st["witness"], st["gleif"], st["none"])
+    if st["funds"]:
+        logger.info(
+            "  %s: %d fund-class instruments (securityType2 Mutual "
+            "Fund) held for the :InvestmentFund path",
+            cfg["log_label"], st["funds"])
+    if st["unknown"]:
+        logger.info("  %s: skipped unknown securityType2s: %s",
+                    cfg["log_label"], st["unknown"])
     return {
         "queried": len(rows), "enriched": st["enriched"],
         "emitted": st["emitted"] + st["retired"], "errors": 0,
+        "funds": st["funds"],
     }
 
 
