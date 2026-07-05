@@ -57,3 +57,4 @@ prometheus-fastapi-instrumentator
 # isn't a FastAPI app so we need explicit access.
 prometheus-client>=0.20
 pycountry
+maxminddb

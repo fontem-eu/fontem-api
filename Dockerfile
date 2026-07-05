@@ -28,6 +28,11 @@ RUN pip install --no-cache-dir -r requirements.txt && rm requirements.txt
 
 # --- eforms-parser (TED contract loader dependency) ---------------------------
 COPY vendor/*.whl /tmp/
+
+# --- IP -> country database (DB-IP Country Lite, CC BY 4.0) -------------------
+# Powers /geo/client-language (first-visit language hint). See
+# vendor/geoip/README.md for licence + refresh notes.
+COPY vendor/geoip/dbip-country-lite.mmdb /app/vendor/geoip/dbip-country-lite.mmdb
 RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
 
 # --- Event log libs (vendored at build time from internal Gitea) -------------

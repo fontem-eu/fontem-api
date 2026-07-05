@@ -16,13 +16,37 @@ import json
 import os
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from src.analysis.geo_source import GeoSource
+from src.data import geo_ip
 from src.services.location_service import LocationService
 
 
 router = APIRouter(prefix="/geo", tags=["geo"])
+
+
+@router.get("/client-language")
+def client_language(request: Request, response: Response) -> dict:
+    """Coarse first-visit language hint from the caller's IP country.
+
+    The SPA calls this only when the visitor has no stored language
+    preference. Country-level only, resolved against a local database —
+    the IP is not logged or stored, and the response is uncacheable so
+    proxies can't leak one visitor's hint to another.
+    """
+    response.headers["Cache-Control"] = "no-store, private"
+    ip = geo_ip.client_ip_from(
+        request.headers.get("x-forwarded-for"),
+        request.headers.get("x-real-ip"),
+        request.client.host if request.client else None,
+    )
+    country = geo_ip.country_for(ip) if ip else None
+    return {
+        "country": country,
+        "lang": geo_ip.language_for_country(country),
+    }
+
 
 _BOUNDARIES_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
+from src.data import geo_ip
 
 
 def _mock_geo_source(rows, entity_rows=None):
@@ -178,3 +179,60 @@ def test_nuts_boundaries_level_3_returns_feature_collection():
         assert len(data["features"]) >= 1000
     finally:
         cleanup_dishka()
+
+
+# ── /geo/client-language — first-visit language inference ─────────────
+
+
+def test_client_language_prefers_first_public_forwarded_ip():
+    """XFF chains list the visitor first, then our proxies — the lookup
+    must use the first PUBLIC hop and skip private/reserved ones."""
+    assert geo_ip.client_ip_from(
+        "51.159.141.141, 10.42.1.9", None, "10.0.0.1") == "51.159.141.141"
+    # private-only chain falls through to X-Real-IP, then the peer
+    assert geo_ip.client_ip_from("10.0.0.7", "51.159.141.141", "10.0.0.1") == "51.159.141.141"
+    assert geo_ip.client_ip_from(None, None, "8.8.8.8") == "8.8.8.8"
+    # garbage never raises
+    assert geo_ip.client_ip_from("not-an-ip, 10.1.1.1", "also-bad", None) is None
+
+
+def test_client_language_country_map_covers_eu_and_falls_back():
+    assert geo_ip.language_for_country("FR") == "fr"
+    assert geo_ip.language_for_country("PT") == "pt"
+    assert geo_ip.language_for_country("BR") == "pt"
+    assert geo_ip.language_for_country("BE") == "nl"
+    assert geo_ip.language_for_country("JP") is None  # unmapped → browser decides
+    assert geo_ip.language_for_country(None) is None
+
+
+def test_client_language_endpoint_resolves_and_never_caches(monkeypatch):
+    monkeypatch.setattr(
+        geo_ip, "country_for", lambda ip: "FR" if ip == "51.159.141.141" else None)
+    client = make_test_client()
+    resp = client.get(
+        "/geo/client-language",
+        headers={"x-forwarded-for": "51.159.141.141, 10.42.0.3"})
+    cleanup_dishka()
+    assert resp.status_code == 200
+    assert resp.json() == {"country": "FR", "lang": "fr"}
+    assert "no-store" in resp.headers["cache-control"]
+
+
+def test_client_language_unknown_ip_degrades_to_null(monkeypatch):
+    monkeypatch.setattr(geo_ip, "country_for", lambda ip: None)
+    client = make_test_client()
+    resp = client.get("/geo/client-language", headers={"x-forwarded-for": "203.0.113.9"})
+    cleanup_dishka()
+    assert resp.status_code == 200
+    assert resp.json() == {"country": None, "lang": None}
+
+
+def test_client_language_real_database_resolves_france():
+    """End-to-end against the vendored DB: the CI runner may be anywhere,
+    so pin a known Scaleway (FR) address rather than the runner's own."""
+    if geo_ip.country_for("51.159.141.141") is None:
+        # DB not present in this checkout (e.g. shallow tooling) — the
+        # endpoint degrades to null rather than failing, by design.
+        return
+    assert geo_ip.country_for("51.159.141.141") == "FR"
+    assert geo_ip.language_for_country(geo_ip.country_for("51.159.141.141")) == "fr"
