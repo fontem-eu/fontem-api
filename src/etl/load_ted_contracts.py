@@ -43,6 +43,7 @@ from ..services.ted_lookup import TedLookupError, resolve_publication_number
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .contract_confidence import score_contract_value
+from . import value_review_queue
 from .ted_matcher import TedMatcher
 from . import ted_search
 
@@ -487,6 +488,33 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             )
             seen_companies.add(match.gmr_id)
 
+        # ── Value quarantine ────────────────────────────────────
+        # A value that fails hard sanity checks is WITHHELD, not
+        # flagged-and-hoped: the event carries no monetary fields (the
+        # sinks also clear any previously rendered ones) plus the
+        # quarantine marker + reason. Review-tier claims go to
+        # events.value_review for a human decision; a published 0
+        # (zero_value) is auto-withheld — non-disclosure in costume —
+        # and keeps the independent estimate. The claimed numbers are
+        # never lost: event log + queue snapshot hold them.
+        if score.quarantined:
+            if score.needs_review:
+                value_review_queue.enqueue_default(
+                    ted_notice_id=ted_notice_id,
+                    reason=score.flag.value,
+                    claimed_value_eur=value_eur_float,
+                    claimed_value_original=value_original_float,
+                    claimed_currency=resolved_currency,
+                    claimed_estimated_eur=est_eur,
+                    claimed_payable_eur=pay_eur,
+                    detail=score.reason,
+                )
+            value_eur_float = value_original_float = None
+            resolved_currency = None
+            if score.flag.value != "zero_value":
+                est_eur = pay_eur = None
+                before_eur = before_orig = None
+
         contract_payload = builders.upsert_contract(
                 ted_notice_id=ted_notice_id,
                 ted_publication_number=ted_publication_number,
@@ -507,6 +535,9 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 value_quality_flag=score.flag.value,
                 value_low_confidence=score.is_low_confidence,
                 value_payable_discrepancy=score.has_payable_discrepancy,
+                value_quarantined=score.quarantined or None,
+                value_quarantine_reason=(score.flag.value
+                                         if score.quarantined else None),
                 cpv=notice.cpv_main,
                 nuts=getattr(notice, "place_nuts", None),
                 language=getattr(notice, "language", None),

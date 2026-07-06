@@ -72,6 +72,9 @@ class GraphContractSource(ContractDataSource):
                 "  ct.value_currency AS value_currency, "
                 "  ct.value_original AS value_original, "
                 "  ct.value_before_eur AS value_before_eur, "
+                "  ct.value_confidence AS value_confidence, "
+                "  ct.value_quarantined AS value_quarantined, "
+                "  ct.value_quarantine_reason AS value_quarantine_reason, "
                 "  ct.value_before_original AS value_before_original, "
                 "  ct.modifies_publication_number AS modifies_publication_number, "
                 "  ct.procedure_type AS procedure_type, "
@@ -110,6 +113,11 @@ class GraphContractSource(ContractDataSource):
                 "value_currency": r.get("value_currency"),
                 "value_original": r.get("value_original"),
                 "value_before_eur": r.get("value_before_eur"),
+                # data-confidence surface (quarantine + low-confidence
+                # marks rendered by DataConfidenceIcon in the web app)
+                "value_confidence": r.get("value_confidence"),
+                "value_quarantined": r.get("value_quarantined"),
+                "value_quarantine_reason": r.get("value_quarantine_reason"),
                 "value_before_original": r.get("value_before_original"),
                 "modifies_publication_number": r.get("modifies_publication_number"),
                 "value_low_confidence": r.get("value_low_confidence"),
@@ -171,6 +179,9 @@ class GraphContractSource(ContractDataSource):
                 "  ct.value_currency AS value_currency, "
                 "  ct.value_original AS value_original, "
                 "  ct.value_before_eur AS value_before_eur, "
+                "  ct.value_confidence AS value_confidence, "
+                "  ct.value_quarantined AS value_quarantined, "
+                "  ct.value_quarantine_reason AS value_quarantine_reason, "
                 "  ct.value_before_original AS value_before_original, "
                 "  ct.modifies_publication_number AS modifies_publication_number, "
                 "  ct.procedure_type AS procedure_type, "
@@ -204,6 +215,11 @@ class GraphContractSource(ContractDataSource):
                 "value_currency": r.get("value_currency"),
                 "value_original": r.get("value_original"),
                 "value_before_eur": r.get("value_before_eur"),
+                # data-confidence surface (quarantine + low-confidence
+                # marks rendered by DataConfidenceIcon in the web app)
+                "value_confidence": r.get("value_confidence"),
+                "value_quarantined": r.get("value_quarantined"),
+                "value_quarantine_reason": r.get("value_quarantine_reason"),
                 "value_before_original": r.get("value_before_original"),
                 "modifies_publication_number": r.get("modifies_publication_number"),
                 "value_low_confidence": r.get("value_low_confidence"),

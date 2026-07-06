@@ -696,6 +696,39 @@ ASSERTIONS: list[Assertion] = [
         "coverage question (Neo4j leads Virtuoso by ~3.8% on LEI), not a sink-"
         "render inconsistency.",
     ),
+    # ── Value quarantine (withheld bad values stay withheld) ──────────
+    Assertion(
+        "values.quarantined_carries_no_value", VALUES,
+        "Quarantined contracts carry no monetary props", BLOCK,
+        "cypher",
+        "MATCH (ct:Contract) WHERE ct.value_quarantined = true "
+        "AND (ct.value_eur IS NOT NULL OR ct.value_original IS NOT NULL) "
+        "RETURN count(ct) AS violations",
+        zero_violations(),
+        "The whole point of quarantine is that nobody downstream needs "
+        "to remember a flag exists — a quarantined contract with a "
+        "rendered value means the sink clear-path or the loader strip "
+        "broke.",
+    ),
+    Assertion(
+        "values.hard_flags_are_quarantined", VALUES,
+        "Hard-flagged values are actually quarantined", BLOCK,
+        "cypher",
+        "MATCH (ct:Contract) WHERE ct.value_eur IS NOT NULL "
+        "AND coalesce(ct.value_quarantined, false) = false "
+        "AND (ct.value_quality_flag IN "
+        "['concession_negative','unverified_single_signal','zero_value'] "
+        "OR (ct.value_quality_flag = 'implausible_magnitude' "
+        "AND ct.value_confidence < 0.05)) "
+        "RETURN count(ct) AS violations",
+        zero_violations(),
+        "A quarantine-tier value (categorical flags, or implausible "
+        "below the confidence floor) still rendered means a "
+        "pre-quarantine rendering escaped the backfill or a new emit "
+        "path skipped the scorer. implausible_magnitude with "
+        "confidence >= 0.05 legitimately keeps its value (mega-"
+        "contracts) — that band is excluded here.",
+    ),
     # ── InvestmentFund model (funds are not companies) ────────────────
     Assertion(
         "keys.investmentfund_gmr_id", KEYS,
