@@ -33,11 +33,16 @@ from src.etl import value_review_queue
 logger = logging.getLogger(__name__)
 
 # Contracts already rendered with a quarantine-tier flag AND still
-# carrying any monetary prop. Paged with a fresh read tx per batch —
-# same discipline every prod scan uses (90s tx ceiling).
+# carrying any monetary prop. KEYSET pagination on ted_notice_id — the
+# scan must never depend on its own corrective events taking effect,
+# because the sink renders them asynchronously: the first version of
+# this job re-scanned from the top each page and re-emitted the same
+# uncleared prefix ~600× (538k events for 908 contracts) while the
+# sink lagged. One deterministic pass, one event per contract.
 _SCAN = """
 MATCH (ct:Contract)
-WHERE ct.value_quality_flag IN $flags
+WHERE ct.ted_notice_id > $after
+  AND ct.value_quality_flag IN $flags
   AND (ct.value_quality_flag <> 'implausible_magnitude'
        OR ct.value_confidence < 0.05)
   AND (ct.value_eur IS NOT NULL OR ct.value_original IS NOT NULL
@@ -50,6 +55,7 @@ RETURN ct.ted_notice_id AS ted_notice_id,
        ct.value_currency AS value_currency,
        ct.estimated_value_eur AS estimated_value_eur,
        ct.value_payable_eur AS value_payable_eur
+ORDER BY ct.ted_notice_id
 LIMIT $limit
 """
 
@@ -57,12 +63,17 @@ LIMIT $limit
 def backfill(driver, log: EventLog, batch_size: int = 500) -> dict:
     flags = sorted(QUARANTINE_REVIEW_FLAGS | QUARANTINE_AUTO_FLAGS)
     emitted = queued = 0
+    after = ""
+    seen: set[str] = set()
     while True:
         with driver.session() as session:
             rows = [dict(r) for r in session.run(
-                _SCAN, flags=flags, limit=batch_size)]
+                _SCAN, flags=flags, limit=batch_size, after=after)]
+        rows = [r for r in rows if r["ted_notice_id"] not in seen]
         if not rows:
             break
+        after = rows[-1]["ted_notice_id"]
+        seen.update(r["ted_notice_id"] for r in rows)
         with log.batch(uuid.uuid4(), producer="backfill_value_quarantine") as emit:
             for row in rows:
                 reason = row["flag"]

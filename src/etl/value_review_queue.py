@@ -60,8 +60,11 @@ def connect():
     if not dsn:
         return None
     conn = psycopg.connect(dsn)
-    with conn, conn.cursor() as cur:  # pylint: disable=no-member
+    # NB: psycopg3's `with conn:` CLOSES the connection on exit (it is
+    # not the psycopg2 transaction-scope idiom) — commit explicitly.
+    with conn.cursor() as cur:  # pylint: disable=no-member
         cur.execute(DDL)
+    conn.commit()  # pylint: disable=no-member
     return conn
 
 
@@ -73,7 +76,7 @@ def enqueue(conn, *, ted_notice_id: str, reason: str,  # pylint: disable=too-man
     must not duplicate). Returns True when a new row landed."""
     if conn is None:
         return False
-    with conn, conn.cursor() as cur:
+    with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO events.value_review (
@@ -88,7 +91,9 @@ def enqueue(conn, *, ted_notice_id: str, reason: str,  # pylint: disable=too-man
              claimed_value_original, claimed_currency,
              claimed_estimated_eur, claimed_payable_eur, detail),
         )
-        return cur.rowcount > 0
+        inserted = cur.rowcount > 0
+    conn.commit()
+    return inserted
 
 
 # Lazy per-process connection so loaders don't thread a handle through

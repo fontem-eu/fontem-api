@@ -38,3 +38,16 @@ def test_enqueue_default_never_raises(monkeypatch):
     assert q.enqueue_default(ted_notice_id="x", reason="zero_value") is False
     # and stays disabled without repeated connection attempts
     assert q.enqueue_default(ted_notice_id='y', reason='zero_value') is False  # stays disabled
+
+
+def test_enqueue_leaves_connection_open_for_reuse():
+    """psycopg3's `with conn:` closes the connection — enqueue must NOT
+    use it, or the cached default connection dies after one insert
+    (the 2026-07-06 backfill queued 0 of its review rows this way)."""
+    conn = MagicMock()
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.rowcount = 1
+    assert q.enqueue(conn, ted_notice_id="n-1", reason="zero_value") is True
+    conn.__enter__.assert_not_called()      # no close-on-exit context
+    conn.commit.assert_called_once()
+    conn.close.assert_not_called()
