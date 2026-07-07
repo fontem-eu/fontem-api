@@ -437,3 +437,36 @@ def test_fund_assertions_shapes():
     assert ok
     bad, _ = dual.evaluate({"violations": 3})
     assert not bad
+
+
+# ── #270 acceptance criteria, encoded as catalog guarantees ──────────
+
+
+def test_contract_awardee_assertion_accepts_investmentfund():
+    """The aligned referential guard treats a relabeled fund awardee as a
+    valid AWARDED_TO target (the 9 contracts that failed the gate)."""
+    a = by_id()["refs.contract_has_company"]
+    assert ":InvestmentFund" in a.query
+    assert a.severity == BLOCK
+
+
+def test_270_label_authority_assertions_present():
+    """GLEIF entity.category is the sole label authority — both
+    directions are BLOCK guards, plus a WARN coverage for unsourced
+    fund labels."""
+    cat = by_id()
+    assert cat["refs.company_not_gleif_fund"].severity == BLOCK
+    assert cat["refs.fund_matches_gleif_category"].severity == BLOCK
+    assert cat["coverage.fund_label_sourced"].severity == WARN
+    # the fund guard keys on GLEIF's entity_kind, not on any FIGI signal
+    assert "entity_kind" in cat["refs.fund_matches_gleif_category"].query
+
+
+def test_270_edge_provenance_validity_assertions_present():
+    """match_tier/confidence on the AWARDED_TO edge are domain-checked."""
+    cat = by_id()
+    assert cat["values.awarded_to_match_confidence_range"].severity == BLOCK
+    tier = cat["values.awarded_to_match_tier_known"]
+    assert tier.severity == BLOCK
+    for expected in ("lei", "name_country", "fuzzy", "registered_as"):
+        assert expected in tier.query

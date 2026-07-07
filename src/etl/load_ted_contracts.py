@@ -254,7 +254,9 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
         "Done: %d notices emitted, %d skipped in %.0fs",
         total, skipped, elapsed,
     )
-    return {"total": total, "skipped": skipped, "elapsed_s": elapsed}
+    logger.info("Match quality: %s", matcher.stats.summary())
+    return {"total": total, "skipped": skipped, "elapsed_s": elapsed,
+            "match_stats": matcher.stats.summary()}
 
 
 def _award_lot_estimate(notice, award):
@@ -515,12 +517,23 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 est_eur = pay_eur = None
                 before_eur = before_orig = None
 
+        # Match provenance — lets exact (lei/vat/cik) and name-based
+        # (name_country/fuzzy) attributions be told apart on the
+        # AWARDED_TO edge downstream. Layer 1 is the local VAT cache (a
+        # deterministic VAT match); layer 5 minted a new node, so there
+        # is no resolved tier or confidence against an existing entity.
+        match_tier = match.resolver_tier or (
+            "vat" if match.layer == 1 else None)
         contract_payload = builders.upsert_contract(
                 ted_notice_id=ted_notice_id,
                 ted_publication_number=ted_publication_number,
                 title=notice.title or None,
                 authority_id=authority_id,
                 company_gmr_id=str(match.gmr_id),
+                match_tier=match_tier,
+                match_confidence=(None if match.created_new
+                                  else match.confidence),
+                match_layer=match.layer,
                 publication_date=notice.issue_date or None,
                 value_eur=value_eur_float,
                 value_currency=resolved_currency,
@@ -711,6 +724,8 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
         totals["days"], totals["emitted"], totals["modifications"],
         totals["skipped"], totals["errors"],
     )
+    logger.info("Match quality: %s", matcher.stats.summary())
+    totals["match_stats"] = matcher.stats.summary()
     return totals
 
 

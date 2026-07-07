@@ -2,7 +2,9 @@
 from unittest.mock import MagicMock, patch
 
 from src.etl._hooks import ResolveMatch, ResolveResult
-from src.etl.ted_matcher import FUZZY_ACCEPT_CONF, TedMatcher
+from src.etl.ted_matcher import (
+    FUZZY_ACCEPT_CONF, MatcherStats, TedMatcher,
+)
 
 
 def _mock_session(vat_cache=None):
@@ -180,6 +182,27 @@ def test_layer3_resolver_fuzzy_single_high_confidence_accepted():
     assert result.confidence >= FUZZY_ACCEPT_CONF
 
 
+def test_fuzzy_floor_is_090():
+    """The floor is 0.90 (eval decision for #270). 0.95 was rejected: it
+    sits above the resolver's 0.94 fuzzy cap and would delete the tier."""
+    assert FUZZY_ACCEPT_CONF == 0.90
+
+
+def test_layer5_when_fuzzy_between_old_and_new_floor():
+    """#270 tightening: a lone fuzzy candidate at 0.87 — accepted under
+    the old 0.85 floor — now falls through to a new node rather than
+    guess a homonym link (AGILIS/SCORE class)."""
+    session = _mock_session()
+    matcher = TedMatcher(session)
+    with patch(
+        "src.etl.ted_matcher.resolve_entity",
+        return_value=_resolve_ambiguous(top_conf=0.87),
+    ):
+        result = matcher.match_company("Homonym Match SA", "FR")
+    assert result.layer == 5
+    assert result.created_new is True
+
+
 def test_layer5_when_fuzzy_top_below_floor():
     """A weak fuzzy hit must NOT auto-match — fall through to Layer 5."""
     session = _mock_session()
@@ -228,3 +251,18 @@ def test_authority_resolver_match_short_circuits_uuid():
     ):
         out = matcher.match_authority("Ministry of Existing", "DE")
     assert out == "auth-existing"
+
+
+def test_matcher_stats_summary_shape():
+    """summary() reports the per-layer histogram, total and resolver
+    failures — the payload logged at the end of each TED run."""
+    stats = MatcherStats()
+    stats.record(2)
+    stats.record(2)
+    stats.record(3)
+    stats.resolver_failures += 1
+    summary = stats.summary()
+    assert summary["total"] == 3
+    assert summary["by_layer"][2] == 2
+    assert summary["by_layer"][3] == 1
+    assert summary["resolver_failures"] == 1

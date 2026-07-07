@@ -274,9 +274,16 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "refs.contract_has_company", REFS,
-        "Every Contract is AWARDED_TO a Company", BLOCK, "cypher",
-        "MATCH (c:Contract) WHERE NOT (c)-[:AWARDED_TO]->(:Company) RETURN count(*) AS violations",
-        zero_violations("contracts with no awarded company"),
+        "Every Contract is AWARDED_TO a Company or InvestmentFund",
+        BLOCK, "cypher",
+        "MATCH (c:Contract) WHERE NOT (c)-[:AWARDED_TO]->(:Company) "
+        "AND NOT (c)-[:AWARDED_TO]->(:InvestmentFund) "
+        "RETURN count(*) AS violations",
+        zero_violations("contracts not awarded to a company or fund"),
+        "The awardee may be relabeled :InvestmentFund once GLEIF confirms "
+        "its category is FUND (an :InvestmentFund can win a contract), so "
+        "both labels are valid targets. Guarding only :Company made the "
+        "gate fail the moment a fund awardee was relabeled (#270).",
     ),
     Assertion(
         "refs.financialyear_has_company", REFS,
@@ -751,6 +758,69 @@ ASSERTIONS: list[Assertion] = [
         ":Company, and UpsertCompany refreshes never relabel back). A "
         "dual-labeled node means that invariant broke and queries "
         "would double-count the entity on both surfaces.",
+    ),
+    # ── #270: GLEIF entity.category is the SOLE authority for the
+    # Company/InvestmentFund label, and match provenance rides the
+    # award edge. ────────────────────────────────────────────────────
+    Assertion(
+        "refs.company_not_gleif_fund", REFS,
+        "No :Company is a GLEIF fund (entity_kind='FUND')", BLOCK,
+        "cypher",
+        "MATCH (c:Company) WHERE c.entity_kind = 'FUND' "
+        "RETURN count(*) AS violations",
+        zero_violations("companies GLEIF records as FUND but not relabeled"),
+        "GLEIF entity.category drives the label. A Company GLEIF calls a "
+        "FUND should have been relabeled :InvestmentFund in the same sink "
+        "write; a residual here means the relabel/reprocess has not "
+        "caught up.",
+    ),
+    Assertion(
+        "refs.fund_matches_gleif_category", REFS,
+        "Every :InvestmentFund GLEIF knows is category FUND", BLOCK,
+        "cypher",
+        "MATCH (f:InvestmentFund) WHERE f.entity_kind IS NOT NULL "
+        "AND f.entity_kind <> 'FUND' RETURN count(*) AS violations",
+        zero_violations("funds GLEIF records as a non-FUND category"),
+        "The inverse guard and the #270 headline: asset managers "
+        "(BNP Paribas AM, Ostrum AM) were promoted to :InvestmentFund "
+        "from the securityType of instruments they ISSUE, though GLEIF "
+        "records them GENERAL. entity.category, not FIGI, decides; the "
+        "sink reverts them to :Company on the next GLEIF reprocess.",
+    ),
+    Assertion(
+        "coverage.fund_label_sourced", COVERAGE,
+        "InvestmentFund labels are GLEIF-sourced (entity_kind='FUND')",
+        WARN, "cypher",
+        "MATCH (f:InvestmentFund) RETURN count(f) AS total, "
+        "count(CASE WHEN f.entity_kind = 'FUND' THEN 1 END) AS covered",
+        min_coverage(0.90, "GLEIF-sourced fund labels"),
+        "Surfaces :InvestmentFund nodes with no GLEIF FUND category "
+        "backing — historical instrument-inferred labels with no LEI in "
+        "GLEIF to confirm them. WARN not BLOCK: there is no authority to "
+        "revert them against, so they are cleaned up out-of-band rather "
+        "than gated on.",
+    ),
+    Assertion(
+        "values.awarded_to_match_confidence_range", VALUES,
+        "AWARDED_TO.match_confidence is within [0,1]", BLOCK, "cypher",
+        "MATCH ()-[r:AWARDED_TO]->() WHERE r.match_confidence IS NOT NULL "
+        "AND (r.match_confidence < 0 OR r.match_confidence > 1) "
+        "RETURN count(*) AS violations",
+        zero_violations("out-of-range match_confidence values"),
+        "Match provenance on the award edge must be sane: a confidence "
+        "outside [0,1] is a producer bug, not a real attribution.",
+    ),
+    Assertion(
+        "values.awarded_to_match_tier_known", VALUES,
+        "AWARDED_TO.match_tier is a known tier", BLOCK, "cypher",
+        "MATCH ()-[r:AWARDED_TO]->() WHERE r.match_tier IS NOT NULL "
+        "AND NOT r.match_tier IN "
+        "['lei', 'vat', 'cik', 'registered_as', 'name_country', 'fuzzy'] "
+        "RETURN count(*) AS violations",
+        zero_violations("unknown match_tier values"),
+        "The edge tier separates exact (lei/vat/cik) from name-based "
+        "(name_country/fuzzy) attributions; an unknown value would break "
+        "that read in queries and the UI.",
     ),
     Assertion(
         "coverage.fund_unit_security_type", COVERAGE,

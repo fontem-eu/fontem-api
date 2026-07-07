@@ -6,6 +6,7 @@ import pytest
 
 from src.etl import load_ted_contracts
 from src.etl.load_ted_contracts import load_contracts
+from src.etl.ted_matcher import MatchResult
 
 
 @pytest.fixture(autouse=True)
@@ -1051,6 +1052,61 @@ def test_emit_notice_without_override_keeps_notice_id_key():
     )
     assert contract_call.kwargs["payload"]["ted_notice_id"] == \
         "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+
+
+def test_emit_notice_stamps_match_provenance():
+    """A resolver match's tier/confidence/layer are threaded onto the
+    Contract payload so the sink can put them on the AWARDED_TO edge —
+    a name_country (layer 2) match carries tier + confidence."""
+    contractor = MagicMock()
+    contractor.name = "AGILIS SA"
+    contractor.country = "FR"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    matcher = _mock_matcher("auth-1", "company-1")
+    matcher.match_company.return_value = MatchResult(
+        gmr_id="company-1", layer=2, confidence=0.95,
+        resolver_tier="name_country",
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["match_tier"] == "name_country"
+    assert payload["match_confidence"] == 0.95
+    assert payload["match_layer"] == 2
+
+
+def test_emit_notice_new_node_has_no_match_tier():
+    """A layer-5 result minted a new node: no tier or confidence against
+    an existing entity, only the layer is recorded (both are dropped by
+    the builder, leaving the keys absent)."""
+    contractor = MagicMock()
+    contractor.name = "Totally New Vendor SARL"
+    contractor.country = "FR"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    matcher = _mock_matcher("auth-1", "gnew")
+    matcher.match_company.return_value = MatchResult(
+        gmr_id="gnew", layer=5, confidence=0.0, created_new=True,
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload.get("match_tier") is None
+    assert payload.get("match_confidence") is None
+    assert payload["match_layer"] == 5
 
 
 def test_emit_notice_stamps_modification_before_value():
