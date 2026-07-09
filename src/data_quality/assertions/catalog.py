@@ -287,10 +287,14 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "refs.financialyear_has_company", REFS,
-        "Every FinancialYear is REPORTED by a Company", BLOCK, "cypher",
+        "Every FinancialYear is REPORTED by a Company or InvestmentFund",
+        BLOCK, "cypher",
         "MATCH (f:FinancialYear) WHERE NOT EXISTS { (:Company)-[:REPORTED]->(f) } "
+        "AND NOT EXISTS { (:InvestmentFund)-[:REPORTED]->(f) } "
         "RETURN count(*) AS violations",
-        zero_violations("financial years with no reporting company"),
+        zero_violations("financial years with no reporting entity"),
+        "The reporter may be relabeled :InvestmentFund when GLEIF's "
+        "category is FUND; both labels are valid (#270 alignment).",
     ),
     Assertion(
         "refs.subsidiary_no_selfloop", REFS,
@@ -315,7 +319,9 @@ ASSERTIONS: list[Assertion] = [
         "refs.lobbying_filedby_when_matched", REFS,
         "Lobbying disclosure with company_gmr_id has a FILED_BY edge", BLOCK, "cypher",
         "MATCH (d:Disclosure {system:'eu-lobbying'}) WHERE d.company_gmr_id IS NOT NULL "
-        "AND NOT (d)-[:FILED_BY]->(:Company) RETURN count(*) AS violations",
+        "AND NOT (d)-[:FILED_BY]->(:Company) "
+        "AND NOT (d)-[:FILED_BY]->(:InvestmentFund) "
+        "RETURN count(*) AS violations",
         zero_violations("matched disclosures with dropped FILED_BY"),
         "Silent relationship-drop guard (backlog #7): a set "
         "company_gmr_id must materialise an edge.",
@@ -324,7 +330,9 @@ ASSERTIONS: list[Assertion] = [
         "refs.disclosure_company_resolves", REFS,
         "Disclosure.company_gmr_id resolves to a real Company", BLOCK, "cypher",
         "MATCH (d:Disclosure) WHERE d.company_gmr_id IS NOT NULL "
-        "AND NOT EXISTS { (c:Company {gmr_id: d.company_gmr_id}) } RETURN count(*) AS violations",
+        "AND NOT EXISTS { (c:Company {gmr_id: d.company_gmr_id}) } "
+        "AND NOT EXISTS { (f:InvestmentFund {gmr_id: d.company_gmr_id}) } "
+        "RETURN count(*) AS violations",
         zero_violations("dangling company_gmr_id references"),
     ),
 
@@ -786,6 +794,17 @@ ASSERTIONS: list[Assertion] = [
         "from the securityType of instruments they ISSUE, though GLEIF "
         "records them GENERAL. entity.category, not FIGI, decides; the "
         "sink reverts them to :Company on the next GLEIF reprocess.",
+    ),
+    Assertion(
+        "coverage.graph_stub_nodes", COVERAGE,
+        "Stub placeholder nodes stay near zero", WARN, "cypher",
+        "MATCH (n) WHERE n._stub RETURN count(n) AS stubs",
+        le_threshold("stubs", 100, "stub placeholder nodes"),
+        "The neo4j sink MERGEs a {_stub: true} placeholder when a "
+        "relationship's endpoint hasn't arrived yet (instead of silently "
+        "dropping the edge); the entity's own upsert clears the flag. A "
+        "persistent stub population means a source is referencing "
+        "entities nothing ever loads — visible debt, not silent loss.",
     ),
     Assertion(
         "coverage.fund_label_sourced", COVERAGE,

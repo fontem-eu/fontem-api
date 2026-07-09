@@ -470,3 +470,22 @@ def test_270_edge_provenance_validity_assertions_present():
     assert tier.severity == BLOCK
     for expected in ("lei", "name_country", "fuzzy", "registered_as"):
         assert expected in tier.query
+
+
+def test_270_label_alignment_covers_disclosures_and_financialyears():
+    """All entity-referencing assertions accept a relabeled
+    :InvestmentFund — the EssilorLuxottica class: node + edge exist,
+    only the label moved (#270 follow-up)."""
+    cat = by_id()
+    for aid in ("refs.disclosure_company_resolves",
+                "refs.lobbying_filedby_when_matched",
+                "refs.financialyear_has_company"):
+        assert "InvestmentFund" in cat[aid].query, aid
+
+
+def test_stub_visibility_assertion_present():
+    """Sink stub-creation is observable, not silent: WARN when the stub
+    population grows past the transient level."""
+    a = by_id()["coverage.graph_stub_nodes"]
+    assert a.severity == WARN
+    assert "_stub" in a.query
