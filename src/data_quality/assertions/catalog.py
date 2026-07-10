@@ -692,6 +692,19 @@ ASSERTIONS: list[Assertion] = [
         "gap); the threshold surfaces growth beyond the current ~300.",
     ),
     Assertion(
+        "consistency.cellar_mirror_parity", CONSISTENCY,
+        "Sampled works in the CELLAR mirror match the source term-for-term",
+        WARN, "consistency", "CellarMirror",
+        zero_with_detail("works differing from CELLAR (of 8 sampled)"),
+        "The legislative mirror (graph mirror/cellar/eu) is a VERBATIM "
+        "CDM copy — for random works the full work/expression/"
+        "manifestation closure must match CELLAR exactly. This is the "
+        "permanent form of the parity check that caught the export bug "
+        "which silently dropped every work-level triple (gitops#290). "
+        "A mismatch is mirror loss or source-side drift since the "
+        "snapshot; the detail names the record either way.",
+    ),
+    Assertion(
         "consistency.contract_neo4j_virtuoso", CONSISTENCY,
         "Random contracts render identically in Neo4j + Virtuoso", WARN,
         "consistency", "Contract",

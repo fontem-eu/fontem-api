@@ -61,6 +61,13 @@ spec:
                 secretKeyRef:
                   name: neo4j-credentials
                   key: NEO4J_PASSWORD
+            {{- if .Values.virtuoso.enabled }}
+            # Cross-store consistency engine (neo4j<->virtuoso + CELLAR
+            # mirror parity). Without this env the engine reports
+            # "no runner" and its assertions surface as WARN.
+            - name: VIRTUOSO_SPARQL_URL
+              value: {{ .Values.virtuoso.sparqlEndpoint | quote }}
+            {{- end }}
             - name: EVENTS_DATABASE_URL
               valueFrom:
                 secretKeyRef:

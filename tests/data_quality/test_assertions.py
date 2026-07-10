@@ -20,6 +20,7 @@ from src.data_quality.assertions.catalog import (
     zero_violations,
     zero_with_detail,
 )
+from src.data_quality.assertions.consistency import cellar_mirror_check
 from src.data_quality.assertions.runner import (
     AssertionResult, ERROR, FAIL, PASS, evaluate_assertion, exit_code,
     format_report, run_catalog, summarise,
@@ -489,3 +490,48 @@ def test_stub_visibility_assertion_present():
     a = by_id()["coverage.graph_stub_nodes"]
     assert a.severity == WARN
     assert "_stub" in a.query
+
+
+def test_cellar_mirror_parity_assertion_present():
+    a = by_id()["consistency.cellar_mirror_parity"]
+    assert a.engine == "consistency" and a.query == "CellarMirror"
+    assert a.severity == WARN
+
+
+def test_cellar_mirror_check_flags_missing_terms():
+    """A work whose closure or term-set differs from CELLAR is a
+    violation; identical stores pass."""
+    work = "http://publications.europa.eu/resource/cellar/w1"
+    expr = "http://publications.europa.eu/resource/cellar/w1.0001"
+    cdm = "http://publications.europa.eu/ontology/cdm#"
+
+    def bindings(rows):
+        return {"results": {"bindings": rows}}
+
+    def make_get(mirror_terms):
+        def _get(url, params):
+            q = params["query"]
+            if "work_date_document" in q and "ORDER BY RAND()" in q:
+                return bindings([{"w": {"type": "uri", "value": work}}])
+            if "SELECT DISTINCT ?s" in q:
+                return bindings([{"s": {"type": "uri", "value": work}},
+                                 {"s": {"type": "uri", "value": expr}}])
+            # per-subject terms: mirror queries carry FROM <...mirror...>
+            terms = mirror_terms if "mirror/cellar" in q else [
+                {"p": {"value": cdm + "work_date_document"},
+                 "o": {"type": "literal", "value": "2024-05-14",
+                       "datatype": "http://www.w3.org/2001/XMLSchema#date"}}]
+            return bindings(terms)
+        return _get
+
+    # mirror side uses Virtuoso-7 "typed-literal"; CELLAR side (the
+    # make_get fallback) uses SPARQL-1.1 "literal" — must compare equal.
+    full = [{"p": {"value": cdm + "work_date_document"},
+             "o": {"type": "typed-literal", "value": "2024-05-14",
+                   "datatype": "http://www.w3.org/2001/XMLSchema#date"}}]
+    ok = cellar_mirror_check("http://ours/sparql?mirror/cellar", make_get(full))
+    assert ok == {"violations": 0, "total": 1, "detail": ""}
+
+    lossy = cellar_mirror_check("http://ours/sparql?mirror/cellar", make_get([]))
+    assert lossy["violations"] == 1
+    assert "missing" in lossy["detail"]
