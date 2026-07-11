@@ -11,9 +11,10 @@ CSV format (semicolon-delimited, values wrapped in single quotes):
     NUTS3;CODE
     'DE212';'80331'
 
-Country matching: GLEIF stores ISO alpha-2 country codes in the raw XML
-(that is what is stored in Company.country by load_gleif). The postal CSV
-uses NUTS country codes — identical to ISO alpha-2 except Greece (EL vs GR).
+Country matching: Company.country is ISO alpha-3 in the graph (alpha-3
+everywhere convention). The postal CSV is keyed on NUTS alpha-2 country
+codes, so we convert alpha-3 -> alpha-2 via LocationService.alpha3_to_alpha2
+(which maps GRC -> EL, the NUTS code for Greece).
 
 Usage:
     python -m src.etl.link_entities_to_nuts_postal
@@ -30,14 +31,13 @@ import zipfile
 
 from neo4j import GraphDatabase
 
+from src.services.location_service import LocationService
+
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 _POSTAL_ZIP = os.path.join(_DATA_DIR, "PCODE_2025_NUTS-2024_v2.0.zip")
 _POSTAL_CSV = "PCODE_2025_NUTS-2024_v2.0.csv"
-
-# ISO alpha-2 → NUTS country code overrides (only where they differ)
-_ISO_TO_NUTS_COUNTRY = {"GR": "EL"}
 
 BATCH_SIZE = 5000
 
@@ -61,11 +61,6 @@ def load_postal_lookup(zip_path: str = _POSTAL_ZIP) -> dict[tuple[str, str], str
                     lookup[(country, code)] = nuts3
     logger.info("Loaded %d postal → NUTS3 mappings", len(lookup))
     return lookup
-
-
-def _nuts_country(iso_alpha2: str) -> str:
-    """Convert ISO alpha-2 to NUTS country code (handles EL/GR difference)."""
-    return _ISO_TO_NUTS_COUNTRY.get(iso_alpha2.upper(), iso_alpha2.upper())
 
 
 # Paginate the company scan so a 3M+ company graph never lands entirely in
@@ -93,7 +88,11 @@ def _resolve(rows, lookup):
     code resolves in the lookup."""
     out = []
     for row in rows:
-        nuts_ctry = _nuts_country(row["country"])
+        # Company.country is ISO alpha-3 in the graph (alpha-3 everywhere);
+        # the postal table is keyed on the NUTS alpha-2 country (GRC -> EL).
+        nuts_ctry = LocationService.alpha3_to_alpha2(row["country"])
+        if not nuts_ctry:
+            continue
         code = (row["postal_code"] or "").upper().replace(" ", "")
         nuts3 = lookup.get((nuts_ctry, code))
         if nuts3:

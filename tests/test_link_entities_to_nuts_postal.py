@@ -7,7 +7,6 @@ import zipfile
 from unittest.mock import MagicMock
 
 from src.etl.link_entities_to_nuts_postal import (
-    _nuts_country,
     link_companies,
     load_postal_lookup,
 )
@@ -55,23 +54,6 @@ def test_load_handles_bom():
     assert lookup[("AT", "1010")] == "AT130"
 
 
-# ── _nuts_country ────────────────────────────────────────────────────
-
-
-def test_nuts_country_passthrough():
-    assert _nuts_country("DE") == "DE"
-    assert _nuts_country("FR") == "FR"
-
-
-def test_nuts_country_greece_mapped():
-    assert _nuts_country("GR") == "EL"
-
-
-def test_nuts_country_case_insensitive():
-    assert _nuts_country("gr") == "EL"
-    assert _nuts_country("de") == "DE"
-
-
 # ── link_companies ───────────────────────────────────────────────────
 
 
@@ -105,7 +87,7 @@ def _merge_calls(session):
 def test_link_resolves_and_merges():
     lookup = {("DE", "80331"): "DE212"}
     session = _make_session(
-        [{"gmr_id": "abc", "country": "DE", "postal_code": "80331"}],
+        [{"gmr_id": "abc", "country": "DEU", "postal_code": "80331"}],
         relationships_created=1,
     )
     created = link_companies(session, lookup, batch_size=100)
@@ -123,7 +105,7 @@ def test_link_resolves_and_merges():
 def test_link_skips_unresolvable():
     lookup = {}  # no mappings
     session = _make_session(
-        [{"gmr_id": "xyz", "country": "DE", "postal_code": "99999"}],
+        [{"gmr_id": "xyz", "country": "DEU", "postal_code": "99999"}],
     )
     created = link_companies(session, lookup, batch_size=100)
     assert created == 0
@@ -134,7 +116,7 @@ def test_link_skips_unresolvable():
 def test_link_normalises_postal_spaces():
     lookup = {("NL", "3204XD"): "NL366"}
     session = _make_session(
-        [{"gmr_id": "nl1", "country": "NL", "postal_code": "3204 XD"}],
+        [{"gmr_id": "nl1", "country": "NLD", "postal_code": "3204 XD"}],
         relationships_created=1,
     )
     created = link_companies(session, lookup, batch_size=100)
@@ -142,9 +124,10 @@ def test_link_normalises_postal_spaces():
 
 
 def test_link_handles_greece_country_code():
+    # GRC (alpha-3) must map to the NUTS country code EL, not GR.
     lookup = {("EL", "10552"): "EL301"}
     session = _make_session(
-        [{"gmr_id": "gr1", "country": "GR", "postal_code": "10552"}],
+        [{"gmr_id": "gr1", "country": "GRC", "postal_code": "10552"}],
         relationships_created=1,
     )
     created = link_companies(session, lookup, batch_size=100)
