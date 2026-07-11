@@ -80,7 +80,17 @@ def _build_consistency_runner(client: Neo4jClient):
     if virtuoso is None:
         return None
 
+    def _http_get(url: str, params: Mapping[str, str]):
+        import httpx  # pylint: disable=import-outside-toplevel
+        r = httpx.get(url, params=dict(params), timeout=120.0,
+                      follow_redirects=True)
+        r.raise_for_status()
+        return r.json()
+
     def _run(entity_type: str) -> Mapping[str, Any]:
+        if entity_type == "CellarMirror":
+            return consistency.cellar_mirror_check(
+                os.environ["VIRTUOSO_SPARQL_URL"], _http_get)
         return consistency.check(client, virtuoso, entity_type)
     return _run
 

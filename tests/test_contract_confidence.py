@@ -205,3 +205,39 @@ def test_as_payload_shape():
     assert p["value_quality_flag"] == "ok"
     assert p["value_low_confidence"] is False
     assert p["value_payable_discrepancy"] is False
+
+
+# ── Quarantine tiering ────────────────────────────────────────────
+
+
+def test_quarantine_tiers():
+    """Hard flags are quarantined; review tier is the human subset;
+    a published zero is auto-withheld without review."""
+    implausible = score_contract_value(
+        estimate_eur=None, total_eur=1.8e14, payable_eur=None,
+    )
+    assert implausible.flag is ValueFlag.IMPLAUSIBLE_MAGNITUDE
+    assert implausible.quarantined and implausible.needs_review
+
+    zero = score_contract_value(
+        estimate_eur=None, total_eur=0.0, payable_eur=None,
+    )
+    assert zero.flag is ValueFlag.ZERO_VALUE
+    assert zero.quarantined and not zero.needs_review
+
+    ok = score_contract_value(
+        estimate_eur=100_000, total_eur=98_000, payable_eur=98_000,
+    )
+    assert not ok.quarantined and not ok.needs_review
+
+
+def test_as_payload_carries_quarantine_marker_only_when_quarantined():
+    bad = score_contract_value(
+        estimate_eur=None, total_eur=1.8e14, payable_eur=None,
+    ).as_payload()
+    assert bad["value_quarantined"] is True
+    assert bad["value_quarantine_reason"] == "implausible_magnitude"
+    ok = score_contract_value(
+        estimate_eur=100_000, total_eur=98_000, payable_eur=98_000,
+    ).as_payload()
+    assert "value_quarantined" not in ok

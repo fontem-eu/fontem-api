@@ -20,6 +20,7 @@ from src.data_quality.assertions.catalog import (
     zero_violations,
     zero_with_detail,
 )
+from src.data_quality.assertions.consistency import cellar_mirror_check
 from src.data_quality.assertions.runner import (
     AssertionResult, ERROR, FAIL, PASS, evaluate_assertion, exit_code,
     format_report, run_catalog, summarise,
@@ -437,3 +438,100 @@ def test_fund_assertions_shapes():
     assert ok
     bad, _ = dual.evaluate({"violations": 3})
     assert not bad
+
+
+# ── #270 acceptance criteria, encoded as catalog guarantees ──────────
+
+
+def test_contract_awardee_assertion_accepts_investmentfund():
+    """The aligned referential guard treats a relabeled fund awardee as a
+    valid AWARDED_TO target (the 9 contracts that failed the gate)."""
+    a = by_id()["refs.contract_has_company"]
+    assert ":InvestmentFund" in a.query
+    assert a.severity == BLOCK
+
+
+def test_270_label_authority_assertions_present():
+    """GLEIF entity.category is the sole label authority — both
+    directions are BLOCK guards, plus a WARN coverage for unsourced
+    fund labels."""
+    cat = by_id()
+    assert cat["refs.company_not_gleif_fund"].severity == BLOCK
+    assert cat["refs.fund_matches_gleif_category"].severity == BLOCK
+    assert cat["coverage.fund_label_sourced"].severity == WARN
+    # the fund guard keys on GLEIF's entity_kind, not on any FIGI signal
+    assert "entity_kind" in cat["refs.fund_matches_gleif_category"].query
+
+
+def test_270_edge_provenance_validity_assertions_present():
+    """match_tier/confidence on the AWARDED_TO edge are domain-checked."""
+    cat = by_id()
+    assert cat["values.awarded_to_match_confidence_range"].severity == BLOCK
+    tier = cat["values.awarded_to_match_tier_known"]
+    assert tier.severity == BLOCK
+    for expected in ("lei", "name_country", "fuzzy", "registered_as"):
+        assert expected in tier.query
+
+
+def test_270_label_alignment_covers_disclosures_and_financialyears():
+    """All entity-referencing assertions accept a relabeled
+    :InvestmentFund — the EssilorLuxottica class: node + edge exist,
+    only the label moved (#270 follow-up)."""
+    cat = by_id()
+    for aid in ("refs.disclosure_company_resolves",
+                "refs.lobbying_filedby_when_matched",
+                "refs.financialyear_has_company"):
+        assert "InvestmentFund" in cat[aid].query, aid
+
+
+def test_stub_visibility_assertion_present():
+    """Sink stub-creation is observable, not silent: WARN when the stub
+    population grows past the transient level."""
+    a = by_id()["coverage.graph_stub_nodes"]
+    assert a.severity == WARN
+    assert "_stub" in a.query
+
+
+def test_cellar_mirror_parity_assertion_present():
+    a = by_id()["consistency.cellar_mirror_parity"]
+    assert a.engine == "consistency" and a.query == "CellarMirror"
+    assert a.severity == WARN
+
+
+def test_cellar_mirror_check_flags_missing_terms():
+    """A work whose closure or term-set differs from CELLAR is a
+    violation; identical stores pass."""
+    work = "http://publications.europa.eu/resource/cellar/w1"
+    expr = "http://publications.europa.eu/resource/cellar/w1.0001"
+    cdm = "http://publications.europa.eu/ontology/cdm#"
+
+    def bindings(rows):
+        return {"results": {"bindings": rows}}
+
+    def make_get(mirror_terms):
+        def _get(url, params):
+            q = params["query"]
+            if "work_date_document" in q and "ORDER BY RAND()" in q:
+                return bindings([{"w": {"type": "uri", "value": work}}])
+            if "SELECT DISTINCT ?s" in q:
+                return bindings([{"s": {"type": "uri", "value": work}},
+                                 {"s": {"type": "uri", "value": expr}}])
+            # per-subject terms: mirror queries carry FROM <...mirror...>
+            terms = mirror_terms if "mirror/cellar" in q else [
+                {"p": {"value": cdm + "work_date_document"},
+                 "o": {"type": "literal", "value": "2024-05-14",
+                       "datatype": "http://www.w3.org/2001/XMLSchema#date"}}]
+            return bindings(terms)
+        return _get
+
+    # mirror side uses Virtuoso-7 "typed-literal"; CELLAR side (the
+    # make_get fallback) uses SPARQL-1.1 "literal" — must compare equal.
+    full = [{"p": {"value": cdm + "work_date_document"},
+             "o": {"type": "typed-literal", "value": "2024-05-14",
+                   "datatype": "http://www.w3.org/2001/XMLSchema#date"}}]
+    ok = cellar_mirror_check("http://ours/sparql?mirror/cellar", make_get(full))
+    assert ok == {"violations": 0, "total": 1, "detail": ""}
+
+    lossy = cellar_mirror_check("http://ours/sparql?mirror/cellar", make_get([]))
+    assert lossy["violations"] == 1
+    assert "missing" in lossy["detail"]

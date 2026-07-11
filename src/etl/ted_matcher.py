@@ -26,10 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 # Confidence floor for accepting a /resolve fuzzy candidate as the
-# match. The resolver caps fuzzy confidence at ~0.94; a single
-# candidate above this floor is what the old Dice-based Layer 4
-# would have accepted. Below this we fall through to a new node.
-FUZZY_ACCEPT_CONF = 0.85
+# match. The resolver caps fuzzy confidence at ~0.94 (min(0.94,
+# fulltext_score/10)), so this floor accepts only candidates whose
+# fulltext score clears ~9.0/10 — a single dominant name match with no
+# close runner-up. Raised from 0.85 to 0.90 to shed the weakest fuzzy
+# attributions (the #270 homonym class); 0.95 was rejected in eval
+# because it sits above the 0.94 cap and would delete the tier outright.
+# Below this we fall through to a new node rather than guess a link.
+FUZZY_ACCEPT_CONF = 0.90
 
 
 @dataclass

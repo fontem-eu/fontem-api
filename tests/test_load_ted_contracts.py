@@ -6,6 +6,7 @@ import pytest
 
 from src.etl import load_ted_contracts
 from src.etl.load_ted_contracts import load_contracts
+from src.etl.ted_matcher import MatchResult
 
 
 @pytest.fixture(autouse=True)
@@ -698,10 +699,11 @@ def test_value_dropped_when_award_exceeds_estimate_by_huge_ratio(
     """The canonical Swedish bus fixture: payable
     2_110_249_000_000_000 SEK (~€182 T) with an
     ``EstimatedOverallContractAmount`` of 2_000_000_000 SEK on the same
-    lot — ratio ~1,055,124x. New behaviour: the value is STORED (we never
-    destroy data) but the contract is flagged low-confidence so it is
-    excluded from default aggregates. The estimate and payable are kept
-    alongside for review."""
+    lot — ratio ~1,055,124x. Quarantine policy (2026-07-06): the value
+    is WITHHELD from the event — no monetary fields, quarantine marker +
+    reason instead — and the claim goes to the human review queue. The
+    original numbers survive in the event log and the queue snapshot;
+    nothing downstream ever needs to remember a confidence flag."""
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
     )
@@ -721,21 +723,25 @@ def test_value_dropped_when_award_exceeds_estimate_by_huge_ratio(
     # ~0.086 EUR/SEK so payable -> ~€182T, estimate -> ~€172M: a genuine
     # multi-order disagreement the scorer must flag.
     svc = _fx_svc(rate=0.0863)
-    load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
+    queued = []
+    with patch("src.etl.load_ted_contracts.value_review_queue."
+               "enqueue_default", side_effect=lambda **kw: queued.append(kw) or True):
+        load_contracts(driver, log, "/fake/path.tar.gz", currency_svc=svc)
     payload = next(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
-    # Value is stored (not dropped) ...
-    assert payload["value_eur"] > 1e14
-    # ... but flagged and excluded from default aggregates.
-    assert payload["value_low_confidence"] is True
-    assert payload["value_quality_flag"] in (
-        "implausible_magnitude", "value_disagreement",
-    )
-    # Cross-check signals retained.
-    assert payload["estimated_value_eur"] > 0
-    assert payload["value_payable_eur"] > 1e14
+    # The value is WITHHELD — no monetary field survives the emit...
+    for field in ("value_eur", "value_original", "value_currency",
+                  "estimated_value_eur", "value_payable_eur"):
+        assert field not in payload, field
+    # ...replaced by the quarantine marker + reason.
+    assert payload["value_quarantined"] is True
+    assert payload["value_quarantine_reason"] == "implausible_magnitude"
+    # The claim landed in the review queue with the numbers snapshot.
+    assert len(queued) == 1
+    assert queued[0]["claimed_value_eur"] > 1e14
+    assert queued[0]["reason"] == "implausible_magnitude"
     # Rest of the Contract row still lands.
     assert payload["authority_id"] == "auth-1"
     assert payload["company_gmr_id"] == "company-1"
@@ -809,9 +815,11 @@ def test_value_dropped_above_100b_cap_when_no_estimate(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
-    assert payload["value_eur"] > 1e11           # stored
-    assert payload["value_low_confidence"] is True
-    assert payload["value_quality_flag"] == "implausible_magnitude"
+    # Quarantine policy (2026-07-06): essentially-certain garbage
+    # (confidence < the quarantine floor) is withheld, not stored.
+    assert "value_eur" not in payload
+    assert payload["value_quarantined"] is True
+    assert payload["value_quarantine_reason"] == "implausible_magnitude"
     assert payload["ted_notice_id"]
 
 
@@ -1044,6 +1052,61 @@ def test_emit_notice_without_override_keeps_notice_id_key():
     )
     assert contract_call.kwargs["payload"]["ted_notice_id"] == \
         "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+
+
+def test_emit_notice_stamps_match_provenance():
+    """A resolver match's tier/confidence/layer are threaded onto the
+    Contract payload so the sink can put them on the AWARDED_TO edge —
+    a name_country (layer 2) match carries tier + confidence."""
+    contractor = MagicMock()
+    contractor.name = "AGILIS SA"
+    contractor.country = "FR"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    matcher = _mock_matcher("auth-1", "company-1")
+    matcher.match_company.return_value = MatchResult(
+        gmr_id="company-1", layer=2, confidence=0.95,
+        resolver_tier="name_country",
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["match_tier"] == "name_country"
+    assert payload["match_confidence"] == 0.95
+    assert payload["match_layer"] == 2
+
+
+def test_emit_notice_new_node_has_no_match_tier():
+    """A layer-5 result minted a new node: no tier or confidence against
+    an existing entity, only the layer is recorded (both are dropped by
+    the builder, leaving the keys absent)."""
+    contractor = MagicMock()
+    contractor.name = "Totally New Vendor SARL"
+    contractor.country = "FR"
+    contractor.legal_id = None
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": contractor},
+    )
+    matcher = _mock_matcher("auth-1", "gnew")
+    matcher.match_company.return_value = MatchResult(
+        gmr_id="gnew", layer=5, confidence=0.0, created_new=True,
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload.get("match_tier") is None
+    assert payload.get("match_confidence") is None
+    assert payload["match_layer"] == 5
 
 
 def test_emit_notice_stamps_modification_before_value():

@@ -56,6 +56,20 @@ TAG_LEGAL_FORM = f"{_t}LegalForm"
 TAG_ENTITY_LEGAL_FORM_CODE = f"{_t}EntityLegalFormCode"
 TAG_OTHER_LEGAL_FORM = f"{_t}OtherLegalForm"
 TAG_ENTITY_STATUS = f"{_t}EntityStatus"
+TAG_ENTITY_CATEGORY = f"{_t}EntityCategory"
+TAG_LEGAL_JURISDICTION = f"{_t}LegalJurisdiction"
+TAG_ENTITY_CREATION_DATE = f"{_t}EntityCreationDate"
+TAG_REGISTRATION_AUTHORITY = f"{_t}RegistrationAuthority"
+TAG_RA_ID = f"{_t}RegistrationAuthorityID"
+TAG_RA_ENTITY_ID = f"{_t}RegistrationAuthorityEntityID"
+TAG_HQ_ADDRESS = f"{_t}HeadquartersAddress"
+TAG_FIRST_ADDRESS_LINE = f"{_t}FirstAddressLine"
+TAG_CITY = f"{_t}City"
+TAG_REGION = f"{_t}Region"
+TAG_OTHER_ENTITY_NAMES = f"{_t}OtherEntityNames"
+TAG_OTHER_ENTITY_NAME = f"{_t}OtherEntityName"
+TAG_REGISTRATION = f"{_t}Registration"
+TAG_REGISTRATION_STATUS = f"{_t}RegistrationStatus"
 
 
 def resolve_latest_url() -> str:
@@ -88,54 +102,92 @@ def download_zip(url: str) -> io.BytesIO:
     return io.BytesIO(resp.content)
 
 
+def _address_block(el):
+    """Extract {address, city, region, country, postal_code} from a
+    LegalAddress / HeadquartersAddress element; empty dict if absent.
+
+    GLEIF XML <Country> is ISO 3166-1 alpha-2. Fontem's internal
+    convention is alpha-3, so normalise at write time — otherwise
+    downstream joins against alpha-3-keyed datasets (NUTSRegion,
+    location services, statistics) all miss."""
+    if el is None:
+        return {}
+    return {
+        "address": _text(el, TAG_FIRST_ADDRESS_LINE),
+        "city": _text(el, TAG_CITY),
+        "region": _text(el, TAG_REGION),
+        "country": LocationService.to_alpha3(_text(el, TAG_COUNTRY)),
+        "postal_code": _text(el, TAG_POSTAL_CODE),
+    }
+
+
+def _gleif_record(entity, elem, lei):
+    """Build one GLEIF record dict from an <LEIRecord>'s <Entity>.
+
+    The identity block is stored verbatim from the source — never
+    inferred; a field the record omits stays None."""
+    legal = _address_block(entity.find(TAG_LEGAL_ADDRESS))
+    hq = _address_block(entity.find(TAG_HQ_ADDRESS))
+
+    legal_form_el = entity.find(TAG_LEGAL_FORM)
+    legal_form = None
+    if legal_form_el is not None:
+        legal_form = (_text(legal_form_el, TAG_ENTITY_LEGAL_FORM_CODE)
+                      or _text(legal_form_el, TAG_OTHER_LEGAL_FORM))
+
+    ra = entity.find(TAG_REGISTRATION_AUTHORITY)
+    reg = elem.find(TAG_REGISTRATION)
+    oen = entity.find(TAG_OTHER_ENTITY_NAMES)
+    aliases = [n.text.strip()
+               for n in (oen.findall(TAG_OTHER_ENTITY_NAME) if oen is not None
+                         else [])
+               if n.text and n.text.strip()]
+
+    return {
+        "lei": lei,
+        "name": _text(entity, TAG_LEGAL_NAME) or None,
+        "country": legal.get("country") or None,
+        "postal_code": legal.get("postal_code") or None,
+        "legal_form": legal_form or None,
+        "active": _text(entity, TAG_ENTITY_STATUS) == "ACTIVE",
+        "entity_kind": _text(entity, TAG_ENTITY_CATEGORY) or None,
+        "registered_as": (
+            _text(ra, TAG_RA_ENTITY_ID) if ra is not None else None) or None,
+        "registered_at": (
+            _text(ra, TAG_RA_ID) if ra is not None else None) or None,
+        "jurisdiction": _text(entity, TAG_LEGAL_JURISDICTION) or None,
+        "registration_status": (
+            _text(reg, TAG_REGISTRATION_STATUS) if reg is not None else None)
+        or None,
+        "entity_creation_date": _text(entity, TAG_ENTITY_CREATION_DATE) or None,
+        "address": legal.get("address") or None,
+        "city": legal.get("city") or None,
+        "region": legal.get("region") or None,
+        "hq_address": hq.get("address") or None,
+        "hq_city": hq.get("city") or None,
+        "hq_region": hq.get("region") or None,
+        "hq_country": hq.get("country") or None,
+        "hq_postal_code": hq.get("postal_code") or None,
+        "aliases": aliases or None,
+    }
+
+
 def parse_gleif_xml(xml_stream):
     """Streaming parser for LEI-CDF v3.1 XML.
 
-    Yields dicts with keys: lei, name, country, postal_code, legal_form, active.
-    Memory-efficient: clears each element after processing.
-    """
+    Yields one record dict per <LEIRecord> (see ``_gleif_record`` for the
+    key set). Memory-efficient: clears each element after processing."""
     for _event, elem in iterparse(xml_stream, events=("end",)):
         if elem.tag != TAG_RECORD:
             continue
-
         lei = _text(elem, TAG_LEI)
         entity = elem.find(TAG_ENTITY)
-        if entity is None or not lei:
+        if entity is None or not lei or len(lei) != 20:
             elem.clear()
             continue
-
-        name = _text(entity, TAG_LEGAL_NAME)
-        addr = entity.find(TAG_LEGAL_ADDRESS)
-        # GLEIF XML <Country> uses ISO 3166-1 alpha-2. Fontem's internal
-        # convention is alpha-3, so normalise at write time — otherwise
-        # downstream joins against alpha-3-keyed datasets (NUTSRegion,
-        # location services, statistics) all miss.
-        country_raw = _text(addr, TAG_COUNTRY) if addr is not None else None
-        country = LocationService.to_alpha3(country_raw)
-        postal_code = _text(addr, TAG_POSTAL_CODE) if addr is not None else None
-        status = _text(entity, TAG_ENTITY_STATUS)
-
-        legal_form_el = entity.find(TAG_LEGAL_FORM)
-        legal_form = None
-        if legal_form_el is not None:
-            legal_form = (
-                _text(legal_form_el, TAG_ENTITY_LEGAL_FORM_CODE)
-                or _text(legal_form_el, TAG_OTHER_LEGAL_FORM)
-            )
-
+        record = _gleif_record(entity, elem, lei)
         elem.clear()
-
-        if not lei or len(lei) != 20:
-            continue
-
-        yield {
-            "lei": lei,
-            "name": name or None,
-            "country": country or None,
-            "postal_code": postal_code or None,
-            "legal_form": legal_form or None,
-            "active": status == "ACTIVE",
-        }
+        yield record
 
 
 def _text(parent, tag):
@@ -169,6 +221,8 @@ def emit_gleif(log: EventLog, records) -> dict:
                     legal_form=rec.get("legal_form"),
                     postal_code=rec.get("postal_code"),
                     active=rec.get("active"),
+                    identity={k: rec.get(k)
+                              for k in builders.COMPANY_IDENTITY_FIELDS},
                 ),
             )
             total += 1

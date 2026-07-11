@@ -1258,10 +1258,11 @@ def test_equity_canonicals_tags_company_and_fund_classes():
     assert unknown == {"Equity WRT": 1}
 
 
-def test_run_mode_via_lei_emits_fund_entity_and_unit_listing(monkeypatch):
-    """Fund-class instruments in lei mode become an UpsertInvestmentFund
-    (same gmr_id — sinks relabel in place) plus a unit UpsertListing;
-    they are never emitted as Company listings."""
+def test_run_mode_via_lei_holds_funds_back(monkeypatch):
+    """No mode promotes an instrument to an entity: a fund-class FIGI in
+    lei mode is counted and held out of the Company's Listings, never
+    emitted as an InvestmentFund. The company-class listing still flows;
+    the entity's fund/company label is GLEIF entity.category alone."""
     rows = [
         {"lei": "L1", "company_gmr_id": "g1", "witness_isins": ["I1"]},
         {"lei": "L2", "company_gmr_id": "g2", "witness_isins": ["I2"]},
@@ -1280,37 +1281,22 @@ def test_run_mode_via_lei_emits_fund_entity_and_unit_listing(monkeypatch):
 
     monkeypatch.setattr(load_openfigi, "query_openfigi", fake_query_openfigi)
     monkeypatch.setattr(load_openfigi.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(
-        load_openfigi, "fetch_entity_props",
-        lambda _driver, gmr_id: {"name": "EXAMPLE UCITS FUND",
-                                 "country": "LU"},
-    )
     log, emit = _mock_log()
     summary = load_openfigi._run_mode_via_lei(
         "lei", driver=MagicMock(), log=log, limit=2, api_key=None,
     )
     assert summary["enriched"] == 1      # only the Common Stock
     assert summary["funds"] == 1
-    # 1 company listing + (1 fund entity + 1 fund unit listing)
-    assert emit.upsert.call_count == 3
     types = [c.args[0] for c in emit.upsert.call_args_list]
-    assert types.count("UpsertInvestmentFund") == 1
-    fund_call = next(c for c in emit.upsert.call_args_list
-                     if c.args[0] == "UpsertInvestmentFund")
-    assert fund_call.kwargs["payload"]["gmr_id"] == "g2"
-    assert fund_call.kwargs["payload"]["fund_type"] == "Open-End Fund"
-    assert fund_call.kwargs["payload"]["name"] == "EXAMPLE UCITS FUND"
-    unit_call = [c for c in emit.upsert.call_args_list
-                 if c.args[0] == "UpsertListing"
-                 and c.kwargs["payload"].get("security_type")
-                 == "Open-End Fund"]
-    assert len(unit_call) == 1
+    assert "UpsertInvestmentFund" not in types
+    # exactly one Company listing (the fund unit is held back)
+    assert types == ["UpsertListing"]
+    assert emit.upsert.call_args_list[0].kwargs["payload"]["ticker"] == "TI1"
 
 
 def test_run_mode_via_lei_reeval_holds_funds_back(monkeypatch):
-    """lei-reeval does NOT emit funds: its cohort already has Listings,
-    so a fund there means reclassifying a live entity — an explicit
-    follow-up, not a side effect of ticker re-evaluation."""
+    """lei-reeval likewise holds funds: a fund among suspect listings is
+    counted, not emitted (no instrument-derived entity promotion)."""
     rows = [{"lei": "L1", "company_gmr_id": "g1",
              "suspect_tickers": [], "witness_isins": ["I1"]}]
     monkeypatch.setitem(load_openfigi._MODES["lei-reeval"], "fetch",
@@ -1332,48 +1318,11 @@ def test_run_mode_via_lei_reeval_holds_funds_back(monkeypatch):
     assert emit.upsert.call_count == 0
 
 
-def test_emit_fund_events_payload_shapes():
-    """One batch per LEI: the fund entity first, then one unit listing
-    per record, all sharing the fund's gmr_id."""
-    log, emit = _mock_log()
-    row = {"lei": "L1" * 10, "company_gmr_id": "g1",
-           "name": "F", "country": "LU", "active": True,
-           "legal_form": "8888"}
-    records = [
-        {"ticker": "U1", "exchange_code": "LX", "isin": "LU0000000001",
-         "company_gmr_id": "g1", "entity_class": "fund",
-         "security_type": "Open-End Fund"},
-        {"ticker": "U2", "exchange_code": "LX", "isin": "LU0000000002",
-         "company_gmr_id": "g1", "entity_class": "fund",
-         "security_type": ""},
-    ]
-    total = load_openfigi.emit_fund_events(log, row, records)
-    assert total == 3           # entity + 2 unit listings
-    types = [c.args[0] for c in emit.upsert.call_args_list]
-    assert types == ["UpsertInvestmentFund", "UpsertListing",
-                     "UpsertListing"]
-    fund_payload = emit.upsert.call_args_list[0].kwargs["payload"]
-    assert fund_payload["fund_type"] == "Open-End Fund"
-    assert fund_payload["legal_form"] == "8888"
-    assert load_openfigi.emit_fund_events(log, row, []) == 0
-
-
-def test_lei_fetch_stays_slim_and_props_are_lazy():
-    """The 3.3M-row cohort fetch must stay slim (wide rows OOM-killed
-    the 4 GiB backfill pod); the fund upsert's identity fields come
-    from the per-fund point read instead."""
+def test_lei_fetch_stays_slim():
+    """The 3.3M-row cohort fetch must stay slim (wide rows OOM-killed the
+    4 GiB backfill pod) — identity fields are not carried on the fetch."""
     for field in ("c.name", "c.country", "c.active", "c.legal_form"):
         assert field not in load_openfigi.FETCH_LEIS_NO_LISTING
-    for field in ("c.name AS name", "c.country AS country",
-                  "c.active AS active", "c.legal_form AS legal_form"):
-        assert field in load_openfigi.FETCH_ENTITY_PROPS
-
-
-def test_fetch_entity_props_missing_node_returns_empty():
-    driver = MagicMock()
-    driver.session.return_value.__enter__.return_value.run.return_value \
-        .single.return_value = None
-    assert load_openfigi.fetch_entity_props(driver, "gX") == {}
 
 
 def test_preference_shares_classify_as_company():

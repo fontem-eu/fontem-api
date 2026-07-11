@@ -43,6 +43,7 @@ from ..services.ted_lookup import TedLookupError, resolve_publication_number
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .contract_confidence import score_contract_value
+from . import value_review_queue
 from .ted_matcher import TedMatcher
 from . import ted_search
 
@@ -253,7 +254,9 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
         "Done: %d notices emitted, %d skipped in %.0fs",
         total, skipped, elapsed,
     )
-    return {"total": total, "skipped": skipped, "elapsed_s": elapsed}
+    logger.info("Match quality: %s", matcher.stats.summary())
+    return {"total": total, "skipped": skipped, "elapsed_s": elapsed,
+            "match_stats": matcher.stats.summary()}
 
 
 def _award_lot_estimate(notice, award):
@@ -487,12 +490,50 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             )
             seen_companies.add(match.gmr_id)
 
+        # ── Value quarantine ────────────────────────────────────
+        # A value that fails hard sanity checks is WITHHELD, not
+        # flagged-and-hoped: the event carries no monetary fields (the
+        # sinks also clear any previously rendered ones) plus the
+        # quarantine marker + reason. Review-tier claims go to
+        # events.value_review for a human decision; a published 0
+        # (zero_value) is auto-withheld — non-disclosure in costume —
+        # and keeps the independent estimate. The claimed numbers are
+        # never lost: event log + queue snapshot hold them.
+        if score.quarantined:
+            if score.needs_review:
+                value_review_queue.enqueue_default(
+                    ted_notice_id=ted_notice_id,
+                    reason=score.flag.value,
+                    claimed_value_eur=value_eur_float,
+                    claimed_value_original=value_original_float,
+                    claimed_currency=resolved_currency,
+                    claimed_estimated_eur=est_eur,
+                    claimed_payable_eur=pay_eur,
+                    detail=score.reason,
+                )
+            value_eur_float = value_original_float = None
+            resolved_currency = None
+            if score.flag.value != "zero_value":
+                est_eur = pay_eur = None
+                before_eur = before_orig = None
+
+        # Match provenance — lets exact (lei/vat/cik) and name-based
+        # (name_country/fuzzy) attributions be told apart on the
+        # AWARDED_TO edge downstream. Layer 1 is the local VAT cache (a
+        # deterministic VAT match); layer 5 minted a new node, so there
+        # is no resolved tier or confidence against an existing entity.
+        match_tier = match.resolver_tier or (
+            "vat" if match.layer == 1 else None)
         contract_payload = builders.upsert_contract(
                 ted_notice_id=ted_notice_id,
                 ted_publication_number=ted_publication_number,
                 title=notice.title or None,
                 authority_id=authority_id,
                 company_gmr_id=str(match.gmr_id),
+                match_tier=match_tier,
+                match_confidence=(None if match.created_new
+                                  else match.confidence),
+                match_layer=match.layer,
                 publication_date=notice.issue_date or None,
                 value_eur=value_eur_float,
                 value_currency=resolved_currency,
@@ -507,6 +548,9 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 value_quality_flag=score.flag.value,
                 value_low_confidence=score.is_low_confidence,
                 value_payable_discrepancy=score.has_payable_discrepancy,
+                value_quarantined=score.quarantined or None,
+                value_quarantine_reason=(score.flag.value
+                                         if score.quarantined else None),
                 cpv=notice.cpv_main,
                 nuts=getattr(notice, "place_nuts", None),
                 language=getattr(notice, "language", None),
@@ -680,6 +724,8 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
         totals["days"], totals["emitted"], totals["modifications"],
         totals["skipped"], totals["errors"],
     )
+    logger.info("Match quality: %s", matcher.stats.summary())
+    totals["match_stats"] = matcher.stats.summary()
     return totals
 
 

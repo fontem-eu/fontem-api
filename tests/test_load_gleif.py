@@ -228,3 +228,105 @@ def test_resolve_latest_url():
 
     assert "40690" in url
     assert url.endswith("/zip")
+
+
+# ── GLEIF identity block (real LEI-CDF v3.1 structure + real values) ──
+
+# Carlsberg A/S — real GLEIF record (LEI 5299001O0WJQYB5GYZ19): GENERAL
+# entity, Danish CVR register RA000170 / 61056416.
+CARLSBERG_XML = f"""
+<lei:LEIRecord xmlns:lei="{NS}">
+  <lei:LEI>5299001O0WJQYB5GYZ19</lei:LEI>
+  <lei:Entity>
+    <lei:LegalName>CARLSBERG A/S</lei:LegalName>
+    <lei:OtherEntityNames>
+      <lei:OtherEntityName type="PREVIOUS_LEGAL_NAME">Carlsberg Group</lei:OtherEntityName>
+    </lei:OtherEntityNames>
+    <lei:LegalAddress>
+      <lei:FirstAddressLine>J.C. Jacobsens Gade 1</lei:FirstAddressLine>
+      <lei:City>København V</lei:City>
+      <lei:Region>DK-84</lei:Region>
+      <lei:Country>DK</lei:Country>
+      <lei:PostalCode>1799</lei:PostalCode>
+    </lei:LegalAddress>
+    <lei:HeadquartersAddress>
+      <lei:FirstAddressLine>J.C. Jacobsens Gade 1</lei:FirstAddressLine>
+      <lei:City>København V</lei:City>
+      <lei:Country>DK</lei:Country>
+      <lei:PostalCode>1799</lei:PostalCode>
+    </lei:HeadquartersAddress>
+    <lei:RegistrationAuthority>
+      <lei:RegistrationAuthorityID>RA000170</lei:RegistrationAuthorityID>
+      <lei:RegistrationAuthorityEntityID>61056416</lei:RegistrationAuthorityEntityID>
+    </lei:RegistrationAuthority>
+    <lei:LegalJurisdiction>DK</lei:LegalJurisdiction>
+    <lei:EntityCategory>GENERAL</lei:EntityCategory>
+    <lei:LegalForm><lei:EntityLegalFormCode>ZRPO</lei:EntityLegalFormCode></lei:LegalForm>
+    <lei:EntityStatus>ACTIVE</lei:EntityStatus>
+    <lei:EntityCreationDate>1999-10-16T00:00:00Z</lei:EntityCreationDate>
+  </lei:Entity>
+  <lei:Registration>
+    <lei:RegistrationStatus>ISSUED</lei:RegistrationStatus>
+  </lei:Registration>
+</lei:LEIRecord>
+"""
+
+# AGILIS — real GLEIF record (LEI 969500BWXPDCRLHC3Z76): category FUND.
+AGILIS_FUND_XML = f"""
+<lei:LEIRecord xmlns:lei="{NS}">
+  <lei:LEI>969500BWXPDCRLHC3Z76</lei:LEI>
+  <lei:Entity>
+    <lei:LegalName>AGILIS</lei:LegalName>
+    <lei:LegalAddress><lei:Country>FR</lei:Country><lei:PostalCode>75016</lei:PostalCode></lei:LegalAddress>
+    <lei:EntityCategory>FUND</lei:EntityCategory>
+    <lei:LegalForm><lei:EntityLegalFormCode>MQU9</lei:EntityLegalFormCode></lei:LegalForm>
+    <lei:EntityStatus>ACTIVE</lei:EntityStatus>
+  </lei:Entity>
+</lei:LEIRecord>
+"""
+
+
+def test_parse_extracts_full_identity_block():
+    rec = next(parse_gleif_xml(_make_xml(CARLSBERG_XML)))
+    assert rec["entity_kind"] == "GENERAL"
+    assert rec["registered_as"] == "61056416"
+    assert rec["registered_at"] == "RA000170"
+    assert rec["jurisdiction"] == "DK"
+    assert rec["registration_status"] == "ISSUED"
+    assert rec["entity_creation_date"].startswith("1999-10-16")
+    assert rec["address"] == "J.C. Jacobsens Gade 1"
+    assert rec["city"] == "København V"
+    assert rec["region"] == "DK-84"
+    assert rec["hq_city"] == "København V"
+    assert rec["hq_country"] == "DNK"          # alpha-2 -> alpha-3
+    assert rec["aliases"] == ["Carlsberg Group"]
+
+
+def test_parse_fund_category_verbatim():
+    rec = next(parse_gleif_xml(_make_xml(AGILIS_FUND_XML)))
+    assert rec["entity_kind"] == "FUND"
+    # no OtherEntityNames -> aliases absent, not empty list
+    assert rec["aliases"] is None
+
+
+def test_parse_missing_identity_fields_are_none_not_crash():
+    # ADYEN_XML has none of the new blocks — every new field degrades to
+    # None (a wrong tag name would surface here as a coverage-zero, and
+    # in prod as the dq entity_kind-coverage assertion, before prod).
+    rec = next(parse_gleif_xml(_make_xml(ADYEN_XML)))
+    for k in ("entity_kind", "registered_as", "jurisdiction",
+              "hq_city", "aliases", "registration_status"):
+        assert rec[k] is None, k
+
+
+def test_emit_threads_identity_block():
+    rec = next(parse_gleif_xml(_make_xml(CARLSBERG_XML)))
+    log = MagicMock()
+    emit = MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    emit_gleif(log, [rec])
+    payload = emit.upsert.call_args.kwargs["payload"]
+    assert payload["entity_kind"] == "GENERAL"
+    assert payload["registered_as"] == "61056416"
+    assert payload["aliases"] == ["Carlsberg Group"]

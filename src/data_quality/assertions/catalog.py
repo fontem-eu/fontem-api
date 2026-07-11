@@ -274,16 +274,27 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "refs.contract_has_company", REFS,
-        "Every Contract is AWARDED_TO a Company", BLOCK, "cypher",
-        "MATCH (c:Contract) WHERE NOT (c)-[:AWARDED_TO]->(:Company) RETURN count(*) AS violations",
-        zero_violations("contracts with no awarded company"),
+        "Every Contract is AWARDED_TO a Company or InvestmentFund",
+        BLOCK, "cypher",
+        "MATCH (c:Contract) WHERE NOT (c)-[:AWARDED_TO]->(:Company) "
+        "AND NOT (c)-[:AWARDED_TO]->(:InvestmentFund) "
+        "RETURN count(*) AS violations",
+        zero_violations("contracts not awarded to a company or fund"),
+        "The awardee may be relabeled :InvestmentFund once GLEIF confirms "
+        "its category is FUND (an :InvestmentFund can win a contract), so "
+        "both labels are valid targets. Guarding only :Company made the "
+        "gate fail the moment a fund awardee was relabeled (#270).",
     ),
     Assertion(
         "refs.financialyear_has_company", REFS,
-        "Every FinancialYear is REPORTED by a Company", BLOCK, "cypher",
+        "Every FinancialYear is REPORTED by a Company or InvestmentFund",
+        BLOCK, "cypher",
         "MATCH (f:FinancialYear) WHERE NOT EXISTS { (:Company)-[:REPORTED]->(f) } "
+        "AND NOT EXISTS { (:InvestmentFund)-[:REPORTED]->(f) } "
         "RETURN count(*) AS violations",
-        zero_violations("financial years with no reporting company"),
+        zero_violations("financial years with no reporting entity"),
+        "The reporter may be relabeled :InvestmentFund when GLEIF's "
+        "category is FUND; both labels are valid (#270 alignment).",
     ),
     Assertion(
         "refs.subsidiary_no_selfloop", REFS,
@@ -308,7 +319,9 @@ ASSERTIONS: list[Assertion] = [
         "refs.lobbying_filedby_when_matched", REFS,
         "Lobbying disclosure with company_gmr_id has a FILED_BY edge", BLOCK, "cypher",
         "MATCH (d:Disclosure {system:'eu-lobbying'}) WHERE d.company_gmr_id IS NOT NULL "
-        "AND NOT (d)-[:FILED_BY]->(:Company) RETURN count(*) AS violations",
+        "AND NOT (d)-[:FILED_BY]->(:Company) "
+        "AND NOT (d)-[:FILED_BY]->(:InvestmentFund) "
+        "RETURN count(*) AS violations",
         zero_violations("matched disclosures with dropped FILED_BY"),
         "Silent relationship-drop guard (backlog #7): a set "
         "company_gmr_id must materialise an edge.",
@@ -317,7 +330,9 @@ ASSERTIONS: list[Assertion] = [
         "refs.disclosure_company_resolves", REFS,
         "Disclosure.company_gmr_id resolves to a real Company", BLOCK, "cypher",
         "MATCH (d:Disclosure) WHERE d.company_gmr_id IS NOT NULL "
-        "AND NOT EXISTS { (c:Company {gmr_id: d.company_gmr_id}) } RETURN count(*) AS violations",
+        "AND NOT EXISTS { (c:Company {gmr_id: d.company_gmr_id}) } "
+        "AND NOT EXISTS { (f:InvestmentFund {gmr_id: d.company_gmr_id}) } "
+        "RETURN count(*) AS violations",
         zero_violations("dangling company_gmr_id references"),
     ),
 
@@ -677,6 +692,19 @@ ASSERTIONS: list[Assertion] = [
         "gap); the threshold surfaces growth beyond the current ~300.",
     ),
     Assertion(
+        "consistency.cellar_mirror_parity", CONSISTENCY,
+        "Sampled works in the CELLAR mirror match the source term-for-term",
+        WARN, "consistency", "CellarMirror",
+        zero_with_detail("works differing from CELLAR (of 8 sampled)"),
+        "The legislative mirror (graph mirror/cellar/eu) is a VERBATIM "
+        "CDM copy — for random works the full work/expression/"
+        "manifestation closure must match CELLAR exactly. This is the "
+        "permanent form of the parity check that caught the export bug "
+        "which silently dropped every work-level triple (gitops#290). "
+        "A mismatch is mirror loss or source-side drift since the "
+        "snapshot; the detail names the record either way.",
+    ),
+    Assertion(
         "consistency.contract_neo4j_virtuoso", CONSISTENCY,
         "Random contracts render identically in Neo4j + Virtuoso", WARN,
         "consistency", "Contract",
@@ -695,6 +723,39 @@ ASSERTIONS: list[Assertion] = [
         "other GLEIF enrichment are intentionally excluded -- that is a load-"
         "coverage question (Neo4j leads Virtuoso by ~3.8% on LEI), not a sink-"
         "render inconsistency.",
+    ),
+    # ── Value quarantine (withheld bad values stay withheld) ──────────
+    Assertion(
+        "values.quarantined_carries_no_value", VALUES,
+        "Quarantined contracts carry no monetary props", BLOCK,
+        "cypher",
+        "MATCH (ct:Contract) WHERE ct.value_quarantined = true "
+        "AND (ct.value_eur IS NOT NULL OR ct.value_original IS NOT NULL) "
+        "RETURN count(ct) AS violations",
+        zero_violations(),
+        "The whole point of quarantine is that nobody downstream needs "
+        "to remember a flag exists — a quarantined contract with a "
+        "rendered value means the sink clear-path or the loader strip "
+        "broke.",
+    ),
+    Assertion(
+        "values.hard_flags_are_quarantined", VALUES,
+        "Hard-flagged values are actually quarantined", BLOCK,
+        "cypher",
+        "MATCH (ct:Contract) WHERE ct.value_eur IS NOT NULL "
+        "AND coalesce(ct.value_quarantined, false) = false "
+        "AND (ct.value_quality_flag IN "
+        "['concession_negative','unverified_single_signal','zero_value'] "
+        "OR (ct.value_quality_flag = 'implausible_magnitude' "
+        "AND ct.value_confidence < 0.05)) "
+        "RETURN count(ct) AS violations",
+        zero_violations(),
+        "A quarantine-tier value (categorical flags, or implausible "
+        "below the confidence floor) still rendered means a "
+        "pre-quarantine rendering escaped the backfill or a new emit "
+        "path skipped the scorer. implausible_magnitude with "
+        "confidence >= 0.05 legitimately keeps its value (mega-"
+        "contracts) — that band is excluded here.",
     ),
     # ── InvestmentFund model (funds are not companies) ────────────────
     Assertion(
@@ -718,6 +779,80 @@ ASSERTIONS: list[Assertion] = [
         ":Company, and UpsertCompany refreshes never relabel back). A "
         "dual-labeled node means that invariant broke and queries "
         "would double-count the entity on both surfaces.",
+    ),
+    # ── #270: GLEIF entity.category is the SOLE authority for the
+    # Company/InvestmentFund label, and match provenance rides the
+    # award edge. ────────────────────────────────────────────────────
+    Assertion(
+        "refs.company_not_gleif_fund", REFS,
+        "No :Company is a GLEIF fund (entity_kind='FUND')", BLOCK,
+        "cypher",
+        "MATCH (c:Company) WHERE c.entity_kind = 'FUND' "
+        "RETURN count(*) AS violations",
+        zero_violations("companies GLEIF records as FUND but not relabeled"),
+        "GLEIF entity.category drives the label. A Company GLEIF calls a "
+        "FUND should have been relabeled :InvestmentFund in the same sink "
+        "write; a residual here means the relabel/reprocess has not "
+        "caught up.",
+    ),
+    Assertion(
+        "refs.fund_matches_gleif_category", REFS,
+        "Every :InvestmentFund GLEIF knows is category FUND", BLOCK,
+        "cypher",
+        "MATCH (f:InvestmentFund) WHERE f.entity_kind IS NOT NULL "
+        "AND f.entity_kind <> 'FUND' RETURN count(*) AS violations",
+        zero_violations("funds GLEIF records as a non-FUND category"),
+        "The inverse guard and the #270 headline: asset managers "
+        "(BNP Paribas AM, Ostrum AM) were promoted to :InvestmentFund "
+        "from the securityType of instruments they ISSUE, though GLEIF "
+        "records them GENERAL. entity.category, not FIGI, decides; the "
+        "sink reverts them to :Company on the next GLEIF reprocess.",
+    ),
+    Assertion(
+        "coverage.graph_stub_nodes", COVERAGE,
+        "Stub placeholder nodes stay near zero", WARN, "cypher",
+        "MATCH (n) WHERE n._stub RETURN count(n) AS stubs",
+        le_threshold("stubs", 100, "stub placeholder nodes"),
+        "The neo4j sink MERGEs a {_stub: true} placeholder when a "
+        "relationship's endpoint hasn't arrived yet (instead of silently "
+        "dropping the edge); the entity's own upsert clears the flag. A "
+        "persistent stub population means a source is referencing "
+        "entities nothing ever loads — visible debt, not silent loss.",
+    ),
+    Assertion(
+        "coverage.fund_label_sourced", COVERAGE,
+        "InvestmentFund labels are GLEIF-sourced (entity_kind='FUND')",
+        WARN, "cypher",
+        "MATCH (f:InvestmentFund) RETURN count(f) AS total, "
+        "count(CASE WHEN f.entity_kind = 'FUND' THEN 1 END) AS covered",
+        min_coverage(0.90, "GLEIF-sourced fund labels"),
+        "Surfaces :InvestmentFund nodes with no GLEIF FUND category "
+        "backing — historical instrument-inferred labels with no LEI in "
+        "GLEIF to confirm them. WARN not BLOCK: there is no authority to "
+        "revert them against, so they are cleaned up out-of-band rather "
+        "than gated on.",
+    ),
+    Assertion(
+        "values.awarded_to_match_confidence_range", VALUES,
+        "AWARDED_TO.match_confidence is within [0,1]", BLOCK, "cypher",
+        "MATCH ()-[r:AWARDED_TO]->() WHERE r.match_confidence IS NOT NULL "
+        "AND (r.match_confidence < 0 OR r.match_confidence > 1) "
+        "RETURN count(*) AS violations",
+        zero_violations("out-of-range match_confidence values"),
+        "Match provenance on the award edge must be sane: a confidence "
+        "outside [0,1] is a producer bug, not a real attribution.",
+    ),
+    Assertion(
+        "values.awarded_to_match_tier_known", VALUES,
+        "AWARDED_TO.match_tier is a known tier", BLOCK, "cypher",
+        "MATCH ()-[r:AWARDED_TO]->() WHERE r.match_tier IS NOT NULL "
+        "AND NOT r.match_tier IN "
+        "['lei', 'vat', 'cik', 'registered_as', 'name_country', 'fuzzy'] "
+        "RETURN count(*) AS violations",
+        zero_violations("unknown match_tier values"),
+        "The edge tier separates exact (lei/vat/cik) from name-based "
+        "(name_country/fuzzy) attributions; an unknown value would break "
+        "that read in queries and the UI.",
     ),
     Assertion(
         "coverage.fund_unit_security_type", COVERAGE,

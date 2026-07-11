@@ -98,6 +98,31 @@ _PLAUSIBILITY_DECADE_SPAN = 2.5
 # queries and flagged.
 LOW_CONFIDENCE_THRESHOLD = 0.5
 
+# Quarantine tiers. A quarantined value is WITHHELD from the stores
+# entirely (the loader strips the monetary fields; sinks clear any
+# previously rendered ones) — nobody downstream needs to remember a
+# flag exists. The claimed value survives in the event log, and the
+# review tier additionally lands in events.value_review for a human
+# decision that comes back as a corrective event.
+#   review tier — a human should look at it (weird, not just missing)
+#   auto tier   — a published 0 is non-disclosure wearing a costume;
+#                 withheld without ceremony, no queue row.
+QUARANTINE_REVIEW_FLAGS = frozenset({
+    "implausible_magnitude", "concession_negative",
+    "unverified_single_signal",
+})
+QUARANTINE_AUTO_FLAGS = frozenset({"zero_value"})
+
+# The implausible_magnitude flag is the scorer's *dominant explanation*
+# and fires well inside the plausible-mega-contract range (a €20B award
+# against a €15B estimate carries it at confidence ~0.47). Only the
+# essentially-certain garbage is withheld: below this floor the decayed
+# plausibility says the value is beyond ~€300B — no real contract lives
+# there (prod's 18 offenders all sit at exactly 0.0). Everything between
+# the floor and LOW_CONFIDENCE_THRESHOLD keeps its value + a visible
+# low-confidence mark.
+QUARANTINE_CONFIDENCE_FLOOR = 0.05
+
 
 class ValueFlag(str, Enum):
     """Why a contract value is suspect (or fine). Stored on the Contract
@@ -126,9 +151,27 @@ class ConfidenceResult:  # pylint: disable=too-many-instance-attributes
     has_payable_discrepancy: bool
     reason: str
 
+    @property
+    def quarantined(self) -> bool:
+        """True when the monetary fields must be withheld from emit.
+        Categorical for zero/negative/uncorroborated values; the
+        implausible-magnitude flag quarantines only below the
+        confidence floor (see QUARANTINE_CONFIDENCE_FLOOR)."""
+        flag = self.flag.value
+        if flag in QUARANTINE_AUTO_FLAGS:
+            return True
+        if flag == "implausible_magnitude":
+            return self.confidence < QUARANTINE_CONFIDENCE_FLOOR
+        return flag in QUARANTINE_REVIEW_FLAGS
+
+    @property
+    def needs_review(self) -> bool:
+        """True when the withheld value belongs in the human queue."""
+        return self.flag.value in QUARANTINE_REVIEW_FLAGS
+
     def as_payload(self) -> dict:
         """Fields to merge into the Contract event payload."""
-        return {
+        out = {
             "value_confidence": round(self.confidence, 4),
             "value_confidence_consistency": round(self.consistency, 4),
             "value_confidence_plausibility": round(self.plausibility, 4),
@@ -136,6 +179,10 @@ class ConfidenceResult:  # pylint: disable=too-many-instance-attributes
             "value_low_confidence": self.is_low_confidence,
             "value_payable_discrepancy": self.has_payable_discrepancy,
         }
+        if self.quarantined:
+            out["value_quarantined"] = True
+            out["value_quarantine_reason"] = self.flag.value
+        return out
 
 
 def _agreement(a_eur: float, b_eur: float) -> float:

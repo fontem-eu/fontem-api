@@ -1,0 +1,60 @@
+# Legislative source registry — Phase 0 of docs/roadmap/legislative-data-plan.md (gitops#290).
+# One entry per EU member state + the EU level. Every claim here must be LIVE-VERIFIED
+# (fetched, not remembered) before status moves past "unsurveyed".
+#
+# eli_tier: full-rdf   — ELI URIs + machine-readable RDF (dumps, SPARQL, or content negotiation)
+#           eli-html   — ELI URIs exist but metadata is HTML-only / no bulk RDF
+#           none       — no ELI; fallback source required
+# status:   unsurveyed | surveyed | mirrored
+#
+# First reachability sweep 2026-07-09 (HTTP status from our cluster) noted per entry;
+# a 3xx/403 means "alive but needs the right entrypoint/headers", not "unusable".
+
+eu:
+  name: European Union (CELLAR / EUR-Lex)
+  endpoint: https://publications.europa.eu/webapi/rdf/sparql   # 200, public SPARQL
+  eli_tier: full-rdf
+  access: sparql
+  scope_note: 2026 VAW directive + national transposition measures (NIM); slice via CONSTRUCT (L0.3)
+  license: EU reuse decision 2011/833 — free reuse with attribution
+  status: surveyed
+
+countries:
+  AT: {name: Austria,      gazette: RIS (ris.bka.gv.at),                 status: unsurveyed}
+  BE: {name: Belgium,      gazette: Moniteur belge / Justel,             status: unsurveyed}
+  BG: {name: Bulgaria,     gazette: Държавен вестник (dv.parliament.bg), status: unsurveyed}
+  HR: {name: Croatia,      gazette: Narodne novine (nn.hr),              status: unsurveyed}
+  CY: {name: Cyprus,       gazette: cylaw.org / Επίσημη Εφημερίδα,       status: unsurveyed}
+  CZ: {name: Czechia,      gazette: Sbírka zákonů (e-sbirka.cz),         status: unsurveyed}
+  DK: {name: Denmark,      gazette: Retsinformation,  base: https://www.retsinformation.dk,  # 200
+       eli_tier: full-rdf, notes: ELI implemented; API documented,       status: unsurveyed}
+  EE: {name: Estonia,      gazette: Riigi Teataja (riigiteataja.ee),     status: unsurveyed}
+  FI: {name: Finland,      gazette: Finlex,           base: https://data.finlex.fi,          # 307->alive
+       eli_tier: full-rdf, notes: Semantic Finlex — RDF data service + SPARQL, status: unsurveyed}
+  FR: {name: France,       gazette: Légifrance,       base: https://www.legifrance.gouv.fr,  # 403 (WAF; needs UA/API)
+       eli_tier: full-rdf, notes: ELI URIs; PISTE/DILA API for machine access; Archéo-Lex git for text provenance,
+       status: unsurveyed}
+  DE: {name: Germany,      gazette: gesetze-im-internet.de,  base: https://www.gesetze-im-internet.de,  # 200
+       eli_tier: none,     notes: no ELI; XML per law; bundestag/gesetze + kmein/gesetze git mirrors for provenance,
+       status: unsurveyed}
+  GR: {name: Greece,       gazette: ΦΕΚ / et.gr,                         status: unsurveyed}
+  HU: {name: Hungary,      gazette: Magyar Közlöny / njt.hu,             status: unsurveyed}
+  IE: {name: Ireland,      gazette: electronic Irish Statute Book (eISB), notes: ELI adopter, status: unsurveyed}
+  IT: {name: Italy,        gazette: Normattiva,       base: https://www.normattiva.it,       # 200
+       eli_tier: eli-html, notes: ELI URIs live; verify RDF availability, status: unsurveyed}
+  LV: {name: Latvia,       gazette: Latvijas Vēstnesis / likumi.lv,      status: unsurveyed}
+  LT: {name: Lithuania,    gazette: TAR (e-tar.lt),                      status: unsurveyed}
+  LU: {name: Luxembourg,   gazette: Legilux,          base: https://legilux.public.lu,       # 200
+       eli_tier: full-rdf, notes: early full ELI adopter incl. RDF,      status: unsurveyed}
+  MT: {name: Malta,        gazette: legislation.mt,                      status: unsurveyed}
+  NL: {name: Netherlands,  gazette: officielebekendmakingen.nl / wetten.nl, notes: BWB id system; strong open data,
+       status: unsurveyed}
+  PL: {name: Poland,       gazette: Dziennik Ustaw (dziennikustaw.gov.pl), status: unsurveyed}
+  PT: {name: Portugal,     gazette: Diário da República, base: https://diariodarepublica.pt, # 301->alive
+       eli_tier: eli-html, notes: ELI adopter; verify RDF/API tier,      status: unsurveyed}
+  RO: {name: Romania,      gazette: Monitorul Oficial / legislatie.just.ro, status: unsurveyed}
+  SK: {name: Slovakia,     gazette: Zbierka zákonov (slov-lex.sk),       notes: ELI adopter, status: unsurveyed}
+  SI: {name: Slovenia,     gazette: Uradni list / PISRS,                 status: unsurveyed}
+  ES: {name: Spain,        gazette: BOE,              base: https://www.boe.es/datosabiertos, # 302->alive
+       eli_tier: full-rdf, notes: BOE open data + ELI implementation,    status: unsurveyed}
+  SE: {name: Sweden,       gazette: Svensk författningssamling (svenskforfattningssamling.se), status: unsurveyed}
