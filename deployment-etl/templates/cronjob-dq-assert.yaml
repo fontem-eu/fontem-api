@@ -5,7 +5,7 @@
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "dq-assert-monitor"
       "schedule"        "15 */4 * * *"
-      "module"          "src.data_quality.assertions"
+      "module"          "src.data_quality.assertions.__main__"
       "args"            (list "--persist" "--exit-zero")
       "deadlineSeconds" 1200
       "cpuRequest"      "100m"
