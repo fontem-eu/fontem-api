@@ -48,6 +48,27 @@ def client_language(request: Request, response: Response) -> dict:
     }
 
 
+@router.get("/client-region")
+def client_region(request: Request, response: Response) -> dict:
+    """Coarse home-region guess (NUTS-0 country) from the caller's IP.
+
+    Seeds the profile "where you're from" default when the user hasn't set a
+    region. Country-level only, resolved against a local database — the IP is
+    not logged or stored, and the response is uncacheable so proxies can't
+    leak one visitor's guess to another. Returns alpha-3 plus the NUTS-0
+    (alpha-2) code the region picker uses (GRC -> EL).
+    """
+    response.headers["Cache-Control"] = "no-store, private"
+    ip = geo_ip.client_ip_from(
+        request.headers.get("x-forwarded-for"),
+        request.headers.get("x-real-ip"),
+        request.client.host if request.client else None,
+    )
+    a3 = geo_ip.country_for(ip) if ip else None
+    nuts0 = LocationService.alpha3_to_alpha2(a3) if a3 else None
+    return {"country_alpha3": a3, "nuts0": nuts0}
+
+
 _BOUNDARIES_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 

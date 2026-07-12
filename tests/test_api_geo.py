@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
 from src.data import geo_ip
+from src.services.location_service import LocationService
 
 
 def _mock_geo_source(rows, entity_rows=None):
@@ -134,6 +135,25 @@ def test_entity_aggregate_value_error_becomes_400():
         r = client.get("/geo/entity/abc/aggregate?metric=bogus")
         assert r.status_code == 400
         assert "bad metric" in r.json()["detail"]
+    finally:
+        cleanup_dishka()
+
+
+# ── /geo/client-region ─────────────────────────────────────────
+
+
+def test_client_region_returns_shape_and_maps_alpha3_to_nuts0():
+    # the conversion the endpoint relies on: alpha-3 -> NUTS alpha-2 (GRC->EL)
+    assert LocationService.alpha3_to_alpha2("PRT") == "PT"
+    assert LocationService.alpha3_to_alpha2("GRC") == "EL"
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        r = client.get("/geo/client-region")
+        assert r.status_code == 200
+        body = r.json()
+        # no geoip db in tests -> nulls, but the contract shape holds
+        assert set(body) == {"country_alpha3", "nuts0"}
+        assert r.headers.get("cache-control", "").startswith("no-store")
     finally:
         cleanup_dishka()
 
