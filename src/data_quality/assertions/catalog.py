@@ -219,6 +219,8 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (c:Contract) "
         "RETURN count(*) AS total, count(*) - count(c.ted_notice_id) AS violations",
         zero_violations("contracts missing ted_notice_id", "total"),
+        "ted_notice_id is the merge key; a contract without one can never be updated and "
+        "duplicates on re-ingest.",
     ),
     Assertion(
         "keys.contract_id_unique", KEYS,
@@ -226,6 +228,7 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (c:Contract) WHERE c.ted_notice_id IS NOT NULL "
         "WITH c.ted_notice_id AS k, count(*) AS n WHERE n > 1 RETURN count(*) AS violations",
         zero_violations("duplicate ted_notice_ids"),
+        "Two nodes sharing a ted_notice_id would double-count the award in every aggregate.",
     ),
     Assertion(
         "keys.disclosure_id_unique", KEYS,
@@ -234,6 +237,7 @@ ASSERTIONS: list[Assertion] = [
         "WITH d.disclosure_id AS id, d.system AS s, count(*) AS n "
         "WHERE n > 1 RETURN count(*) AS violations",
         zero_violations("duplicate disclosure composite keys"),
+        "The (disclosure_id, system) pair is the idempotency key for every disclosure loader.",
     ),
     Assertion(
         "keys.authority_id_present", KEYS,
@@ -241,6 +245,8 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (a:Authority) "
         "RETURN count(*) AS total, count(*) - count(a.authority_id) AS violations",
         zero_violations("authorities missing authority_id", "total"),
+        "authority_id is the merge key; an authority without one strands its AWARDED edges on "
+        "re-ingest.",
     ),
     Assertion(
         "keys.financialyear_unique", KEYS,
@@ -248,6 +254,7 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (f:FinancialYear) WITH f.gmr_id AS g, f.year AS y, f.source AS s, "
         "count(*) AS n WHERE n > 1 RETURN count(*) AS violations",
         zero_violations("duplicate financial-year keys"),
+        "One row per (gmr_id, year, source); duplicates double financial aggregates silently.",
     ),
     Assertion(
         "keys.sanctioned_id_present", KEYS,
@@ -255,6 +262,8 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (s:SanctionedEntity) "
         "RETURN count(*) AS total, count(*) - count(s.entity_id) AS violations",
         zero_violations("sanctioned entities missing entity_id", "total"),
+        "entity_id is the merge key for sanctions re-ingests; without it re-runs duplicate "
+        "entries.",
     ),
     Assertion(
         "keys.lobbyist_label_present", KEYS,
@@ -272,6 +281,8 @@ ASSERTIONS: list[Assertion] = [
         "Every Contract is AWARDED by an Authority", BLOCK, "cypher",
         "MATCH (c:Contract) WHERE NOT (c)<-[:AWARDED]-(:Authority) RETURN count(*) AS violations",
         zero_violations("contracts with no awarding authority"),
+        "Every TED award names its contracting authority; a contract without one lost its buyer "
+        "side in ingest.",
     ),
     Assertion(
         "refs.contract_has_company", REFS,
@@ -302,12 +313,15 @@ ASSERTIONS: list[Assertion] = [
         "SUBSIDIARY_OF has no self-loops", BLOCK, "cypher",
         "MATCH (a)-[:SUBSIDIARY_OF]->(a) RETURN count(*) AS violations",
         zero_violations("self-referential SUBSIDIARY_OF edges"),
+        "GLEIF self-consolidation rows must never materialise as a company owning itself.",
     ),
     Assertion(
         "refs.sameas_no_selfloop", REFS,
         "SAME_AS has no self-loops", BLOCK, "cypher",
         "MATCH (a)-[:SAME_AS]->(a) RETURN count(*) AS violations",
         zero_violations("self-referential SAME_AS edges"),
+        "A SAME_AS self-loop is a dedup-rule bug; it would let the merge engine collapse a node "
+        "into itself.",
     ),
     Assertion(
         "refs.sameas_confidence_range", REFS,
@@ -315,6 +329,8 @@ ASSERTIONS: list[Assertion] = [
         "MATCH ()-[r:SAME_AS]->() WHERE r.confidence IS NOT NULL "
         "AND (r.confidence < 0 OR r.confidence > 1) RETURN count(*) AS violations",
         zero_violations("out-of-range SAME_AS confidences"),
+        "Consolidator confidences are probabilities; out-of-range values mean a broken rule, not "
+        "a strong match.",
     ),
     Assertion(
         "refs.lobbying_filedby_when_matched", REFS,
@@ -335,6 +351,8 @@ ASSERTIONS: list[Assertion] = [
         "AND NOT EXISTS { (f:InvestmentFund {gmr_id: d.company_gmr_id}) } "
         "RETURN count(*) AS violations",
         zero_violations("dangling company_gmr_id references"),
+        "A company_gmr_id that resolves to no node is a dangling attribution — the UI would "
+        "render a dead link.",
     ),
 
     # ---- Family C: value sanity (BLOCK, except the accounting identity) ---
@@ -345,6 +363,8 @@ ASSERTIONS: list[Assertion] = [
         "AND coalesce(c.value_quality_flag, '') <> 'concession_negative' "
         "RETURN count(*) AS violations",
         zero_violations("negative contract values"),
+        "Negative award totals are ingest artifacts (sign errors, corrigenda mis-parses), never "
+        "real prices.",
     ),
     Assertion(
         "values.contract_implausible_guard", VALUES,
@@ -360,6 +380,7 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (c:Contract) WHERE c.value_confidence IS NOT NULL "
         "AND (c.value_confidence < 0 OR c.value_confidence > 1) RETURN count(*) AS violations",
         zero_violations("out-of-range value_confidence"),
+        "value_confidence is a probability; outside [0,1] the scorer misfired.",
     ),
     Assertion(
         "values.confidence_formula", VALUES,
@@ -372,6 +393,8 @@ ASSERTIONS: list[Assertion] = [
         "AND coalesce(c.value_quality_flag, '') <> 'concession_negative' "
         "RETURN count(*) AS violations",
         zero_violations("contracts whose confidence breaks its own formula"),
+        "confidence must equal consistency*plausibility; drift means the scorer and its stored "
+        "parts disagree.",
     ),
     Assertion(
         "values.currency_iso", VALUES,
@@ -379,6 +402,8 @@ ASSERTIONS: list[Assertion] = [
         f"MATCH (c:Contract) WHERE c.value_currency IS NOT NULL "
         f"AND NOT c.value_currency IN {_ISO_LIST_CYPHER} RETURN count(*) AS violations",
         zero_violations("contracts with an unrecognised currency"),
+        "A currency outside ISO-4217 cannot be FX-converted; those values silently drop out of "
+        "EUR aggregates.",
     ),
     Assertion(
         "values.contract_pubdate_not_future", VALUES,
@@ -386,6 +411,7 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (c:Contract) WHERE c.publication_date IS NOT NULL "
         "AND c.publication_date > toString(date()) RETURN count(*) AS violations",
         zero_violations("future-dated contracts"),
+        "A publication date in the future is a parser artifact and corrupts time-series panels.",
     ),
     Assertion(
         "values.financialyear_year_range", VALUES,
@@ -393,6 +419,7 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (f:FinancialYear) WHERE f.year IS NOT NULL "
         "AND (f.year < 1990 OR f.year > date().year + 1) RETURN count(*) AS violations",
         zero_violations("financial years out of plausible range"),
+        "Financial years outside a plausible range are XBRL parsing artifacts.",
     ),
     Assertion(
         "values.lobby_cost_band", VALUES,
@@ -401,12 +428,15 @@ ASSERTIONS: list[Assertion] = [
         "AND d.detail_cost_max IS NOT NULL "
         "AND d.detail_cost_max < d.detail_cost_min RETURN count(*) AS violations",
         zero_violations("inverted lobby spend bands"),
+        "Lobby-spend bands are (low<=high) ranges by definition; inversions are register parsing "
+        "bugs.",
     ),
     Assertion(
         "values.nuts_level", VALUES,
         "NUTSRegion.level is in {0,1,2,3}", BLOCK, "cypher",
         "MATCH (n:NUTSRegion) WHERE NOT n.level IN [0, 1, 2, 3] RETURN count(*) AS violations",
         zero_violations("NUTS regions with an invalid level"),
+        "NUTS levels are 0-3 by the Eurostat standard; anything else corrupts geographic rollups.",
     ),
     Assertion(
         "values.accounting_identity", VALUES,
@@ -458,18 +488,24 @@ ASSERTIONS: list[Assertion] = [
         "SELECT (SELECT max(seq) FROM events.entity_events) - last_seq AS lag "
         "FROM events.consumer_offsets WHERE consumer_name = 'virtuoso_sink'",
         le_threshold("lag", 10000, "lag"),
+        "The RDF mirror trails the event log when the sink stalls; sustained lag means SPARQL "
+        "surfaces serve stale data.",
     ),
     Assertion(
         "pipeline.neo4j_deadletter", PIPELINE,
         "neo4j_sink has no dead-lettered events", WARN, "sql",
         "SELECT count(*) AS violations FROM events.dead_letter WHERE consumer = 'neo4j_sink'",
         zero_violations("neo4j_sink dead-letters"),
+        "Dead-lettered events are recorded-but-unapplied graph writes; growth means a live "
+        "rendering bug.",
     ),
     Assertion(
         "pipeline.deadletter_total", PIPELINE,
         "Total dead-letter backlog is small", WARN, "sql",
         "SELECT count(*) AS dl FROM events.dead_letter",
         le_threshold("dl", 100, "dead-letters"),
+        "Total parked events across consumers; the threshold flags a new failure class, the bulk "
+        "is triaged history.",
     ),
     Assertion(
         "pipeline.stuck_runs", PIPELINE,
@@ -477,6 +513,8 @@ ASSERTIONS: list[Assertion] = [
         "SELECT count(*) AS violations FROM events.etl_run "
         "WHERE status = 'running' AND started_at < now() - interval '6 hours'",
         zero_violations("ETL runs stuck in 'running'"),
+        "Runs stuck in 'running' are crashed pods (OOM/SIGKILL) that never closed their row; "
+        "they hide real failures.",
     ),
 
     # ---- Family E: freshness (WARN, events store) -------------------------

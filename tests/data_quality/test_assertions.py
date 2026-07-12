@@ -535,3 +535,10 @@ def test_cellar_mirror_check_flags_missing_terms():
     lossy = cellar_mirror_check("http://ours/sparql?mirror/cellar", make_get([]))
     assert lossy["violations"] == 1
     assert "missing" in lossy["detail"]
+
+
+def test_every_assertion_has_a_description():
+    """The assertion monitor renders rationale as the user-facing
+    description — every assertion must carry one."""
+    empty = [a.id for a in ASSERTIONS if not a.rationale.strip()]
+    assert not empty, f"assertions without a description: {empty}"

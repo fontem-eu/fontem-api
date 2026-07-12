@@ -1,0 +1,17 @@
+{{- $extra := list }}
+{{- if .Values.virtuoso.enabled }}
+{{- $extra = append $extra (dict "name" "VIRTUOSO_SPARQL_URL" "value" .Values.virtuoso.sparqlEndpoint) }}
+{{- end }}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "dq-assert-monitor"
+      "schedule"        "15 */4 * * *"
+      "module"          "src.data_quality.assertions"
+      "args"            (list "--persist" "--exit-zero")
+      "deadlineSeconds" 1200
+      "cpuRequest"      "100m"
+      "cpuLimit"        "500m"
+      "memRequest"      "256Mi"
+      "memLimit"        "512Mi"
+      "extraEnv"        $extra
+      "Values"          .Values
+      "Release"         .Release) -}}

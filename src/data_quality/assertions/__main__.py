@@ -125,6 +125,13 @@ def main(argv: "list[str] | None" = None) -> int:
         help="comma-separated families to run (keys,refs,values,pipeline,freshness)",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of a report")
+    parser.add_argument("--persist", action="store_true",
+                        help="write results to events.dq_result (the "
+                             "assertion monitor's history)")
+    parser.add_argument("--exit-zero", action="store_true",
+                        help="always exit 0 (observability crons must not "
+                             "look like failures whenever known debt fails "
+                             "an assertion; the gate Job omits this)")
     args = parser.parse_args(argv)
 
     settings = load_settings()
@@ -152,7 +159,12 @@ def main(argv: "list[str] | None" = None) -> int:
     else:
         print(format_report(results, env_label))
 
-    return exit_code(results)
+    if args.persist and dsn:
+        from src.data_quality.assertions.persist import persist_results  # pylint: disable=import-outside-toplevel
+        n = persist_results(dsn, results)
+        print(f"persisted {n} results to events.dq_result")
+
+    return 0 if args.exit_zero else exit_code(results)
 
 
 if __name__ == "__main__":
