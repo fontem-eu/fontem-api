@@ -82,6 +82,21 @@ def _date_clause(prop: str, has_from: bool, has_to: bool) -> str:
     return (" AND " + " AND ".join(parts)) if parts else ""
 
 
+def _ctx(*parts) -> str:
+    """Join non-empty context fragments with a middot separator."""
+    return " · ".join(
+        str(p).strip() for p in parts if p and str(p).strip()
+    )
+
+
+def _clip(text, limit: int = 130) -> str:
+    """Collapse whitespace and trim a long description for a card."""
+    if not text:
+        return ""
+    joined = " ".join(str(text).split())
+    return joined if len(joined) <= limit else joined[: limit - 1].rstrip() + "…"
+
+
 def _companies(session, params, want_geo_filter):
     """Companies by name. Optional country / NUTS-region geo filter."""
     geo = ""
@@ -113,7 +128,7 @@ def _companies(session, params, want_geo_filter):
         "       WHEN toLower(c.name) STARTS WITH toLower($q) THEN 2 "
         "       ELSE 0 END AS rank "
         "RETURN c.gmr_id AS id, c.name AS title, c.country AS country, "
-        "  ticker, rank "
+        "  ticker, c.legal_form AS legal_form, c.city AS city, rank "
         "ORDER BY rank DESC, size(c.name) ASC, c.name ASC "
         "LIMIT $cap",
         **params,
@@ -127,6 +142,7 @@ def _companies(session, params, want_geo_filter):
             "country": r.get("country"),
             "date": None,
             "score": r["rank"],
+            "context": _ctx(r.get("city"), r.get("legal_form")),
             "meta": {"ticker": r.get("ticker")},
         }
         for r in rows
@@ -147,7 +163,8 @@ def _authorities(session, params, want_geo_filter):
         "             WHEN toLower(a.name) STARTS WITH toLower($q) THEN 2 "
         "             ELSE 0 END AS rank "
         "RETURN a.authority_id AS id, "
-        f"  {name_expr} AS title, a.country AS country, rank "
+        f"  {name_expr} AS title, a.country AS country, "
+        "  a.authority_type AS atype, rank "
         "ORDER BY rank DESC, size(a.name) ASC, a.name ASC "
         "LIMIT $cap",
         **params,
@@ -161,7 +178,8 @@ def _authorities(session, params, want_geo_filter):
             "country": r.get("country"),
             "date": None,
             "score": r["rank"],
-            "meta": {},
+            "context": _ctx(r.get("atype")),
+            "meta": {"authority_type": r.get("atype")},
         }
         for r in rows
     ]
@@ -190,6 +208,7 @@ def _persons(session, params, want_geo_filter):  # pylint: disable=unused-argume
             "country": None,
             "date": None,
             "score": 0,
+            "context": "",
             "meta": {"birth_year": r.get("birth_year")},
         }
         for r in rows
@@ -214,6 +233,7 @@ def _lobbyists(session, params, want_geo_filter):
         "RETURN l.disclosure_id AS id, nm AS title, "
         "  l.detail_acronym AS acronym, l.detail_country AS country, "
         "  l.detail_category AS category, "
+        "  l.detail_goals AS goals, "
         "  l.detail_registration_date AS reg_date "
         "ORDER BY size(nm) ASC, nm ASC "
         "LIMIT $cap",
@@ -228,6 +248,7 @@ def _lobbyists(session, params, want_geo_filter):
             "country": r.get("country"),
             "date": r.get("reg_date"),
             "score": 0,
+            "context": _clip(r.get("goals")),
             "meta": {"category": r.get("category")},
         }
         for r in rows
@@ -272,6 +293,7 @@ def _contracts(session, params, want_geo_filter):
             "country": r.get("country"),
             "date": r.get("pub_date"),
             "score": 0,
+            "context": "",
             "meta": {"value_eur": r.get("value_eur")},
         }
         for r in rows
@@ -295,7 +317,8 @@ def _cohesion(session, params, want_geo_filter):
         f"{geo}{date} "
         "RETURN d.disclosure_id AS id, d.title AS title, "
         "  d.detail_country AS country, d.detail_start_date AS start_date, "
-        "  d.detail_fund AS fund, d.detail_nuts_code AS nuts_code "
+        "  d.detail_fund AS fund, d.detail_nuts_code AS nuts_code, "
+        "  d.detail_description AS description, d.detail_programme AS programme "
         "ORDER BY size(d.title) ASC "
         "LIMIT $cap",
         **params,
@@ -309,6 +332,7 @@ def _cohesion(session, params, want_geo_filter):
             "country": r.get("country"),
             "date": r.get("start_date"),
             "score": 0,
+            "context": _clip(r.get("description")) or _ctx(r.get("programme")),
             "meta": {"nuts_code": r.get("nuts_code"), "fund": r.get("fund")},
         }
         for r in rows
@@ -331,7 +355,8 @@ def _sanctions(session, params, want_geo_filter):  # pylint: disable=unused-argu
         "             WHEN toLower(coalesce(s.name,'')) STARTS WITH toLower($q) THEN 2 "
         "             ELSE 0 END AS rank "
         "RETURN s.entity_id AS id, s.name AS title, "
-        "  s.sanction_regime AS regime, s.designation_date AS des_date, rank "
+        "  s.sanction_regime AS regime, s.designation_date AS des_date, "
+        "  s.legal_basis AS legal_basis, rank "
         "ORDER BY rank DESC, size(coalesce(s.name,'')) ASC "
         "LIMIT $cap",
         **params,
@@ -345,6 +370,7 @@ def _sanctions(session, params, want_geo_filter):  # pylint: disable=unused-argu
             "country": None,
             "date": r.get("des_date"),
             "score": r["rank"],
+            "context": _ctx(r.get("legal_basis")),
             "meta": {"regime": r.get("regime")},
         }
         for r in rows

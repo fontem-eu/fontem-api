@@ -138,6 +138,29 @@ def test_entity_aggregate_value_error_becomes_400():
         cleanup_dishka()
 
 
+# ── /geo/nuts-regions ──────────────────────────────────────────
+
+
+def test_nuts_regions_returns_flat_list_all_levels():
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        r = client.get("/geo/nuts-regions")
+        assert r.status_code == 200
+        regions = r.json()["regions"]
+        assert isinstance(regions, list) and len(regions) >= 30
+        # each row is a lightweight code/name/level record (no geometry)
+        row = regions[0]
+        assert set(row) == {"code", "name", "level"}
+        levels = {x["level"] for x in regions}
+        assert 0 in levels
+        # a child code is prefixed by its parent (hierarchy derivable client-side)
+        codes = {x["code"] for x in regions}
+        children = [c for c in codes if len(c) == 3]
+        assert any(c[:2] in codes for c in children)
+    finally:
+        cleanup_dishka()
+
+
 # ── /geo/nuts-boundaries ───────────────────────────────────────
 
 
