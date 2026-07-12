@@ -8,7 +8,7 @@ endpoint is the observability face for the dashboard.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from src.data.sparql.virtuoso_client import VirtuosoClient
 
@@ -51,6 +51,13 @@ def get_legislative_stats(virtuoso: VirtuosoClient) -> dict:
         f"PREFIX cdm: <{_CDM}> "
         f"SELECT (COUNT(DISTINCT ?w) AS ?with_eli) {frm} "
         f"WHERE {{ ?w cdm:work_date_document ?d ; cdm:resource_legal_eli ?u }}")
+    by_year = virtuoso.query(
+        f"PREFIX cdm: <{_CDM}> "
+        f"SELECT ?year (COUNT(DISTINCT ?w) AS ?works) {frm} WHERE {{ "
+        f"?w cdm:work_date_document ?d . "
+        f"BIND(SUBSTR(STR(?d), 1, 4) AS ?year) "
+        f"FILTER(?year >= '2011') }} "
+        f"GROUP BY ?year ORDER BY ?year")
     by_decade = virtuoso.query(
         f"PREFIX cdm: <{_CDM}> "
         f"SELECT ?decade (COUNT(DISTINCT ?w) AS ?works) {frm} WHERE {{ "
@@ -72,6 +79,10 @@ def get_legislative_stats(virtuoso: VirtuosoClient) -> dict:
             {"decade": r.get("decade"), "works": int(r.get("works", 0))}
             for r in by_decade
         ],
+        "works_by_year": [
+            {"year": r.get("year"), "works": int(r.get("works", 0))}
+            for r in by_year
+        ],
     }
 
 
@@ -81,11 +92,23 @@ def get_legislative_stats(virtuoso: VirtuosoClient) -> dict:
         503: {"description": "VIRTUOSO_SPARQL_URL not configured"},
     },
 )
-def legislative_stats():
-    """CELLAR mirror coverage + freshness for the DQ hub."""
+def legislative_stats(request: Request):
+    """CELLAR mirror coverage + freshness + pipeline health for the
+    DQ hub."""
     virtuoso = VirtuosoClient.from_env()
     if virtuoso is None:
         raise HTTPException(
             status_code=503,
             detail="legislative mirror stats need VIRTUOSO_SPARQL_URL")
-    return get_legislative_stats(virtuoso)
+    stats = get_legislative_stats(virtuoso)
+    # Pipeline health: last run of the daily delta cron, from
+    # events.etl_run. Absent events store -> null (the mirror stats
+    # still render); never-ran -> null run with configured=True.
+    src = getattr(request.app.state, "etl_runs_source", None)
+    pipeline = None
+    if src is not None and src.configured:
+        runs = src.recent_runs(limit=1, cronjob_name="etl-cellar-mirror")
+        pipeline = {"cronjob": "etl-cellar-mirror",
+                    "last_run": runs[0] if runs else None}
+    stats["pipeline"] = pipeline
+    return stats
