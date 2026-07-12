@@ -106,7 +106,7 @@ def legislative_stats(request: Request):
     # still render); never-ran -> null run with configured=True.
     src = getattr(request.app.state, "etl_runs_source", None)
     pipeline = None
-    if src is not None and src.configured():
+    if src is not None and src.configured:
         runs = src.recent_runs(limit=1, cronjob_name="etl-cellar-mirror")
         pipeline = {"cronjob": "etl-cellar-mirror",
                     "last_run": runs[0] if runs else None}
