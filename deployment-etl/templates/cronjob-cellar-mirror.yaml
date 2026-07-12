@@ -1,0 +1,20 @@
+{{- $extra := list }}
+{{- if .Values.virtuoso.enabled }}
+{{- $extra = append $extra (dict "name" "VIRTUOSO_SPARQL_URL" "value" .Values.virtuoso.sparqlEndpoint) }}
+{{- $extra = append $extra (dict "name" "VIRTUOSO_DBA_PASSWORD" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.virtuoso.dbaPasswordSecret "key" .Values.virtuoso.dbaPasswordKey))) }}
+{{- $extra = append $extra (dict "name" "LEGISLATIVE_DATA_DIR" "value" "/edgar-data/legislative/cellar") }}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"             "etl-cellar-mirror"
+      "schedule"         "30 4 * * *"
+      "module"           "src.etl.legislative.mirror_cellar"
+      "args"             (list "--recent")
+      "deadlineSeconds"  5400
+      "cpuRequest"       "100m"
+      "cpuLimit"         "500m"
+      "memRequest"       "256Mi"
+      "memLimit"         "1Gi"
+      "extraEnv"         $extra
+      "needsEdgarDataRW" true
+      "Values"           .Values
+      "Release"          .Release) -}}
+{{- end }}

@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -186,20 +186,33 @@ def load_artifact(client: httpx.Client, update_url: str, path: Path,
     return loaded
 
 
+def _resolve_range(parser, args) -> tuple[date, date]:
+    if args.recent:
+        today = date.today()
+        prev = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+        return prev, today.replace(day=1)
+    if not (args.date_from and args.date_to):
+        parser.error("--from/--to required unless --recent")
+    return (date(*[int(x) for x in args.date_from.split("-")], 1),
+            date(*[int(x) for x in args.date_to.split("-")], 1))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--from", dest="date_from", required=True,
+    parser.add_argument("--from", dest="date_from",
                         help="window start, YYYY-MM")
-    parser.add_argument("--to", dest="date_to", required=True,
+    parser.add_argument("--to", dest="date_to",
                         help="window end (inclusive month), YYYY-MM")
+    parser.add_argument("--recent", action="store_true",
+                        help="delta mode for the daily cron: previous + "
+                             "current month (idempotent re-export catches "
+                             "late publications and corrigenda)")
     parser.add_argument("--out", default=os.environ.get(
         "LEGISLATIVE_DATA_DIR", "/edgar-data/legislative/cellar"))
     parser.add_argument("--skip-load", action="store_true",
                         help="export artifacts only")
     args = parser.parse_args(argv)
-
-    start = date(*[int(x) for x in args.date_from.split("-")], 1)
-    end = date(*[int(x) for x in args.date_to.split("-")], 1)
+    start, end = _resolve_range(parser, args)
     out_dir = Path(args.out)
 
     update_url = None

@@ -75,3 +75,27 @@ def test_load_artifact_chunks_and_paces(tmp_path, monkeypatch):
     assert not any("# Empty NT" in q for q in calls)
     assert all(q.startswith("define sql:big-data-const 1\nINSERT DATA { GRAPH <"
                             + mc.MIRROR_GRAPH) for q in calls)
+
+
+def test_recent_mode_windows(monkeypatch):
+    """--recent = previous + current month, computed at run time — the
+    daily cron needs no date templating."""
+
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 7, 12)
+
+    monkeypatch.setattr(mc, "date", _FixedDate)
+    captured = {}
+    monkeypatch.setattr(mc, "fetch_window",
+                        lambda *a, **k: iter([]))
+    real_write = mc.write_artifact
+
+    def spy_write(lines, out_dir, tag):
+        captured.setdefault("tags", []).append(tag)
+        return real_write(lines, out_dir, tag)
+    monkeypatch.setattr(mc, "write_artifact", spy_write)
+    rc = mc.main(["--recent", "--skip-load", "--out", "/tmp/claude-1000/mc-test"])
+    assert rc == 0
+    assert captured["tags"] == ["2026-06", "2026-07"]

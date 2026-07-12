@@ -13,6 +13,8 @@ class _FakeVirtuoso:
         self.queries = []
 
     _ANSWERS = (
+        ("?year", [{"year": "2023", "works": "9"},
+                   {"year": "2024", "works": "11"}]),
         ("?decade", [{"decade": "1950s", "works": "12"},
                      {"decade": "1960s", "works": "28"}]),
         ("?triples", [{"triples": "1000"}]),
@@ -42,6 +44,7 @@ def test_stats_shape_and_graph_scoping():
     assert stats["latest_work_date"] == "1983-12-19"
     assert stats["eli_coverage"] == 0.75
     assert stats["works_by_decade"][0] == {"decade": "1950s", "works": 12}
+    assert stats["works_by_year"][-1] == {"year": "2024", "works": 11}
 
 
 def test_every_query_is_graph_scoped():

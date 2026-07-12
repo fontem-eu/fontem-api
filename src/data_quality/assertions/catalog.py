@@ -152,6 +152,7 @@ SOURCE_CADENCE_HOURS: dict[str, int] = {
     "etl-gleif": 240,                 # weekly full dump + slack
     "etl-gleif-relationships": 336,
     "etl-ted-contracts": 48,          # near-daily procurement feed
+    "etl-cellar-mirror": 48,          # daily EUR-Lex delta (gitops#290)
     "etl-eu-lobbying": 168,
     "etl-us-financials": 168,
     "etl-eu-listings": 168,
