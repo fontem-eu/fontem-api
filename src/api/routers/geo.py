@@ -133,6 +133,35 @@ def entity_aggregate(
     }
 
 
+@router.get("/nuts-regions")
+def nuts_regions():
+    """Flat, geometry-free list of NUTS regions across all bundled levels.
+
+    Returns ``{regions: [{code, name, level}]}`` — small enough (~1.8k rows)
+    to power a client-side cascading region picker without downloading the
+    full boundary GeoJSON. Levels/children are derivable from the codes
+    (a child's code is prefixed by its parent's).
+    """
+    out = []
+    for level in range(4):
+        path = os.path.abspath(
+            os.path.join(_BOUNDARIES_DIR, f"nuts{level}.geojson")
+        )
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        for feat in data.get("features", []):
+            props = feat.get("properties") or {}
+            code = props.get("nuts_code")
+            if code:
+                out.append(
+                    {"code": code, "name": props.get("name") or code, "level": level}
+                )
+    out.sort(key=lambda r: (r["level"], r["name"]))
+    return {"regions": out}
+
+
 @router.get("/nuts-boundaries")
 def nuts_boundaries(
     level: int = Query(0, ge=0, le=3),

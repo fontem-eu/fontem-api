@@ -50,8 +50,10 @@ class _Neo4j:
 # Canned rows matching each handler's RETURN aliases.
 FULL_ROWMAP = {
     "MATCH (c:Company)": [
-        {"id": "c1", "title": "Apple Inc.", "country": "USA", "ticker": "AAPL", "rank": 3},
-        {"id": "c2", "title": "Pineapple Power", "country": "GBR", "ticker": None, "rank": 0},
+        {"id": "c1", "title": "Apple Inc.", "country": "USA", "ticker": "AAPL",
+         "legal_form": "Inc.", "city": "Cupertino", "rank": 3},
+        {"id": "c2", "title": "Pineapple Power", "country": "GBR", "ticker": None,
+         "legal_form": None, "city": None, "rank": 0},
     ],
     "MATCH (a:Authority)": [
         {"id": "a1", "title": "Apple Authority", "country": "ITA", "rank": 2},
@@ -70,7 +72,9 @@ FULL_ROWMAP = {
     ],
     "MATCH (d:Disclosure": [
         {"id": "d1", "title": "Apple orchard cohesion", "country": "PRT",
-         "start_date": "2020-01-01", "fund": "ERDF", "nuts_code": "PT170"},
+         "start_date": "2020-01-01", "fund": "ERDF", "nuts_code": "PT170",
+         "description": "Planting apple orchards across the Norte region",
+         "programme": "ERDF Norte"},
     ],
     "MATCH (s:SanctionedEntity)": [
         {"id": "s1", "title": "Apple Sanctioned", "regime": "EU",
@@ -157,3 +161,15 @@ def test_no_matches_returns_empty_page():
     body = r.json()
     assert body["results"] == []
     assert body["has_more"] is False
+
+
+def test_results_carry_contextual_info():
+    results = _client().get("/search/results?q=apple").json()["results"]
+    apple = next(x for x in results if x["title"] == "Apple Inc.")
+    # company context built from city + legal form
+    assert apple["context"] == "Cupertino · Inc."
+    # cohesion context from the project description
+    cohesion = next(x for x in results if x["type"] == "cohesion")
+    assert "apple orchards" in cohesion["context"].lower()
+    # every result exposes a context field (empty allowed)
+    assert all("context" in x for x in results)
