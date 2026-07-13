@@ -62,6 +62,9 @@ ALL_TYPES: tuple[str, ...] = (
 # without paying for an unbounded global COUNT over 3.6M companies.
 _MAX_PER_TYPE = 200
 
+# Conjunction used both in Cypher WHERE fragments and bif:contains patterns.
+_AND = " AND "
+
 
 def _parse_types(types: str | None) -> list[str]:
     """Parse the comma-separated ``types`` facet into a validated list.
@@ -86,7 +89,7 @@ def _date_clause(prop: str, has_from: bool, has_to: bool) -> str:
         parts.append(f"{prop} >= $date_from")
     if has_to:
         parts.append(f"{prop} <= $date_to")
-    return (" AND " + " AND ".join(parts)) if parts else ""
+    return (_AND + _AND.join(parts)) if parts else ""
 
 
 def _ctx(*parts) -> str:
@@ -442,7 +445,7 @@ def _ft_pattern(keywords: list[str]) -> str:
     SPARQL string.
     """
     safe = [re.sub(r"['\"\\]", "", kw) for kw in keywords]
-    return " AND ".join(f'"{kw}"' for kw in safe if kw)
+    return _AND.join(f'"{kw}"' for kw in safe if kw)
 
 
 def _legislation_query(pattern: str, lang: str | None,
