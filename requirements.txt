@@ -43,7 +43,7 @@ pyshacl>=0.27
 
 # Event-log architecture: producers emit into events.entity_events
 # instead of writing stores directly. See fontem-ontology/MIGRATION.md.
-# Installed in CI via a separate step (using GMR_CI_READ_TOKEN).
+# Installed in CI via a separate step (using CI_READ_TOKEN).
 # See .gitea/workflows/ci.yml. NOT listed here because pip's
 # isolated-build environment doesn't have gitea creds.
 

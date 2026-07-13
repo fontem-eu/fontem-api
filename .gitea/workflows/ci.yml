@@ -13,7 +13,7 @@ jobs:
         env:
           PIP_INDEX_URL: https://nexus.void42.internal/repository/pypi-proxy/simple/
           PIP_TRUSTED_HOST: nexus.void42.internal
-          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+          CI_READ_TOKEN: ${{ secrets.CI_READ_TOKEN }}
         run: |
           pip install --no-cache-dir vendor/*.whl
           pip install --no-cache-dir -r requirements.txt pytest pylint tzdata
@@ -23,10 +23,10 @@ jobs:
           # clone and install explicitly with the read token.
           tmpdir=$(mktemp -d)
           git clone --depth 1 \
-              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-event-schemas.git" \
+              "http://lucid:${CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-event-schemas.git" \
               "$tmpdir/gmr-event-schemas"
           git clone --depth 1 \
-              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-events.git" \
+              "http://lucid:${CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-events.git" \
               "$tmpdir/gmr-events"
           pip install --no-cache-dir "$tmpdir/gmr-event-schemas" "$tmpdir/gmr-events"
       - name: Test
@@ -40,7 +40,7 @@ jobs:
   # SonarQube static analysis. Runs on both PR and main so the scanner sees
   # branch coverage deltas before merge. Mirrors the install incantation from
   # `test` (vendored wheels + clone fontem-event-schemas/fontem-events with
-  # GMR_CI_READ_TOKEN) so the scanner can resolve imports. Coverage runs with
+  # CI_READ_TOKEN) so the scanner can resolve imports. Coverage runs with
   # `|| true` — Sonar consumes whatever XML was produced even on partial test
   # failure; pytest's pass/fail gate already lives in the `test` job.
   analyze:
@@ -54,27 +54,27 @@ jobs:
           fetch-depth: 0
       - uses: actions/checkout@v4
         with:
-          repository: void42/fontem-ci
-          path: .fontem-ci
-          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+          repository: void42/ci-actions
+          path: .ci-actions
+          token: ${{ secrets.CI_READ_TOKEN }}
       - name: Install deps and generate coverage
         env:
           PIP_INDEX_URL: https://nexus.void42.internal/repository/pypi-proxy/simple/
           PIP_TRUSTED_HOST: nexus.void42.internal
-          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+          CI_READ_TOKEN: ${{ secrets.CI_READ_TOKEN }}
         run: |
           pip install --no-cache-dir vendor/*.whl
           pip install --no-cache-dir -r requirements.txt pytest pytest-cov tzdata
           tmpdir=$(mktemp -d)
           git clone --depth 1 \
-              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-event-schemas.git" \
+              "http://lucid:${CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-event-schemas.git" \
               "$tmpdir/gmr-event-schemas"
           git clone --depth 1 \
-              "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-events.git" \
+              "http://lucid:${CI_READ_TOKEN}@contribute.void42.internal/fontem/fontem-events.git" \
               "$tmpdir/gmr-events"
           pip install --no-cache-dir "$tmpdir/gmr-event-schemas" "$tmpdir/gmr-events"
           python3 -m pytest tests/ -q --cov=src --cov-report=xml:coverage.xml || true
-      - uses: ./.fontem-ci/actions/sonar-scan
+      - uses: ./.ci-actions/actions/sonar-scan
         with:
           sonar-token: ${{ secrets.SONAR_TOKEN }}
 
@@ -283,20 +283,20 @@ jobs:
           print(f"checked {len(paths)} template files: env-var ordering OK")
           PY
 
-  # Pre-build supply-chain gate; see gmr-ci/actions/osv-scan.
+  # Pre-build supply-chain gate; see ci-actions/actions/osv-scan.
   security:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: void42/fontem-ci
-          path: .fontem-ci
-          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+          repository: void42/ci-actions
+          path: .ci-actions
+          token: ${{ secrets.CI_READ_TOKEN }}
       - name: OSV-Scanner lockfile gate
-        uses: ./.fontem-ci/actions/osv-scan
+        uses: ./.ci-actions/actions/osv-scan
       - name: Secret scan (gitleaks)
-        uses: ./.fontem-ci/actions/secret-scan
+        uses: ./.ci-actions/actions/secret-scan
 
   # Build → sign → attest SBOM → deploy. SBOM generation happens
   # inline here so the same file is both uploaded to DT and used
@@ -314,13 +314,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: void42/fontem-ci
-          path: .fontem-ci
-          token: ${{ secrets.GMR_CI_READ_TOKEN }}
+          repository: void42/ci-actions
+          path: .ci-actions
+          token: ${{ secrets.CI_READ_TOKEN }}
 
       - id: sbom
         name: Generate + upload SBOM
-        uses: ./.fontem-ci/actions/sbom-generate
+        uses: ./.ci-actions/actions/sbom-generate
         with:
           language: python
           project-name: edgar-gmr-etl
@@ -331,22 +331,22 @@ jobs:
         # The Dockerfile pip-installs from vendor/gmr-event-schemas
         # and vendor/gmr-events. pip's isolated-build env can't
         # reach the internal Gitea, so we clone here at CI time
-        # using GMR_CI_READ_TOKEN, then docker build copies them in.
+        # using CI_READ_TOKEN, then docker build copies them in.
         env:
-          GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}
+          CI_READ_TOKEN: ${{ secrets.CI_READ_TOKEN }}
         run: |
           mkdir -p vendor
           for repo in gmr-event-schemas gmr-events; do
               rm -rf "vendor/$repo"
               git clone --depth 1 \
-                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
+                  "http://lucid:${CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
                   "vendor/$repo"
               rm -rf "vendor/$repo/.git"
           done
 
       - id: image
         name: Build, push, sign, attest
-        uses: ./.fontem-ci/actions/docker-build-sign
+        uses: ./.ci-actions/actions/docker-build-sign
         with:
           image: contribute.void42.internal/fontem/fontem-api
           cosign-key: ${{ secrets.COSIGN_KEY }}
