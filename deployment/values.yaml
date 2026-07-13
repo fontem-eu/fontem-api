@@ -33,6 +33,13 @@ virtuoso:
   dbaPasswordSecret: virtuoso-credentials
   dbaPasswordKey: VIRTUOSO_DBA_PASSWORD
 
+# Keyword extraction for legislative title search (stop-word removal).
+# The singleton fontem-linguistics deployment serves every env over
+# cluster DNS; disabled by default for envs without the service.
+linguistics:
+  enabled: false
+  url: "http://fontem-linguistics.linguistics-service.svc.cluster.local:8080"
+
 # Service type. Default NodePort keeps backward compat with non-prod
 # envs; real prod overrides to ClusterIP since fontem-web reverse-proxies
 # /api/ over cluster DNS.

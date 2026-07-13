@@ -7,7 +7,7 @@ payload for a dropdown, this endpoint is built for a results page:
 
   * many entity types — companies, public bodies (authorities), people,
     lobbyists, procurement contracts, cohesion projects, sanctioned
-    entities — selectable via the ``types`` facet;
+    entities, EU legislation — selectable via the ``types`` facet;
   * advanced filters — ``country`` (alpha-3), ``nuts`` (NUTS-code prefix),
     and a ``date_from``/``date_to`` range, each applied only to the types
     that carry the relevant property;
@@ -17,6 +17,9 @@ payload for a dropdown, this endpoint is built for a results page:
 Match semantics stay ``toLower(...) CONTAINS`` for parity with the existing
 autocomplete (a full-text-index upgrade is tracked separately); each type
 carries a small rank so exact/prefix hits sort above mid-string ones.
+Legislation is the exception: it matches expression titles in the CELLAR
+mirror via Virtuoso's full-text index, after the query is reduced to
+content-bearing keywords by the linguistics service (stop-word removal).
 
 Property names are the REAL materialized Neo4j properties (verified against
 prod), which differ from the ETL event kwargs — notably lobbyists store
@@ -26,6 +29,7 @@ prod), which differ from the ETL event kwargs — notably lobbyists store
 from __future__ import annotations
 
 import logging
+import re
 from typing import Annotated, Any
 
 from dishka.integrations.fastapi import FromDishka, inject
@@ -33,6 +37,8 @@ from fastapi import APIRouter, Query
 
 from src.api.lang import authority_name_expr, safe_lang
 from src.data.graph.neo4j_client import Neo4jClient
+from src.data.linguistics.client import LinguisticsClient
+from src.data.sparql.virtuoso_client import SparqlTimeout, VirtuosoClient
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,7 @@ ALL_TYPES: tuple[str, ...] = (
     "contract",
     "cohesion",
     "sanction",
+    "legislation",
 )
 
 # Per-type cap. We over-fetch (offset+limit+1) up to this ceiling so we can
@@ -377,6 +384,172 @@ def _sanctions(session, params, want_geo_filter):  # pylint: disable=unused-argu
     ]
 
 
+# --- Legislation (CELLAR mirror in Virtuoso) --------------------------------
+
+_MIRROR_GRAPH = "http://data.fontem.eu/graph/mirror/cellar/eu"
+
+# ISO-639-1 → Publications Office language authority code, for picking the
+# display title in the viewer's language.
+_PO_LANG = {
+    "bg": "BUL", "cs": "CES", "da": "DAN", "de": "DEU", "el": "ELL",
+    "en": "ENG", "es": "SPA", "et": "EST", "fi": "FIN", "fr": "FRA",
+    "ga": "GLE", "hr": "HRV", "hu": "HUN", "it": "ITA", "lt": "LIT",
+    "lv": "LAV", "mt": "MLT", "nl": "NLD", "pl": "POL", "pt": "POR",
+    "ro": "RON", "sk": "SLK", "sl": "SLV", "sv": "SWE",
+}
+
+# CELEX sector-3 document-type letter (position 5 in 3YYYYLNNNN).
+_CELEX_SECTOR_3 = {
+    "L": "Directive", "R": "Regulation", "D": "Decision",
+    "H": "Recommendation", "A": "Opinion", "C": "Declaration",
+    "E": "CFSP common position", "F": "JHA framework decision",
+    "G": "Council resolution", "M": "Merger decision",
+    "Q": "Institutional rules", "S": "ECSC act",
+}
+
+_CELEX_SECTORS = {
+    "1": "Treaty", "2": "International agreement", "4": "Complementary act",
+    "5": "Preparatory act", "6": "Case-law",
+    "7": "National implementing measure", "9": "Parliamentary question",
+}
+
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _celex_doc_type(celex: str) -> str:
+    """Human label for a CELEX number's sector/type, best-effort."""
+    if not celex:
+        return "Legal document"
+    if celex[0] == "3":
+        return _CELEX_SECTOR_3.get(celex[5:6], "Legal act")
+    return _CELEX_SECTORS.get(celex[0], "Legal document")
+
+
+def _fallback_keywords(q: str) -> list[str]:
+    """Naive keyword split for when the linguistics service is down.
+
+    Keeps every token of length ≥ 2 plus all digit-bearing tokens —
+    over-matching beats an empty results page.
+    """
+    return [t for t in _WORD_RE.findall(q.lower()) if len(t) >= 2 or t.isdigit()]
+
+
+def _ft_pattern(keywords: list[str]) -> str:
+    """AND-of-phrases pattern for Virtuoso ``bif:contains``.
+
+    Tokens arrive word-only from the tokenizers; the strip of quote/backslash
+    characters here is defence in depth, since the pattern is embedded in the
+    SPARQL string.
+    """
+    safe = [re.sub(r"['\"\\]", "", kw) for kw in keywords]
+    return " AND ".join(f'"{kw}"' for kw in safe if kw)
+
+
+def _legislation_query(pattern: str, lang: str | None,
+                       date_from: str | None, date_to: str | None,
+                       cap: int) -> str:
+    """SPARQL over the CELLAR mirror: works whose expression titles match.
+
+    Groups by CELEX so a work counts once regardless of how many language
+    versions matched; the display title prefers the viewer's language and
+    falls back to any matched title.
+    """
+    po_lang = _PO_LANG.get(lang or "en", "ENG")
+    if date_from or date_to:
+        conds = []
+        if date_from:
+            conds.append(f'STR(?dd) >= "{date_from}"')
+        if date_to:
+            conds.append(f'STR(?dd) <= "{date_to}"')
+        date_block = (
+            "?w cdm:work_date_document ?dd . "
+            f"FILTER({' && '.join(conds)}) BIND(STR(?dd) AS ?d)"
+        )
+    else:
+        date_block = (
+            "OPTIONAL { ?w cdm:work_date_document ?dd . BIND(STR(?dd) AS ?d) }"
+        )
+    return f"""
+PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+SELECT ?celex (SAMPLE(?d) AS ?date) (MAX(?sc) AS ?score)
+       (SAMPLE(?tpref) AS ?title_pref) (SAMPLE(?t) AS ?title_any)
+WHERE {{
+  GRAPH <{_MIRROR_GRAPH}> {{
+    ?e cdm:expression_title ?t .
+    ?t bif:contains '{pattern}' OPTION (score ?sc) .
+    ?e cdm:expression_belongs_to_work ?w .
+    ?w cdm:resource_legal_id_celex ?cx .
+    BIND(STR(?cx) AS ?celex)
+    {date_block}
+    OPTIONAL {{
+      ?ep cdm:expression_belongs_to_work ?w .
+      ?ep cdm:expression_uses_language
+        <http://publications.europa.eu/resource/authority/language/{po_lang}> .
+      ?ep cdm:expression_title ?tpref .
+    }}
+  }}
+}}
+GROUP BY ?celex
+ORDER BY DESC(MAX(?sc))
+LIMIT {cap}
+"""
+
+
+def _legislation(virtuoso, linguistics, params):
+    """EU legal acts from the CELLAR mirror by title keywords.
+
+    Soft-fails to an empty list when Virtuoso is not configured, the
+    query yields no keywords, or the store errors — search must degrade,
+    not 500. Stop-word removal comes from the linguistics service with a
+    naive local fallback.
+    """
+    if virtuoso is None:
+        return []
+    q = params["q"]
+    lang = safe_lang(params.get("lang"))
+    keywords = linguistics.keywords(q, lang) if linguistics else None
+    if keywords is None:
+        keywords = _fallback_keywords(q)
+    pattern = _ft_pattern(keywords[:8])
+    if not pattern:
+        return []
+    query = _legislation_query(
+        pattern, lang, params.get("date_from"), params.get("date_to"),
+        params["cap"],
+    )
+    try:
+        rows = virtuoso.query(query)
+    except SparqlTimeout:
+        logger.warning("legislation search timed out (pattern=%s)", pattern)
+        return []
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("legislation search failed (pattern=%s)", pattern)
+        return []
+    ui_lang = (lang or "en").upper()
+    results = []
+    for r in rows:
+        celex = str(r.get("celex") or "")
+        title = r.get("title_pref") or r.get("title_any") or celex
+        results.append({
+            "type": "legislation",
+            "id": celex,
+            "title": title,
+            "subtitle": celex,
+            "country": None,
+            "date": r.get("date"),
+            "score": 0,
+            "context": _celex_doc_type(celex),
+            "meta": {
+                "celex": celex,
+                "eurlex_url": (
+                    "https://eur-lex.europa.eu/legal-content/"
+                    f"{ui_lang}/TXT/?uri=CELEX:{celex}"
+                ),
+            },
+        })
+    return results
+
+
 _HANDLERS = {
     "company": _companies,
     "authority": _authorities,
@@ -393,7 +566,7 @@ _HANDLERS = {
 # filter, however, is a hard narrowing: a type with no geo dimension is
 # excluded entirely when a geo filter is set.
 _GEO_TYPES = {"company", "authority", "lobbyist", "contract", "cohesion"}
-_DATE_TYPES = {"lobbyist", "contract", "cohesion", "sanction"}
+_DATE_TYPES = {"lobbyist", "contract", "cohesion", "sanction", "legislation"}
 
 
 @router.get("/results")
@@ -410,6 +583,8 @@ def search_results(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     lang: Annotated[str | None, Query(max_length=8)] = None,
     *,
     neo4j: FromDishka[Neo4jClient],
+    virtuoso: FromDishka[VirtuosoClient | None],
+    linguistics: FromDishka[LinguisticsClient | None],
 ) -> dict[str, Any]:
     """Faceted keyword search across the graph for the results page.
 
@@ -441,7 +616,10 @@ def search_results(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             if has_date and t not in _DATE_TYPES:
                 counts[t] = 0
                 continue
-            rows = _HANDLERS[t](session, params, want_geo_filter=has_geo)
+            if t == "legislation":
+                rows = _legislation(virtuoso, linguistics, params)
+            else:
+                rows = _HANDLERS[t](session, params, want_geo_filter=has_geo)
             counts[t] = len(rows)
             merged.extend(rows)
 

@@ -25,6 +25,7 @@ from src.analysis.gmr_data_source import FinancialDataSource
 from src.analysis.person_data_source import PersonDataSource
 from src.data.graph.neo4j_client import Neo4jClient
 from src.data.graph.graph_recommendations_source import GraphRecommendationsSource
+from src.data.linguistics.client import LinguisticsClient
 from src.data.sparql.virtuoso_client import VirtuosoClient
 from src.services.ip_to_country import IpToCountryService
 
@@ -58,6 +59,15 @@ class VirtuosoProvider(Provider):
     @provide(scope=Scope.APP)
     def virtuoso_client(self) -> VirtuosoClient | None:
         return VirtuosoClient.from_env()
+
+
+class LinguisticsProvider(Provider):
+    """Optional keyword-extraction client. None when LINGUISTICS_URL is
+    unset — search degrades to naive tokenization instead of failing."""
+
+    @provide(scope=Scope.APP)
+    def linguistics_client(self) -> LinguisticsClient | None:
+        return LinguisticsClient.from_env()
 
 
 class DataSourceProvider(Provider):
@@ -150,5 +160,6 @@ def resolve_company_id(identifier: str, neo4j: Neo4jClient) -> dict:
 def make_container() -> AsyncContainer:
     """Build the full DI container for the GMR ETL API."""
     return make_async_container(
-        Neo4jProvider(), VirtuosoProvider(), DataSourceProvider(),
+        Neo4jProvider(), VirtuosoProvider(), LinguisticsProvider(),
+        DataSourceProvider(),
     )
