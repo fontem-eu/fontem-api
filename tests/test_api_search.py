@@ -173,3 +173,137 @@ def test_results_carry_contextual_info():
     assert "apple orchards" in cohesion["context"].lower()
     # every result exposes a context field (empty allowed)
     assert all("context" in x for x in results)
+
+
+# --- legislation (CELLAR mirror via Virtuoso) --------------------------------
+
+from src.api.routers.search import (  # pylint: disable=wrong-import-position
+    _celex_doc_type,
+    _fallback_keywords,
+    _ft_pattern,
+    _legislation_query,
+)
+
+
+class _FakeVirtuoso:
+    """Canned SPARQL bindings; records the query for assertions."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.queries = []
+
+    def query(self, q):
+        self.queries.append(q)
+        return self.rows
+
+
+class _FakeLinguistics:
+    def __init__(self, keywords):
+        self._keywords = keywords
+
+    def keywords(self, text, lang=None):  # pylint: disable=unused-argument
+        return self._keywords
+
+
+LEGISLATION_ROWS = [
+    {"celex": "32024L1385", "date": "2024-05-14", "score": 42,
+     "title_pref": "Directive (EU) 2024/1385 on combating violence against women",
+     "title_any": "Directiva (UE) 2024/1385"},
+    {"celex": "32011R0010", "date": "2011-01-14", "score": 17,
+     "title_pref": None,
+     "title_any": "Regolamento (UE) n. 10/2011"},
+]
+
+
+def test_celex_doc_type():
+    assert _celex_doc_type("32024L1385") == "Directive"
+    assert _celex_doc_type("32011R0010") == "Regulation"
+    assert _celex_doc_type("72024L1385CZE_202501096") == "National implementing measure"
+    assert _celex_doc_type("52022PC0105") == "Preparatory act"
+    assert _celex_doc_type("") == "Legal document"
+
+
+def test_fallback_keywords_keep_digits_drop_single_letters():
+    assert _fallback_keywords("a Regulation 10/2011 x") == ["regulation", "10", "2011"]
+
+
+def test_ft_pattern_quotes_and_joins():
+    assert _ft_pattern(["violence", "women"]) == '"violence" AND "women"'
+    # quote/backslash stripped, empty tokens dropped
+    assert _ft_pattern(['vio"lence', "'", "women"]) == '"violence" AND "women"'
+
+
+def test_legislation_query_date_filter_required_when_set():
+    q = _legislation_query('"women"', "en", "2024-01-01", None, 10)
+    assert 'STR(?dd) >= "2024-01-01"' in q
+    assert "OPTIONAL { ?w cdm:work_date_document" not in q
+    q2 = _legislation_query('"women"', "fr", None, None, 10)
+    assert "OPTIONAL { ?w cdm:work_date_document" in q2
+    assert "language/FRA" in q2
+
+
+def test_search_results_includes_legislation():
+    client = make_test_client(
+        neo4j_client=_Neo4j(FULL_ROWMAP),
+        virtuoso=_FakeVirtuoso(LEGISLATION_ROWS),
+        linguistics=_FakeLinguistics(["violence", "women"]),
+    )
+    r = client.get("/search/results?q=violence against women&types=legislation")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["counts"]["legislation"] == 2
+    first = body["results"][0]
+    assert first["type"] == "legislation"
+    assert first["id"] == "32024L1385"
+    assert first["title"].startswith("Directive (EU) 2024/1385")
+    assert first["context"] == "Directive"
+    assert first["meta"]["eurlex_url"].endswith("CELEX:32024L1385")
+    # falls back to any-language title when preferred is missing
+    second = body["results"][1]
+    assert second["title"] == "Regolamento (UE) n. 10/2011"
+    cleanup_dishka()
+
+
+def test_legislation_without_virtuoso_returns_empty():
+    client = make_test_client(neo4j_client=_Neo4j({}))
+    r = client.get("/search/results?q=women&types=legislation")
+    assert r.status_code == 200
+    assert r.json()["counts"]["legislation"] == 0
+    cleanup_dishka()
+
+
+def test_legislation_uses_fallback_keywords_when_linguistics_down():
+    fake_virt = _FakeVirtuoso(LEGISLATION_ROWS[:1])
+    client = make_test_client(
+        neo4j_client=_Neo4j({}),
+        virtuoso=fake_virt,
+    )
+    r = client.get("/search/results?q=the violence against women&types=legislation")
+    assert r.status_code == 200
+    assert r.json()["counts"]["legislation"] == 1
+    # naive fallback keeps "the" (len >= 2) — over-matching by design
+    assert '"the" AND "violence"' in fake_virt.queries[0]
+    cleanup_dishka()
+
+
+def test_legislation_excluded_by_geo_filter():
+    client = make_test_client(
+        neo4j_client=_Neo4j(FULL_ROWMAP),
+        virtuoso=_FakeVirtuoso(LEGISLATION_ROWS),
+    )
+    r = client.get("/search/results?q=women&types=legislation&country=FRA")
+    assert r.status_code == 200
+    assert r.json()["counts"]["legislation"] == 0
+    cleanup_dishka()
+
+
+def test_legislation_virtuoso_error_degrades_to_empty():
+    class _Boom:
+        def query(self, q):
+            raise RuntimeError("store down")
+
+    client = make_test_client(neo4j_client=_Neo4j({}), virtuoso=_Boom())
+    r = client.get("/search/results?q=women&types=legislation")
+    assert r.status_code == 200
+    assert r.json()["counts"]["legislation"] == 0
+    cleanup_dishka()

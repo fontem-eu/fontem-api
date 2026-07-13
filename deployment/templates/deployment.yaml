@@ -166,6 +166,12 @@ spec:
             - name: VIRTUOSO_SPARQL_URL
               value: {{ .Values.virtuoso.sparqlEndpoint | quote }}
             {{- end }}
+            {{- if .Values.linguistics.enabled }}
+            # Keyword extraction (stop-word removal) for legislative
+            # title search; the singleton service in linguistics-service ns.
+            - name: LINGUISTICS_URL
+              value: {{ .Values.linguistics.url | quote }}
+            {{- end }}
 
           volumeMounts:
             - name: edgar-data
