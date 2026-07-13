@@ -370,7 +370,7 @@ jobs:
             /tmp/gitops
           cd /tmp/gitops
           sed -i 's/version: ".*"/version: "'"$TAG"'"/' testing/fontem-api.yaml
-          git config user.name "GMR CI"
+          git config user.name "Fontem CI"
           git config user.email "ci@void42.internal"
           git add testing/fontem-api.yaml
           if git diff --cached --quiet; then
