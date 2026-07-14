@@ -1,0 +1,16 @@
+{{- $extra := list }}
+{{- $extra = append $extra (dict "name" "PETITIONS_DATA_DIR" "value" "/edgar-data/petitions") }}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"             "etl-eci-petitions"
+      "schedule"         "10 5 * * *"
+      "module"           "src.etl.load_eu_petitions"
+      "args"             (list)
+      "deadlineSeconds"  3600
+      "cpuRequest"       "100m"
+      "cpuLimit"         "500m"
+      "memRequest"       "256Mi"
+      "memLimit"         "1Gi"
+      "extraEnv"         $extra
+      "needsEdgarDataRW" true
+      "Values"           .Values
+      "Release"          .Release) -}}
