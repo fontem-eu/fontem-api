@@ -19,9 +19,11 @@ and lands UNREVIEWED: a review candidate a human adjudicates, never an
 automatic attribution.
 
 GDPR note: this loader republishes identified-person data (sanctioned
-individuals). The processing lawful basis is Art 6(1)(e) — public
-interest task derived from the EU's own publication — but downstream
-data-subject rights still attach: rectification (Art 16) and erasure
+individuals). Natural persons were filtered out until 2026-07-14; they
+are now ingested by owner decision, carried as ``subject_type=person``.
+The processing lawful basis is Art 6(1)(e) — public interest task
+derived from the EU's own publication — but downstream data-subject
+rights still attach: rectification (Art 16) and erasure
 (Art 17) requests reach Fontem at **gdpr@fontem.eu**. The EU's own
 delist process is the upstream source of truth — when an entry
 disappears from the FSF feed, the sink tombstones the IRI rather than
@@ -144,10 +146,9 @@ def _collect_names(entity_el):
 def _find_nationality(entity_el):
     """Extract the entity's country as alpha-3.
 
-    Persons carry it on ``citizenship``; **enterprises — the only
-    subjects we keep (persons are GDPR-filtered) — have no citizenship
-    and instead carry their country on ``address`` (1337/1589 of them)
-    and often ``identification``.** Reading only ``citizenship`` left
+    Persons carry it on ``citizenship``; **enterprises have no
+    citizenship and instead carry their country on ``address``
+    (1337/1589 of them) and often ``identification``.** Reading only ``citizenship`` left
     every non-person entity country-less, so the country-gated resolver
     matched nothing. Check all three, in that order; the portal stores
     ISO 3166-1 alpha-2, normalise to alpha-3 (descriptions that aren't a
@@ -411,12 +412,13 @@ def main(argv=None):  # pylint: disable=too-many-locals
     all_entities = list(parse_sanctions_xml(xml_bytes))
     logger.info("Parsed %d sanctioned entities total", len(all_entities))
 
-    # GDPR: skip natural persons — only process non-person entities
-    entities = [e for e in all_entities if e["entity_type"] != "person"]
-    skipped = len(all_entities) - len(entities)
+    # Persons ingested since 2026-07-14 (owner decision; see GDPR note).
+    # The company resolver below still only sees non-person subjects.
+    entities = all_entities
+    n_persons = sum(1 for e in entities if e["entity_type"] == "person")
     logger.info(
-        "Filtered to %d non-person entities (skipped %d persons)",
-        len(entities), skipped,
+        "Processing %d subjects (%d persons, %d entities)",
+        len(entities), n_persons, len(entities) - n_persons,
     )
 
     log = EventLog.from_env()
@@ -445,6 +447,7 @@ def main(argv=None):  # pylint: disable=too-many-locals
                 payload=builders.upsert_sanctioned_entity(
                     entity_id=ent["entity_id"],
                     eu_reference=ent["eu_reference"],
+                    subject_type=ent["entity_type"],
                     name=ent.get("name") or None,
                     aliases=ent.get("aliases") or [],
                     nationality=ent.get("nationality") or None,
@@ -474,7 +477,9 @@ def main(argv=None):  # pylint: disable=too-many-locals
     # :Company<->:Company AssertSameAs to the resolved company, UNREVIEWED).
     # The auto SANCTIONED edge stays retired (8/8 historical false
     # positives); MIN_NAME_LEN keeps the acronym shapes out of the queue.
-    review_rows, summary = resolve_company_links(entities)
+    review_rows, summary = resolve_company_links(
+        [e for e in entities if e["entity_type"] != "person"]
+    )
     _emit_review_candidates(log, review_rows)
 
     logger.info(

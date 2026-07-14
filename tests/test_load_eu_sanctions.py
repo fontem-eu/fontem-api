@@ -305,3 +305,39 @@ def test_enterprise_country_read_from_address():
     out = list(parse_sanctions_xml(xml))
     assert len(out) == 1
     assert out[0]["nationality"] == "RUS"  # alpha-2 RU -> alpha-3 RUS
+
+
+def test_parse_persons_and_entities_typed():
+    """Since 2026-07-14 persons are parsed and typed, not dropped."""
+    xml = _wrap("""
+      <sanctionEntity designationDate="2022-03-15" euReferenceNumber="EU.1.1">
+        <subjectType code="person"/>
+        <nameAlias wholeName="Jane Doe"/>
+        <citizenship countryIso2Code="RU"/>
+        <regulation programme="UKR" publicationDate="2022-03-15"/>
+      </sanctionEntity>
+      <sanctionEntity designationDate="2022-03-15" euReferenceNumber="EU.2.2">
+        <subjectType code="enterprise"/>
+        <nameAlias wholeName="ACME Petrochemicals OAO"/>
+        <address countryIso2Code="RU"/>
+        <regulation programme="UKR" publicationDate="2022-03-15"/>
+      </sanctionEntity>
+    """)
+    parsed = list(parse_sanctions_xml(xml))
+    assert len(parsed) == 2
+    types = {e["name"]: e["entity_type"] for e in parsed}
+    assert types["Jane Doe"] == "person"
+    assert types["ACME Petrochemicals OAO"] == "entity"
+    # person nationality comes from citizenship
+    person = next(e for e in parsed if e["entity_type"] == "person")
+    assert person["nationality"] == "RUS"
+
+
+def test_subject_type_reaches_the_event_payload():
+    from fontem_event_schemas import builders as b
+
+    payload = b.upsert_sanctioned_entity(
+        entity_id="p-1", eu_reference="EU.1.1",
+        name="Jane Doe", subject_type="person",
+    )
+    assert payload["subject_type"] == "person"
