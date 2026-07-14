@@ -4,6 +4,7 @@ from __future__ import annotations
 from fontem_event_schemas import builders
 from fontem_event_schemas.validate import validate
 
+from src.etl import load_eu_petitions as mod
 from src.etl.load_eu_petitions import (
     _iso,
     normalize_answer_ref,
@@ -96,3 +97,37 @@ def test_parsed_row_builds_valid_event():
     row = parse_initiative(ENTRY, DETAIL)
     payload = builders.upsert_petition(**row)
     validate("UpsertPetition", 1, payload)
+
+
+def test_fetch_register_offset_pagination(monkeypatch):
+    """The register's first path segment is an OFFSET — the fetcher must
+    step by PAGE_SIZE and dedup, never re-fetch overlapping windows."""
+    all_entries = [{"id": i, "pubRegNum": f"ECI(2026){i:06d}"}
+                   for i in range(7)]
+    calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._p = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._p
+
+    def fake_get(url, **_kwargs):
+        if "details" in url:
+            return _Resp({})
+        offset = int(url.rstrip("/").split("/")[-2])
+        calls.append(offset)
+        page = all_entries[offset:offset + 3]
+        return _Resp({"recordsFound": 7, "entries": page})
+
+    monkeypatch.setattr(mod, "get_with_retry", fake_get)
+    monkeypatch.setattr(mod, "PAGE_SIZE", 3)
+    monkeypatch.setattr(mod, "DETAIL_PACE_S", 0)
+    snap = mod.fetch_register()
+    ids = [e["id"] for e in snap["entries"]]
+    assert ids == [0, 1, 2, 3, 4, 5, 6]
+    assert calls[:3] == [0, 3, 6]
