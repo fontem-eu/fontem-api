@@ -42,8 +42,10 @@ from ._http_retry import get_with_retry
 
 logger = logging.getLogger(__name__)
 
+# NOTE: the first numeric path segment is an OFFSET (entry index), not a
+# page number — /ALL/EN/1/50 returns entries 1..50, overlapping /0/50.
 SEARCH_URL = (
-    "https://register.eci.ec.europa.eu/core/api/register/search/ALL/EN/{page}/{size}"
+    "https://register.eci.ec.europa.eu/core/api/register/search/ALL/EN/{offset}/{size}"
 )
 DETAIL_URL = "https://register.eci.ec.europa.eu/core/api/register/details/{id}"
 PAGE_SIZE = 50
@@ -169,19 +171,22 @@ def parse_initiative(entry: dict, detail: dict) -> dict:  # pylint: disable=too-
 def fetch_register() -> dict:
     """Full register snapshot: search pages + one detail per initiative."""
     entries: list[dict] = []
-    page = 0
+    seen: set = set()
+    offset = 0
     while True:
         resp = get_with_retry(
-            SEARCH_URL.format(page=page, size=PAGE_SIZE), timeout=60,
+            SEARCH_URL.format(offset=offset, size=PAGE_SIZE), timeout=60,
             follow_redirects=True,
         )
         resp.raise_for_status()
         data = resp.json()
         batch = data.get("entries") or []
-        entries.extend(batch)
+        fresh = [e for e in batch if e["id"] not in seen]
+        seen.update(e["id"] for e in fresh)
+        entries.extend(fresh)
         if len(entries) >= int(data.get("recordsFound") or 0) or not batch:
             break
-        page += 1
+        offset += PAGE_SIZE
     details = {}
     for e in entries:
         time.sleep(DETAIL_PACE_S)
