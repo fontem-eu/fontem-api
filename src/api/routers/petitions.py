@@ -63,7 +63,10 @@ def list_petitions(
     }
 
 
-@router.get("/detail")
+@router.get(
+    "/detail",
+    responses={404: {"description": "No petition with this system/id."}},
+)
 @inject
 def petition_detail(
     petition_id: Annotated[str, Query(min_length=3, max_length=60)],
