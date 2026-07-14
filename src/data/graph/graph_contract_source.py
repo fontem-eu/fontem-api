@@ -12,7 +12,11 @@ from fontem_event_schemas.integrity import contract_red_flags
 
 from ...analysis.contract_data_source import ContractDataSource
 from ...api.lang import authority_name_expr, contract_title_expr
-from ._value_quality import trusted_value_sum
+from ._value_quality import (
+    canonical_count,
+    canonical_predicate,
+    trusted_value_sum,
+)
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -94,7 +98,8 @@ class GraphContractSource(ContractDataSource):
             total_value = session.run(
                 "MATCH (ct:Contract)-[:AWARDED_TO]->"
                 "(c:Company {gmr_id: $gid}) "
-                "RETURN " + trusted_value_sum("ct") + " AS total, count(ct) AS cnt",
+                "RETURN " + trusted_value_sum("ct") + " AS total, "
+                + canonical_count("ct") + " AS cnt",
                 gid=gmr_id,
             ).single()
 
@@ -196,7 +201,8 @@ class GraphContractSource(ContractDataSource):
             total = session.run(
                 "MATCH (a:Authority {authority_id: $aid})"
                 "-[:AWARDED]->(ct:Contract) "
-                "RETURN " + trusted_value_sum("ct") + " AS total, count(ct) AS cnt",
+                "RETURN " + trusted_value_sum("ct") + " AS total, "
+                + canonical_count("ct") + " AS cnt",
                 aid=authority_id,
             ).single()
 
@@ -364,7 +370,7 @@ class GraphContractSource(ContractDataSource):
         """Single-bidder rate over contracts with a known bidder count,
         optionally scoped by authority country and/or CPV prefix. The
         EC Single Market Scoreboard headline indicator."""
-        where = ["c.tenders_received IS NOT NULL"]
+        where = ["c.tenders_received IS NOT NULL", canonical_predicate("c")]
         params: dict = {}
         if country:
             where.append("c.country = $country")
@@ -398,6 +404,7 @@ class GraphContractSource(ContractDataSource):
             return session.run(
                 "MATCH (c:Contract) WHERE c.tenders_received IS NOT NULL "
                 "AND c.country IS NOT NULL "
+                f"AND {canonical_predicate('c')} "
                 "WITH c.country AS country, count(*) AS total, "
                 "count(CASE WHEN c.tenders_received = 1 THEN 1 END) AS single "
                 "WHERE total >= $min_sample "
@@ -431,7 +438,7 @@ class GraphContractSource(ContractDataSource):
                 f"RETURN cpv.division AS division, "
                 f"  cpv.description AS description, "
                 f"  {trusted_value_sum('ct')} AS total_value, "
-                f"  count(ct) AS contract_count "
+                f"  {canonical_count('ct')} AS contract_count "
                 f"ORDER BY total_value DESC LIMIT 20",
                 **params,
             ).data()

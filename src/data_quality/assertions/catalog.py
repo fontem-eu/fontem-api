@@ -653,6 +653,7 @@ ASSERTIONS: list[Assertion] = [
         WARN, "cypher",
         "MATCH (c:Contract) WHERE c.country IN ['HUN', 'HU'] "
         "AND c.tenders_received IS NOT NULL "
+        "AND coalesce(c.is_current, (c.notice_type IS NULL OR c.notice_type <> 'can-modif')) "
         "WITH count(*) AS sample, "
         "count(CASE WHEN c.tenders_received = 1 THEN 1 END) AS single "
         "RETURN sample, CASE WHEN sample > 0 THEN toFloat(single) / sample "
@@ -670,6 +671,7 @@ ASSERTIONS: list[Assertion] = [
         "oracle.eu_single_bidder_rate", ORACLE,
         "EU-wide single-bidder rate is in the EC-published range", WARN, "cypher",
         "MATCH (c:Contract) WHERE c.tenders_received IS NOT NULL "
+        "AND coalesce(c.is_current, (c.notice_type IS NULL OR c.notice_type <> 'can-modif')) "
         "WITH count(*) AS sample, "
         "count(CASE WHEN c.tenders_received = 1 THEN 1 END) AS single "
         "RETURN sample, CASE WHEN sample > 0 THEN toFloat(single) / sample "

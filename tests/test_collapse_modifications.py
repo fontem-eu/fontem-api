@@ -1,0 +1,80 @@
+"""The modification-collapse pass emits current_value / is_current /
+contract_key rollups so aggregations count each contract once."""
+# pylint: disable=missing-function-docstring
+from unittest.mock import MagicMock
+
+from src.etl import collapse_modifications
+
+
+def _mock_log():
+    log = MagicMock()
+    emit = MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    return log, emit
+
+
+def _driver_returning(rows_by_query):
+    """A driver whose session.run returns canned rows keyed by which cohort
+    query ran (matched on a distinctive substring)."""
+    session = MagicMock()
+
+    def _run(query, **_kw):
+        for needle, rows in rows_by_query.items():
+            if needle in query:
+                return rows
+        return []
+    session.run.side_effect = _run
+    driver = MagicMock()
+    driver.session.return_value.__enter__ = MagicMock(return_value=session)
+    driver.session.return_value.__exit__ = MagicMock(return_value=False)
+    return driver
+
+
+def test_emits_rollup_payloads_for_each_cohort():
+    rows = {
+        # cohort 1: award with modifications -> canonical, amended value
+        "EXISTS { (:Contract)-[:MODIFIES]->(a) }": [
+            {"id": "award-1", "contract_key": "proc:P1",
+             "current_value": 1500.0, "is_current": True},
+        ],
+        # cohort 2: linked modification -> superseded
+        "MODIFIES]->(a:Contract)\n": [
+            {"id": "mod-1", "contract_key": "proc:P1",
+             "current_value": 1500.0, "is_current": False},
+        ],
+        # cohort 3: orphan modification group -> one canonical
+        "NOT (m)-[:MODIFIES]->(:Contract)": [
+            {"id": "orphan-new", "contract_key": "modpub:X",
+             "current_value": 900.0, "is_current": True},
+            {"id": "orphan-old", "contract_key": "modpub:X",
+             "current_value": 800.0, "is_current": False},
+        ],
+    }
+    log, emit = _mock_log()
+    n = collapse_modifications.collapse_modifications(
+        _driver_returning(rows), log, batch_size=500)
+
+    assert n == 4
+    by_id = {c.kwargs["payload"]["ted_notice_id"]: c.kwargs["payload"]
+             for c in emit.upsert.call_args_list}
+    # every emit is an UpsertContract rollup carrying exactly the 3 fields
+    for c in emit.upsert.call_args_list:
+        assert c.args[0] == "UpsertContract"
+        assert set(c.kwargs["payload"]) == {
+            "ted_notice_id", "contract_key", "current_value", "is_current"}
+    # canonical award carries the amended (current) value
+    assert by_id["award-1"]["is_current"] is True
+    assert by_id["award-1"]["current_value"] == 1500.0
+    # the linked modification is superseded
+    assert by_id["mod-1"]["is_current"] is False
+    # exactly one orphan sibling is canonical (the latest)
+    assert by_id["orphan-new"]["is_current"] is True
+    assert by_id["orphan-old"]["is_current"] is False
+
+
+def test_no_contracts_emits_nothing():
+    log, emit = _mock_log()
+    n = collapse_modifications.collapse_modifications(_driver_returning({}), log)
+    assert n == 0
+    emit.upsert.assert_not_called()

@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from src.analysis.contract_data_source import ContractDataSource
+from src.data.graph._value_quality import canonical_count
 from src.analysis.person_data_source import PersonDataSource
 from src.api.lang import authority_name_expr, safe_lang
 from src.data.graph.neo4j_client import Neo4jClient
@@ -88,7 +89,7 @@ def company_profile(
             "  root.country AS root_country, "
             "  child.gmr_id AS child_id, child.name AS child_name, "
             "  child.country AS child_country, "
-            "  count(ct) AS contracts "
+            f"  {canonical_count('ct')} AS contracts "
             "ORDER BY contracts DESC",
             gid=gmr_id,
         ).data()

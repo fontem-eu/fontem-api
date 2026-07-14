@@ -46,8 +46,10 @@ def test_by_country_value_is_confidence_gated():
     GraphDataQualitySource(client).get_contracts_by_country()
     value_q = next(q for q in queries if "total_eur" in q)
     assert _GATE in value_q
-    # contracts are still counted in full (count is not gated).
-    assert "count(ct)" in value_q
+    # contracts are counted once per underlying contract (canonical only,
+    # collapse_modifications) and the count itself is not confidence-gated.
+    assert "THEN 1 ELSE 0 END)" in value_q
+    assert "ct.is_current" in value_q
 
 
 def test_value_timeline_is_confidence_gated():
