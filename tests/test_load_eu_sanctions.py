@@ -25,6 +25,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from fontem_event_schemas import builders as event_builders
 
 import src.etl.load_eu_sanctions as load_sanctions
 from src.etl._hooks import ResolveMatch, ResolveResult
@@ -334,9 +335,7 @@ def test_parse_persons_and_entities_typed():
 
 
 def test_subject_type_reaches_the_event_payload():
-    from fontem_event_schemas import builders as b
-
-    payload = b.upsert_sanctioned_entity(
+    payload = event_builders.upsert_sanctioned_entity(
         entity_id="p-1", eu_reference="EU.1.1",
         name="Jane Doe", subject_type="person",
     )
