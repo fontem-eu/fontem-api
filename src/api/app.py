@@ -30,6 +30,7 @@ from src.api.routers.valuation import router as valuation_router
 from src.api.routers.contracts import router as contracts_router
 from src.api.routers.data_quality import router as data_quality_router
 from src.api.routers.legislative_dq import router as legislative_dq_router
+from src.api.routers.petitions import router as petitions_router
 from src.api.routers.dq_assertions import router as dq_assertions_router
 from src.api.routers.value_review import router as value_review_router
 from src.api.routers.viz import router as viz_router
@@ -106,6 +107,7 @@ app.include_router(health_router)
 app.include_router(contracts_router)
 app.include_router(data_quality_router)
 app.include_router(legislative_dq_router)
+app.include_router(petitions_router)
 app.include_router(dq_assertions_router)
 app.include_router(value_review_router)
 app.include_router(viz_router)

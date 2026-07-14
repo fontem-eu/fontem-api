@@ -1,0 +1,17 @@
+{{- if .Values.virtuoso.enabled }}
+{{- $extra := list }}
+{{- $extra = append $extra (dict "name" "VIRTUOSO_SPARQL_URL" "value" .Values.virtuoso.sparqlEndpoint) }}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"             "etl-legal-materialize"
+      "schedule"         "45 5 * * *"
+      "module"           "src.etl.legislative.materialize_legal_acts"
+      "args"             (list)
+      "deadlineSeconds"  5400
+      "cpuRequest"       "100m"
+      "cpuLimit"         "1"
+      "memRequest"       "256Mi"
+      "memLimit"         "1Gi"
+      "extraEnv"         $extra
+      "Values"           .Values
+      "Release"          .Release) -}}
+{{- end }}
