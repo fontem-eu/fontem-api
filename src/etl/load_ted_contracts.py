@@ -729,7 +729,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     return totals
 
 
-def main(argv=None):  # pylint: disable=too-many-statements
+def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Emit UpsertAuthority + UpsertContract events for TED awards",
@@ -880,6 +880,13 @@ def main(argv=None):  # pylint: disable=too-many-statements
                     link_modifications,
                 )
                 link_modifications(driver, log)
+                # Re-collapse modification chains so current_value / is_current
+                # reflect the freshly-linked modifications (keeps company and
+                # authority value totals from double-counting restatements).
+                from .collapse_modifications import (  # pylint: disable=import-outside-toplevel
+                    collapse_modifications,
+                )
+                collapse_modifications(driver, log)
     finally:
         currency_svc.close()
         log.close()

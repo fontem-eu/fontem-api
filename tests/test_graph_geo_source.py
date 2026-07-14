@@ -79,12 +79,16 @@ def test_query_changes_shape_by_metric():
 
     source.aggregate_by_nuts(level=0, metric="contracts")
     contracts_query = session.run.call_args.args[0]
-    assert "count(DISTINCT ct)" in contracts_query
+    # canonical-only distinct count (collapse_modifications): a modification
+    # restatement must not add a second contract to the tally.
+    assert "count(DISTINCT CASE WHEN" in contracts_query
+    assert "ct.is_current" in contracts_query
     assert "Contract" in contracts_query
 
     source.aggregate_by_nuts(level=0, metric="contracts_eur")
     eur_query = session.run.call_args.args[0]
-    assert "toFloat(ct.value_eur)" in eur_query
+    # sums the collapsed current_value (falling back to value_eur)
+    assert "toFloat(coalesce(ct.current_value, ct.value_eur))" in eur_query
     assert "value_low_confidence" in eur_query  # confidence-gated
 
 
@@ -137,7 +141,8 @@ def test_entity_contracts_count_query():
     source = GraphGeoSource(neo4j_client=client)
     source.aggregate_entity_by_nuts(entity_id="abc-123", level=0, metric="contracts")
     first_query = session.run.call_args_list[0].args[0]
-    assert "count(DISTINCT ct)" in first_query
+    assert "count(DISTINCT CASE WHEN" in first_query
+    assert "ct.is_current" in first_query
     assert "Company" in first_query
 
 
@@ -147,7 +152,7 @@ def test_entity_contracts_eur_query():
     source = GraphGeoSource(neo4j_client=client)
     source.aggregate_entity_by_nuts(entity_id="abc-123", level=0, metric="contracts_eur")
     first_query = session.run.call_args_list[0].args[0]
-    assert "toFloat(ct.value_eur)" in first_query
+    assert "toFloat(coalesce(ct.current_value, ct.value_eur))" in first_query
     assert "value_low_confidence" in first_query  # confidence-gated
 
 

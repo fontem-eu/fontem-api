@@ -10,7 +10,7 @@ import logging
 
 from ...analysis.geo_source import GeoSource
 from ...services.location_service import LocationService
-from ._value_quality import trusted_value_sum
+from ._value_quality import canonical_predicate, trusted_value_sum
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ class GraphGeoSource(GeoSource):
             value_expr = "count(DISTINCT e)"
             entity_match = "(e:Company)-[:LOCATED_IN]->(sub:NUTSRegion)"
         elif metric == "contracts":
-            value_expr = "count(DISTINCT ct)"
+            value_expr = f"count(DISTINCT CASE WHEN {canonical_predicate('ct')} THEN ct END)"
             entity_match = (
                 "(e:Company)-[:LOCATED_IN]->(sub:NUTSRegion), "
                 "(ct:Contract)-[:AWARDED_TO]->(e)"
@@ -164,7 +164,7 @@ class GraphGeoSource(GeoSource):
             )
 
         value_expr = (
-            "count(DISTINCT ct)"
+            f"count(DISTINCT CASE WHEN {canonical_predicate('ct')} THEN ct END)"
             if metric == "contracts"
             else f"coalesce({trusted_value_sum('ct', cast=True)}, 0.0)"
         )

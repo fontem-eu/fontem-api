@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from ...analysis.data_quality_source import DataQualitySource
 from ..sparql.virtuoso_client import SparqlTimeout, VirtuosoClient
-from ._value_quality import trusted_value_sum
+from ._value_quality import canonical_count, trusted_value_sum
 from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,7 @@ class GraphDataQualitySource(DataQualitySource):
             return session.run(
                 "MATCH (ct:Contract) "
                 "WHERE ct.country IS NOT NULL "
-                "RETURN ct.country AS country, count(ct) AS contracts, "
+                f"RETURN ct.country AS country, {canonical_count('ct')} AS contracts, "
                 f"  {_TRUSTED_VALUE_SUM} AS total_eur "
                 "ORDER BY contracts DESC"
             ).data()
@@ -684,8 +684,8 @@ class GraphDataQualitySource(DataQualitySource):
             row = session.run(
                 "MATCH (a:Authority)-[:AWARDED]->(ct:Contract)"
                 "-[:AWARDED_TO]->(c:Company) "
-                "WITH a, c, count(ct) AS n, "
-                "     sum(coalesce(ct.value_eur, 0)) AS s "
+                f"WITH a, c, {canonical_count('ct')} AS n, "
+                f"     {trusted_value_sum('ct')} AS s "
                 "RETURN count(*)   AS pairs, "
                 "       sum(s)     AS total_eur, "
                 "       sum(n)     AS total_contracts"

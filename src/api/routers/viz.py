@@ -15,11 +15,17 @@ from fastapi import APIRouter, Query
 
 from src.data.graph.neo4j_client import Neo4jClient
 
+from src.data.graph._value_quality import canonical_predicate
+
 router = APIRouter(prefix="/viz", tags=["viz"])
 
 
-_BIDDER_BREAKDOWN = """
-MATCH (co:Company {gmr_id: $entity_id})-[:AWARDED_TO]-(c:Contract)
+# Only canonical contracts (collapse_modifications): a modification notice
+# restates the same contract, so counting it again would inflate a bidder
+# bucket. Non-modification / stamped-canonical nodes only.
+_BIDDER_BREAKDOWN = f"""
+MATCH (co:Company {{gmr_id: $entity_id}})-[:AWARDED_TO]-(c:Contract)
+WHERE {canonical_predicate('c')}
 RETURN c.tenders_received AS bidders, count(c) AS n
 """
 

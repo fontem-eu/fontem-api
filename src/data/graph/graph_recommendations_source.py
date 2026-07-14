@@ -16,6 +16,7 @@ entities with millions of zero-EUR contracts.
 """
 from __future__ import annotations
 
+from src.data.graph._value_quality import canonical_count, trusted_value_sum
 from src.data.graph.neo4j_client import Neo4jClient
 from src.services.location_service import LocationService
 
@@ -51,12 +52,12 @@ class GraphRecommendationsSource:
         alpha2 = _NUTS_ALPHA2_OVERRIDES.get(alpha2, alpha2)
         with self._neo4j.session() as session:
             rows = session.run(
-                """
-                MATCH (c:Company)-[:LOCATED_IN]->(:NUTSRegion {code: $alpha2, level: 0})
+                f"""
+                MATCH (c:Company)-[:LOCATED_IN]->(:NUTSRegion {{code: $alpha2, level: 0}})
                 MATCH (c)<-[:AWARDED_TO]-(ct:Contract)
                 WITH c,
-                     sum(toFloat(ct.value_eur)) AS total_value,
-                     count(ct)                  AS contract_count
+                     {trusted_value_sum('ct', cast=True)} AS total_value,
+                     {canonical_count('ct')}              AS contract_count
                 WHERE total_value > 0
                 RETURN c.gmr_id          AS id,
                        c.name            AS name,
@@ -83,11 +84,11 @@ class GraphRecommendationsSource:
         """Authorities in the country, by total contract EUR awarded."""
         with self._neo4j.session() as session:
             rows = session.run(
-                """
-                MATCH (a:Authority {country: $country})-[:AWARDED]->(ct:Contract)
+                f"""
+                MATCH (a:Authority {{country: $country}})-[:AWARDED]->(ct:Contract)
                 WITH a,
-                     sum(toFloat(ct.value_eur)) AS total_value,
-                     count(ct)                  AS contract_count
+                     {trusted_value_sum('ct', cast=True)} AS total_value,
+                     {canonical_count('ct')}              AS contract_count
                 WHERE total_value > 0
                 RETURN a.authority_id    AS id,
                        a.name            AS name,
