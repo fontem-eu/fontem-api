@@ -64,7 +64,8 @@ FULL_ROWMAP = {
     ],
     "MATCH (l:Lobbyist)": [
         {"id": "l1", "title": "Apple Lobby", "acronym": "AL", "country": "BEL",
-         "category": "In-house", "reg_date": "2021-03-01"},
+         "category": "In-house", "reg_date": "2021-03-01", "goals": None,
+         "url": "www.apple-lobby.eu"},
     ],
     "MATCH (ct:Contract)": [
         {"id": "t1", "title": "Apple procurement", "country": "PRT",
@@ -74,7 +75,7 @@ FULL_ROWMAP = {
         {"id": "d1", "title": "Apple orchard cohesion", "country": "PRT",
          "start_date": "2020-01-01", "fund": "ERDF", "nuts_code": "PT170",
          "description": "Planting apple orchards across the Norte region",
-         "programme": "ERDF Norte"},
+         "programme": "ERDF Norte", "company_gmr_id": "gmr-benef-1"},
     ],
     "MATCH (s:SanctionedEntity)": [
         {"id": "s1", "title": "Apple Sanctioned", "regime": "EU",
@@ -307,3 +308,11 @@ def test_legislation_virtuoso_error_degrades_to_empty():
     assert r.status_code == 200
     assert r.json()["counts"]["legislation"] == 0
     cleanup_dishka()
+
+
+def test_cohesion_and_lobbyist_expose_link_targets():
+    results = _client().get("/search/results?q=apple").json()["results"]
+    cohesion = next(x for x in results if x["type"] == "cohesion")
+    assert cohesion["meta"]["company_gmr_id"] == "gmr-benef-1"
+    lobbyist = next(x for x in results if x["type"] == "lobbyist")
+    assert lobbyist["meta"]["url"] == "www.apple-lobby.eu"

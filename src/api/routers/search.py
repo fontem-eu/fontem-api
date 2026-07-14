@@ -243,7 +243,7 @@ def _lobbyists(session, params, want_geo_filter):
         "RETURN l.disclosure_id AS id, nm AS title, "
         "  l.detail_acronym AS acronym, l.detail_country AS country, "
         "  l.detail_category AS category, "
-        "  l.detail_goals AS goals, "
+        "  l.detail_goals AS goals, l.url AS url, "
         "  l.detail_registration_date AS reg_date "
         "ORDER BY size(nm) ASC, nm ASC "
         "LIMIT $cap",
@@ -259,7 +259,7 @@ def _lobbyists(session, params, want_geo_filter):
             "date": r.get("reg_date"),
             "score": 0,
             "context": _clip(r.get("goals")),
-            "meta": {"category": r.get("category")},
+            "meta": {"category": r.get("category"), "url": r.get("url")},
         }
         for r in rows
     ]
@@ -328,7 +328,8 @@ def _cohesion(session, params, want_geo_filter):
         "RETURN d.disclosure_id AS id, d.title AS title, "
         "  d.detail_country AS country, d.detail_start_date AS start_date, "
         "  d.detail_fund AS fund, d.detail_nuts_code AS nuts_code, "
-        "  d.detail_description AS description, d.detail_programme AS programme "
+        "  d.detail_description AS description, d.detail_programme AS programme, "
+        "  d.company_gmr_id AS company_gmr_id "
         "ORDER BY size(d.title) ASC "
         "LIMIT $cap",
         **params,
@@ -343,7 +344,10 @@ def _cohesion(session, params, want_geo_filter):
             "date": r.get("start_date"),
             "score": 0,
             "context": _clip(r.get("description")) or _ctx(r.get("programme")),
-            "meta": {"nuts_code": r.get("nuts_code"), "fund": r.get("fund")},
+            "meta": {
+                "nuts_code": r.get("nuts_code"), "fund": r.get("fund"),
+                "company_gmr_id": r.get("company_gmr_id"),
+            },
         }
         for r in rows
     ]
