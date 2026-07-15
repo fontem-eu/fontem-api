@@ -118,11 +118,18 @@ def answer_ref_to_celex(ref: str) -> str | None:
 
 
 def sparql(endpoint: str, query: str) -> list[dict]:
-    """SELECT against the mirror; unwraps bindings to plain strings."""
+    """SELECT against the mirror; unwraps bindings to plain strings.
+
+    Timeout defaults high: prod-sized spine pages (keyset GROUP BY over
+    ~500k works with title joins) run minutes when Virtuoso is busy —
+    e.g. while the full-text index build churns. 120s produced
+    ReadTimeouts on the first prod run.
+    """
+    timeout = float(os.environ.get("MATERIALIZER_SPARQL_TIMEOUT", "600"))
     resp = httpx.post(
         endpoint, data={"query": query,
                         "format": "application/sparql-results+json"},
-        timeout=120,
+        timeout=timeout,
     )
     resp.raise_for_status()
     out = []
