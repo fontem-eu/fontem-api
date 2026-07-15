@@ -242,5 +242,8 @@ def cellar_ft_index_check(virtuoso) -> dict:
         '?t bif:contains "regulation" }'
     )
     n = int(rows[0].get("n") or 0) if rows else 0
-    return {"violations": 0 if n > 0 else 1,
-            "detail": f"ft matches for canary term: {n}"}
+    # 1000, not >0: an in-progress index build produces its first matches
+    # long before search is usable (observed: prod at 1 match while ~95%
+    # of titles were still unindexed). Shared floor reference: 14554.
+    return {"violations": 0 if n >= 1000 else 1,
+            "detail": f"ft matches for canary term: {n} (min 1000)"}
