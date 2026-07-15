@@ -605,6 +605,9 @@ def test_legal_act_spine_check_tolerates_5pct_lag():
 def test_cellar_ft_index_check():
     built = consistency.cellar_ft_index_check(_PetFakeVirtuoso(48000))
     assert built["violations"] == 0
+    # a sliver of matches means the build is in progress, not done
+    sliver = consistency.cellar_ft_index_check(_PetFakeVirtuoso(1))
+    assert sliver["violations"] == 1
     unbuilt = consistency.cellar_ft_index_check(_PetFakeVirtuoso(0))
     assert unbuilt["violations"] == 1
     assert "canary" in unbuilt["detail"]
