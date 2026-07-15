@@ -178,3 +178,71 @@ def cellar_mirror_check(mirror_url: str, http_get, n: int = 8,
                 break
     return {"violations": len(mismatches), "total": len(works),
             "detail": "; ".join(mismatches[:5])}
+
+
+def petition_parity_check(neo4j_client, virtuoso) -> dict:
+    """Petition counts must match across Neo4j and Virtuoso.
+
+    Both sinks project the same UpsertPetition stream (full-register
+    upserts, no graph-replace bracket), so a count drift means one sink
+    dropped or lagged events.
+    """
+    with neo4j_client.session() as session:
+        graph_n = session.run(
+            "MATCH (p:Petition) RETURN count(p) AS n"
+        ).single()["n"]
+    rows = virtuoso.query(
+        "SELECT (COUNT(?s) AS ?n) WHERE { ?s a "
+        "<http://data.fontem.eu/ontology#Petition> }"
+    )
+    virt_n = int(rows[0].get("n") or 0) if rows else 0
+    diff = abs(int(graph_n) - virt_n)
+    return {"violations": diff,
+            "detail": f"neo4j={graph_n} virtuoso={virt_n}"}
+
+
+def legal_act_spine_check(neo4j_client, virtuoso) -> dict:
+    """The :LegalAct spine tracks the mirror's sector-3 corpus.
+
+    The materializer sweeps daily after the mirror delta, so the graph may
+    trail the mirror briefly; more than 5% shortfall (or any graph excess)
+    counts as violations.
+    """
+    with neo4j_client.session() as session:
+        graph_n = session.run(
+            "MATCH (a:LegalAct) WHERE a.source = 'cellar-mirror' "
+            "RETURN count(a) AS n"
+        ).single()["n"]
+    rows = virtuoso.query(
+        "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#> "
+        f"SELECT (COUNT(DISTINCT ?cx) AS ?n) FROM <{MIRROR_GRAPH}> WHERE {{ "
+        "?w cdm:resource_legal_id_celex ?cx . "
+        'FILTER(STRSTARTS(STR(?cx), "3")) }'
+        "}"
+    )
+    mirror_n = int(rows[0].get("n") or 0) if rows else 0
+    graph_n = int(graph_n)
+    shortfall = max(0, mirror_n - graph_n - int(mirror_n * 0.05))
+    excess = max(0, graph_n - mirror_n)
+    return {"violations": shortfall + excess,
+            "detail": f"graph={graph_n} mirror_sector3={mirror_n}"}
+
+
+def cellar_ft_index_check(virtuoso) -> dict:
+    """The full-text index over the mirror is built and searchable.
+
+    bif:contains on a term guaranteed present in legal titles must match.
+    Zero matches means the VTLOG backlog is unprocessed — exactly the
+    silent state that made legislation search return nothing for weeks
+    before 2026-07-13 (index rule existed, batch never ran).
+    """
+    rows = virtuoso.query(
+        "PREFIX cdm: <http://publications.europa.eu/ontology/cdm#> "
+        f"SELECT (COUNT(?e) AS ?n) FROM <{MIRROR_GRAPH}> WHERE {{ "
+        "?e cdm:expression_title ?t . "
+        '?t bif:contains "regulation" }'
+        "}"
+    )
+    n = int(rows[0].get("n") or 0) if rows else 0
+    return {"violations": 0 if n > 0 else 1,
+            "detail": f"ft matches for canary term: {n}"}
