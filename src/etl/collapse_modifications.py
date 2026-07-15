@@ -63,8 +63,7 @@ WHERE (a.notice_type IS NULL OR a.notice_type <> $mod)
   AND EXISTS { (:Contract)-[:MODIFIES]->(a) }
 MATCH (m:Contract)-[:MODIFIES]->(a)
 WITH a, [x IN collect(m) + [a] WHERE x.value_eur IS NOT NULL] AS valued
-CALL {
-  WITH valued
+CALL (valued) {
   UNWIND valued AS x
   WITH x ORDER BY x.publication_date DESC
   RETURN collect(x.value_eur)[0] AS latest_value

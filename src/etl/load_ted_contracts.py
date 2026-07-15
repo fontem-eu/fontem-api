@@ -887,6 +887,15 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals
                     collapse_modifications,
                 )
                 collapse_modifications(driver, log)
+                # Project the freshly-loaded notices into the Contract/Notice
+                # model (one :Contract entity per real contract; notices become
+                # :Notice-[:NOTICE_OF]->). Idempotent — only new notice nodes
+                # (still :Contract, carrying ted_notice_id) are converted — so
+                # the notice-grain double-count can never re-enter aggregates.
+                from .project_contracts import (  # pylint: disable=import-outside-toplevel
+                    migrate as project_contracts,
+                )
+                project_contracts(driver)
     finally:
         currency_svc.close()
         log.close()
