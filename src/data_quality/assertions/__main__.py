@@ -91,6 +91,12 @@ def _build_consistency_runner(client: Neo4jClient):
         if entity_type == "CellarMirror":
             return consistency.cellar_mirror_check(
                 os.environ["VIRTUOSO_SPARQL_URL"], _http_get)
+        if entity_type == "PetitionParity":
+            return consistency.petition_parity_check(client, virtuoso)
+        if entity_type == "LegislativeSpine":
+            return consistency.legal_act_spine_check(client, virtuoso)
+        if entity_type == "CellarFtIndex":
+            return consistency.cellar_ft_index_check(virtuoso)
         return consistency.check(client, virtuoso, entity_type)
     return _run
 

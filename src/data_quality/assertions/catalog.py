@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """Declarative data-quality assertion catalog.
 
 Each :class:`Assertion` is one invariant we expect the served graph
@@ -936,6 +937,104 @@ ASSERTIONS: list[Assertion] = [
         "Yahoo throttling or a dead cron shows up here first. 0.5 is "
         "deliberately loose while the initial multi-night backlog "
         "clears; tighten once universe_backlog approaches zero.",
+    ),
+    # ── Petitions + legislative spine (petitions plan P0-P2) ──────────
+    Assertion(
+        "keys.petition_unique", KEYS,
+        "Petitions are unique per (system, petition_id)", BLOCK, "cypher",
+        "MATCH (p:Petition) WITH p.system AS s, p.petition_id AS id, "
+        "count(*) AS c WHERE c > 1 RETURN count(*) AS violations",
+        zero_violations("duplicate petition keys"),
+        "The sink MERGEs petitions on (system, petition_id). A duplicate "
+        "means the composite key regressed and every daily re-sync would "
+        "fork the register into parallel node sets.",
+    ),
+    Assertion(
+        "coverage.petitions_present", COVERAGE,
+        "The ECI register is loaded (>=100 petitions)", WARN, "cypher",
+        "MATCH (p:Petition {system: 'eu-eci'}) RETURN count(p) AS found",
+        at_least("found", 100, "eu-eci petitions"),
+        "The register holds 132 initiatives (2026-07); the daily sync "
+        "re-emits all of them. A count under 100 means the sync died or "
+        "the offset-pagination bug (150 raw -> 52 unique, fixed "
+        "2026-07-14) came back in another shape.",
+    ),
+    Assertion(
+        "coverage.petitions_answered_dated", COVERAGE,
+        "ANSWERED petitions carry an answered_date", WARN, "cypher",
+        "MATCH (p:Petition {status: 'ANSWERED'}) "
+        "WHERE p.answered_date IS NULL RETURN count(*) AS violations",
+        zero_violations("answered petitions without a date"),
+        "The answer date comes from the register's progress timeline; its "
+        "absence on an ANSWERED initiative means the milestone parse "
+        "regressed — and the petitions funnel story needs that date.",
+    ),
+    Assertion(
+        "freshness.petition_snapshots_daily", FRESHNESS,
+        "Supporter snapshots landed within the last 2 days", WARN, "sql",
+        "SELECT count(*) AS found FROM events.petition_supporters "
+        "WHERE snapshot_date >= current_date - 1",
+        at_least("found", 100, "recent supporter snapshots"),
+        "The daily ECI sync writes one snapshot row per initiative into "
+        "events.petition_supporters — the time series behind petition "
+        "momentum charts. Missing rows mean the 05:10 cron failed and the "
+        "series has a hole it can never backfill (supporter counts are "
+        "only observable live).",
+    ),
+    Assertion(
+        "consistency.petitions_neo4j_virtuoso", CONSISTENCY,
+        "Petition counts match across Neo4j and Virtuoso", WARN,
+        "consistency", "PetitionParity",
+        zero_violations("petition count drift across stores"),
+        "Both sinks project the same UpsertPetition stream; a drift means "
+        "one sink dropped or lagged events (no graph-replace bracket is "
+        "involved, so counts must match exactly once drained).",
+    ),
+    Assertion(
+        "consistency.legal_act_spine", CONSISTENCY,
+        "The :LegalAct spine tracks the mirror's sector-3 corpus", WARN,
+        "consistency", "LegislativeSpine",
+        zero_violations("spine shortfall beyond 5% (or excess)"),
+        "The materializer sweeps the mirror daily (05:45, after the 04:30 "
+        "delta). During the prod 1949->2026 backfill the mirror grows "
+        "daily and the spine follows next morning — hence the 5% "
+        "tolerance. Excess is never tolerated: acts in the graph that the "
+        "mirror doesn't have means the spine outlived a mirror wipe.",
+    ),
+    Assertion(
+        "coverage.legal_act_titles", COVERAGE,
+        "Materialized legal acts carry a title (EN or FR)", WARN, "cypher",
+        "MATCH (a:LegalAct) WHERE a.source = 'cellar-mirror' "
+        "WITH count(a) AS total, "
+        "count(CASE WHEN a.title_en IS NOT NULL OR a.title_fr IS NOT NULL "
+        "THEN 1 END) AS covered RETURN total, covered",
+        min_coverage(0.97, "titled legal acts"),
+        "A :LegalAct without any title renders as a bare CELEX on petition "
+        "pages and in future story links. Some old acts genuinely lack "
+        "EN/FR expressions in CELLAR, hence 97% not 100%.",
+    ),
+    Assertion(
+        "refs.petition_edges_provenance", REFS,
+        "Petition->legislation edges carry provenance", BLOCK, "cypher",
+        "MATCH (:Petition)-[r:REGISTERED_BY|ANSWERED_BY|LED_TO]->(:LegalAct) "
+        "WHERE r.provenance IS NULL RETURN count(*) AS violations",
+        zero_violations("edges without provenance"),
+        "Every petition->legislation edge is written by the materializer "
+        "with provenance='eci-register' and the match method. An edge "
+        "without provenance was written by something else — that path "
+        "must not exist.",
+    ),
+    Assertion(
+        "consistency.cellar_ft_searchable", CONSISTENCY,
+        "The mirror's full-text index is built and searchable", WARN,
+        "consistency", "CellarFtIndex",
+        zero_violations("ft canary misses"),
+        "bif:contains on a term guaranteed present in legal titles must "
+        "match. Zero matches = the VTLOG batch backlog is unprocessed — "
+        "the exact silent state that left legislation search empty even "
+        "though the index rule existed (found 2026-07-13: 15.2M rows "
+        "pending on shared, 1.2B on prod). This assertion is the 'is the "
+        "index actually done' signal during and after backfills.",
     ),
 ]
 

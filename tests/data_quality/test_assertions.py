@@ -20,6 +20,7 @@ from src.data_quality.assertions.catalog import (
     zero_violations,
     zero_with_detail,
 )
+from src.data_quality.assertions import consistency
 from src.data_quality.assertions.consistency import cellar_mirror_check
 from src.data_quality.assertions.runner import (
     AssertionResult, ERROR, FAIL, PASS, evaluate_assertion, exit_code,
@@ -376,7 +377,6 @@ class _FakeVirtuoso:
 
 
 def test_consistency_check_passes_when_aligned_flags_when_not():
-    from src.data_quality.assertions import consistency  # pylint: disable=import-outside-toplevel
     neo = _FakeNeoClient([
         {"_key": "n1", "value_eur": 100.0, "procedure_type": "open"},   # aligned
         {"_key": "n2", "value_eur": 200.0, "procedure_type": "open"},   # proc mismatch
@@ -542,3 +542,69 @@ def test_every_assertion_has_a_description():
     description — every assertion must carry one."""
     empty = [a.id for a in ASSERTIONS if not a.rationale.strip()]
     assert not empty, f"assertions without a description: {empty}"
+
+
+# ── petitions + legislative spine checks (2026-07-15) ──────────────────
+
+
+class _PetFakeSession:
+    def __init__(self, n):
+        self._n = n
+
+    def run(self, _query, **_params):
+        n = self._n
+
+        class _R:
+            def single(self):
+                return {"n": n}
+        return _R()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _PetFakeNeo4j:
+    def __init__(self, n):
+        self._n = n
+
+    def session(self):
+        return _PetFakeSession(self._n)
+
+
+class _PetFakeVirtuoso:
+    def __init__(self, n):
+        self._n = n
+
+    def query(self, _q):
+        return [{"n": str(self._n)}]
+
+
+def test_petition_parity_check():
+    ok = consistency.petition_parity_check(_PetFakeNeo4j(132), _PetFakeVirtuoso(132))
+    assert ok["violations"] == 0
+    drift = consistency.petition_parity_check(_PetFakeNeo4j(132), _PetFakeVirtuoso(120))
+    assert drift["violations"] == 12
+    assert "neo4j=132" in drift["detail"]
+
+
+def test_legal_act_spine_check_tolerates_5pct_lag():
+    # graph trails the mirror by <5% — daily sweep hasn't run yet: OK
+    lag = consistency.legal_act_spine_check(_PetFakeNeo4j(9700), _PetFakeVirtuoso(10000))
+    assert lag["violations"] == 0
+    # >5% shortfall — materializer broken
+    broken = consistency.legal_act_spine_check(_PetFakeNeo4j(5000), _PetFakeVirtuoso(10000))
+    assert broken["violations"] > 0
+    # graph excess is never tolerated (spine outlived a mirror wipe)
+    excess = consistency.legal_act_spine_check(_PetFakeNeo4j(10100), _PetFakeVirtuoso(10000))
+    assert excess["violations"] == 100
+
+
+def test_cellar_ft_index_check():
+    built = consistency.cellar_ft_index_check(_PetFakeVirtuoso(48000))
+    assert built["violations"] == 0
+    unbuilt = consistency.cellar_ft_index_check(_PetFakeVirtuoso(0))
+    assert unbuilt["violations"] == 1
+    assert "canary" in unbuilt["detail"]
