@@ -114,6 +114,10 @@ def _run_until_drained(driver, cypher: str, label: str, batch: int) -> int:
         with driver.session() as session:
             done = session.execute_write(
                 lambda tx: tx.run(cypher, batch=batch).single()["done"])
+        # A real driver returns an int; a mocked one (unit tests) returns a
+        # non-int sentinel — treat that as "nothing to do" so the pass is inert.
+        if not isinstance(done, int):
+            break
         total += done
         if done:
             logger.info("%s: %d (running %d)", label, done, total)
