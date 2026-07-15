@@ -16,7 +16,7 @@ from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
     ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
     CONSISTENCY,
-    COVERAGE, ORACLE, Assertion, by_id, le_threshold, min_coverage, oracle_band,
+    COVERAGE, ORACLE, GRAIN, Assertion, by_id, le_threshold, min_coverage, oracle_band,
     zero_violations,
     zero_with_detail,
 )
@@ -38,7 +38,7 @@ def test_ids_unique():
 
 def test_families_and_severities_valid():
     fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE, ORACLE,
-            CONSISTENCY}
+            CONSISTENCY, GRAIN}
     for a in ASSERTIONS:
         assert a.family in fams, a.id
         assert a.severity in (BLOCK, WARN), a.id
@@ -65,7 +65,7 @@ def test_values_block_except_documented_warn():
 def test_engine_matches_family():
     # Graph families use cypher; events families use sql.
     for a in ASSERTIONS:
-        if a.family in (KEYS, REFS, VALUES, GOLDEN, COVERAGE, ORACLE):
+        if a.family in (KEYS, REFS, VALUES, GOLDEN, COVERAGE, ORACLE, GRAIN):
             assert a.engine == "cypher", a.id
         elif a.family == CONSISTENCY:
             assert a.engine == "consistency", a.id

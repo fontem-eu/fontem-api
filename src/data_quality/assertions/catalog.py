@@ -35,6 +35,7 @@ GOLDEN = "golden"        # known-true ground-truth facts (graph)
 COVERAGE = "coverage"    # field-population coverage (graph)
 ORACLE = "oracle"        # computed indicators validated vs published external figures
 CONSISTENCY = "consistency"  # Neo4j <-> Virtuoso cross-store agreement (sampled)
+GRAIN = "grain"          # Contract/Notice model integrity (label carries the grain)
 
 Evaluator = Callable[[Mapping[str, Any]], "tuple[bool, str]"]
 
@@ -205,6 +206,29 @@ ASSERTIONS: list[Assertion] = [
         "MATCH (c:Company) RETURN count(*) AS total, count(*) - count(c.gmr_id) AS violations",
         zero_violations("companies missing gmr_id", "total"),
         "gmr_id is the canonical join key; a null one orphans the node.",
+    ),
+    # ---- Family: grain integrity (BLOCK) — the Contract/Notice model ------
+    # A :Contract must be the entity (one per real contract), never a raw TED
+    # notice. If a modification notice ever carries the :Contract label again,
+    # value aggregates silently double-count restatements — the exact bug the
+    # Contract/Notice model exists to make structurally impossible.
+    Assertion(
+        "grain.no_contract_is_a_modification", GRAIN,
+        "No :Contract node is a modification notice", BLOCK, "cypher",
+        "MATCH (c:Contract) RETURN count(*) AS total, "
+        "count(CASE WHEN c.notice_type = 'can-modif' THEN 1 END) AS violations",
+        zero_violations("modification notices mislabelled :Contract", "total"),
+        "A :Contract must be a real contract entity, not a can-modif notice. "
+        "Non-zero => the projection regressed and totals double-count.",
+    ),
+    Assertion(
+        "grain.contract_has_key", GRAIN,
+        "Every :Contract has a contract_key", BLOCK, "cypher",
+        "MATCH (c:Contract) RETURN count(*) AS total, "
+        "count(*) - count(c.contract_key) AS violations",
+        zero_violations("contracts missing contract_key", "total"),
+        "contract_key is the entity identity the notices group under; a null "
+        "one means an unprojected notice leaked into the :Contract label.",
     ),
     Assertion(
         "keys.company_gmr_id_unique", KEYS,
