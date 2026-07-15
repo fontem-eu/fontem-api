@@ -218,7 +218,6 @@ def legal_act_spine_check(neo4j_client, virtuoso) -> dict:
         f"SELECT (COUNT(DISTINCT ?cx) AS ?n) FROM <{MIRROR_GRAPH}> WHERE {{ "
         "?w cdm:resource_legal_id_celex ?cx . "
         'FILTER(STRSTARTS(STR(?cx), "3")) }'
-        "}"
     )
     mirror_n = int(rows[0].get("n") or 0) if rows else 0
     graph_n = int(graph_n)
@@ -241,7 +240,6 @@ def cellar_ft_index_check(virtuoso) -> dict:
         f"SELECT (COUNT(?e) AS ?n) FROM <{MIRROR_GRAPH}> WHERE {{ "
         "?e cdm:expression_title ?t . "
         '?t bif:contains "regulation" }'
-        "}"
     )
     n = int(rows[0].get("n") or 0) if rows else 0
     return {"violations": 0 if n > 0 else 1,
