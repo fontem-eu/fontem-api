@@ -77,7 +77,7 @@ def test_load_artifact_chunks_and_paces(tmp_path, monkeypatch):
                             + mc.MIRROR_GRAPH) for q in calls)
 
 
-def test_recent_mode_windows(monkeypatch):
+def test_recent_mode_windows(monkeypatch, tmp_path):
     """--recent = previous + current month, computed at run time — the
     daily cron needs no date templating."""
 
@@ -96,6 +96,6 @@ def test_recent_mode_windows(monkeypatch):
         captured.setdefault("tags", []).append(tag)
         return real_write(lines, out_dir, tag)
     monkeypatch.setattr(mc, "write_artifact", spy_write)
-    rc = mc.main(["--recent", "--skip-load", "--out", "/tmp/claude-1000/mc-test"])
+    rc = mc.main(["--recent", "--skip-load", "--out", str(tmp_path)])
     assert rc == 0
     assert captured["tags"] == ["2026-06", "2026-07"]
