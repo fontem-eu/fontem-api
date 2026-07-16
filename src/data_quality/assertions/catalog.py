@@ -579,6 +579,44 @@ ASSERTIONS: list[Assertion] = [
         "procedure_type is always in eForms; low coverage means the loader "
         "or re-ingest hasn't populated it yet.",
     ),
+    # ---- Era guards: the class of bug that hid for years ------------------
+    # The 2026-only bidder check below passed at 59% while 2020-2022 sat at
+    # exactly 0% — 40,600 contracts with no bidder data at all, because the
+    # legacy TED dialects were never parsed. A published analysis then
+    # reported those competed contracts as Hungarian "non-disclosure". A
+    # coverage bar on one recent year cannot see a dead era; these can.
+    Assertion(
+        "coverage.no_year_without_bidder_data", COVERAGE,
+        "No year of awards has zero bidder coverage", BLOCK, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= '2011-01-01' "
+        "WITH left(c.publication_date, 4) AS yr, count(*) AS n, "
+        "     count(c.tenders_received) AS covered "
+        "WHERE n >= 500 "
+        "RETURN count(*) AS total, "
+        "       count(CASE WHEN covered = 0 THEN 1 END) AS violations",
+        zero_violations("years with 0% bidder coverage", "total"),
+        "A year with hundreds of awards and not one bidder count is never the "
+        "buyers going quiet in unison — it is a dialect we cannot parse. TED "
+        "publishes the figure as ReceivedSubmissionsStatistics (eForms), "
+        "NB_TENDERS_RECEIVED (F03_2014) or OFFERS_RECEIVED_NUMBER (R2.0.7). "
+        "Zero for a whole year means one of those is going unread.",
+    ),
+    Assertion(
+        "coverage.no_year_of_modifications_without_awards", COVERAGE,
+        "No year holds modifications but no awards", BLOCK, "cypher",
+        "MATCH (n:Notice) WHERE n.publication_date >= '2011-01-01' "
+        "WITH left(n.publication_date, 4) AS yr, "
+        "     count(CASE WHEN n.notice_kind = 'award' THEN 1 END) AS awards, "
+        "     count(CASE WHEN n.notice_kind = 'modification' THEN 1 END) AS mods "
+        "WHERE mods >= 100 "
+        "RETURN count(*) AS total, "
+        "       count(CASE WHEN awards = 0 THEN 1 END) AS violations",
+        zero_violations("years with modifications but no awards", "total"),
+        "Contracts are amended, so a year with modifications had awards too. "
+        "Holding one without the other means the award load never ran for that "
+        "era (2020-2022 sat like this: 94k modifications, zero awards), which "
+        "silently strips both the bidder data and the original award value.",
+    ),
     Assertion(
         "coverage.contract_bidder_count_2026", COVERAGE,
         "2026 contracts carry tenders_received (>=40%)", WARN, "cypher",
