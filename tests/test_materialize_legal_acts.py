@@ -61,16 +61,19 @@ def test_answer_ref_to_celex():
 
 
 def test_spine_pages_until_short_page(monkeypatch):
-    pages = [
+    responses = [
+        # page 1: keys, then VALUES-bound details
+        [{"celex": "32024D0001"}, {"celex": "32024D0002"}],
         [{"celex": "32024D0001", "date": "2024-01-01"},
          {"celex": "32024D0002"}],
+        # page 2: no more keys
         [],
     ]
     calls = []
 
     def fake_sparql(_endpoint, query):
         calls.append(query)
-        return pages.pop(0)
+        return responses.pop(0)
 
     monkeypatch.setattr(
         "src.etl.legislative.materialize_legal_acts.sparql", fake_sparql)
@@ -79,9 +82,11 @@ def test_spine_pages_until_short_page(monkeypatch):
     driver = _FakeDriver()
     n = materialize_spine("http://x", driver)
     assert n == 2
-    # keyset: second query filters past the last celex of page one
-    assert '> "32024D0002"' in calls[1]
-    # a MERGE batch was written
+    # keys page is join-free; details are VALUES-bound to that page
+    assert "SELECT DISTINCT ?celex" in calls[0]
+    assert 'VALUES ?celex { "32024D0001" "32024D0002" }' in calls[1]
+    # keyset: the next keys query filters past the last celex of page one
+    assert '> "32024D0002"' in calls[2]
     assert any("MERGE (a:LegalAct" in q for q, _ in driver.calls)
 
 

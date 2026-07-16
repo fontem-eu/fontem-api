@@ -42,16 +42,35 @@ MIRROR_GRAPH = "http://data.fontem.eu/graph/mirror/cellar/eu"
 PAGE = 2000
 _ANSWER_REF_RE = re.compile(r"^C\((\d{4})\)(\d{1,5})$")
 
-_SPINE_QUERY = """
+# Two-phase paging: the celex keyset page is index-cheap (no joins, no
+# aggregation); details are then fetched VALUES-bound per page. The
+# original single-query sweep (GROUP BY + expression joins over the whole
+# graph, repeated per page) participated in THREE prod Virtuoso crashes
+# whenever any other load ran concurrently (index build 2x, walk 1x).
+_SPINE_KEYS_QUERY = """
+PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+SELECT DISTINCT ?celex
+WHERE {{
+  GRAPH <{graph}> {{
+    ?w cdm:resource_legal_id_celex ?cx .
+    BIND(STR(?cx) AS ?celex)
+    FILTER(STRSTARTS(?celex, "3") && ?celex > "{after}")
+  }}
+}}
+ORDER BY ?celex
+LIMIT {page}
+"""
+
+_SPINE_DETAILS_QUERY = """
 PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
 SELECT ?celex (SAMPLE(?d) AS ?date) (SAMPLE(?e) AS ?eli)
        (SAMPLE(?tEn) AS ?title_en) (SAMPLE(?tFr) AS ?title_fr)
        (SAMPLE(?f) AS ?in_force)
 WHERE {{
   GRAPH <{graph}> {{
+    VALUES ?celex {{ {values} }}
     ?w cdm:resource_legal_id_celex ?cx .
-    BIND(STR(?cx) AS ?celex)
-    FILTER(STRSTARTS(?celex, "3") && ?celex > "{after}")
+    FILTER(STR(?cx) = ?celex)
     OPTIONAL {{ ?w cdm:work_date_document ?dd . BIND(STR(?dd) AS ?d) }}
     OPTIONAL {{ ?w cdm:resource_legal_eli ?el . BIND(STR(?el) AS ?e) }}
     OPTIONAL {{ ?w cdm:resource_legal_in-force ?ff . BIND(STR(?ff) AS ?f) }}
@@ -70,8 +89,6 @@ WHERE {{
   }}
 }}
 GROUP BY ?celex
-ORDER BY ?celex
-LIMIT {page}
 """
 
 _LOOKUP_QUERY = """
@@ -148,10 +165,13 @@ def materialize_spine(endpoint: str, driver) -> int:
     total = 0
     after = ""
     while True:
-        rows = sparql(endpoint, _SPINE_QUERY.format(
+        keys = sparql(endpoint, _SPINE_KEYS_QUERY.format(
             graph=MIRROR_GRAPH, after=after, page=PAGE))
-        if not rows:
+        if not keys:
             break
+        values = " ".join(f'"{k["celex"]}"' for k in keys)
+        rows = sparql(endpoint, _SPINE_DETAILS_QUERY.format(
+            graph=MIRROR_GRAPH, values=values))
         batch = [{
             "celex": r["celex"],
             "date_document": r.get("date"),
@@ -174,9 +194,9 @@ def materialize_spine(endpoint: str, driver) -> int:
                 batch=batch,
             )
         total += len(rows)
-        after = rows[-1]["celex"]
+        after = keys[-1]["celex"]
         logger.info("spine: %d nodes (through %s)", total, after)
-        if len(rows) < PAGE:
+        if len(keys) < PAGE:
             break
     return total
 
