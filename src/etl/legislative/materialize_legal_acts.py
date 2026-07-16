@@ -61,16 +61,20 @@ ORDER BY ?celex
 LIMIT {page}
 """
 
+# VALUES are typed ^^xsd:string to match the stored literals directly —
+# Virtuoso 7 distinguishes plain from typed literals, and a STR() filter
+# instead of a direct match defeats the index entirely (measured: 300s+
+# timeout vs 1.4s for a 2000-value page on the 538k-work prod mirror).
 _SPINE_DETAILS_QUERY = """
 PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
-SELECT ?celex (SAMPLE(?d) AS ?date) (SAMPLE(?e) AS ?eli)
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+SELECT (STR(?cx) AS ?celex) (SAMPLE(?d) AS ?date) (SAMPLE(?e) AS ?eli)
        (SAMPLE(?tEn) AS ?title_en) (SAMPLE(?tFr) AS ?title_fr)
        (SAMPLE(?f) AS ?in_force)
 WHERE {{
   GRAPH <{graph}> {{
-    VALUES ?celex {{ {values} }}
+    VALUES ?cx {{ {values} }}
     ?w cdm:resource_legal_id_celex ?cx .
-    FILTER(STR(?cx) = ?celex)
     OPTIONAL {{ ?w cdm:work_date_document ?dd . BIND(STR(?dd) AS ?d) }}
     OPTIONAL {{ ?w cdm:resource_legal_eli ?el . BIND(STR(?el) AS ?e) }}
     OPTIONAL {{ ?w cdm:resource_legal_in-force ?ff . BIND(STR(?ff) AS ?f) }}
@@ -88,17 +92,17 @@ WHERE {{
     }}
   }}
 }}
-GROUP BY ?celex
+GROUP BY ?cx
 """
 
 _LOOKUP_QUERY = """
 PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
-SELECT ?celex (SAMPLE(?d) AS ?date) (SAMPLE(?t) AS ?title)
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+SELECT (STR(?cx) AS ?celex) (SAMPLE(?d) AS ?date) (SAMPLE(?t) AS ?title)
 WHERE {{
   GRAPH <{graph}> {{
+    VALUES ?cx {{ {values} }}
     ?w cdm:resource_legal_id_celex ?cx .
-    BIND(STR(?cx) AS ?celex)
-    VALUES ?celex {{ {values} }}
     OPTIONAL {{ ?w cdm:work_date_document ?dd . BIND(STR(?dd) AS ?d) }}
     OPTIONAL {{
       ?xe cdm:expression_belongs_to_work ?w .
@@ -108,7 +112,7 @@ WHERE {{
     }}
   }}
 }}
-GROUP BY ?celex
+GROUP BY ?cx
 """
 
 _CELEX_SECTOR_3 = {
@@ -169,7 +173,7 @@ def materialize_spine(endpoint: str, driver) -> int:
             graph=MIRROR_GRAPH, after=after, page=PAGE))
         if not keys:
             break
-        values = " ".join(f'"{k["celex"]}"' for k in keys)
+        values = " ".join(f'"{k["celex"]}"^^xsd:string' for k in keys)
         rows = sparql(endpoint, _SPINE_DETAILS_QUERY.format(
             graph=MIRROR_GRAPH, values=values))
         batch = [{
@@ -222,7 +226,7 @@ def link_petitions(endpoint: str, driver) -> dict:  # pylint: disable=too-many-l
     if not wanted:
         return {"petitions": len(petitions), "resolved": 0, "edges": 0}
 
-    values = " ".join(f'"{c}"' for c in sorted(wanted))
+    values = " ".join(f'"{c}"^^xsd:string' for c in sorted(wanted))
     found = {r["celex"]: r for r in sparql(
         endpoint, _LOOKUP_QUERY.format(graph=MIRROR_GRAPH, values=values))}
 

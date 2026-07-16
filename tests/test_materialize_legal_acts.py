@@ -84,7 +84,7 @@ def test_spine_pages_until_short_page(monkeypatch):
     assert n == 2
     # keys page is join-free; details are VALUES-bound to that page
     assert "SELECT DISTINCT ?celex" in calls[0]
-    assert 'VALUES ?celex { "32024D0001" "32024D0002" }' in calls[1]
+    assert 'VALUES ?cx { "32024D0001"^^xsd:string "32024D0002"^^xsd:string }' in calls[1]
     # keyset: the next keys query filters past the last celex of page one
     assert '> "32024D0002"' in calls[2]
     assert any("MERGE (a:LegalAct" in q for q, _ in driver.calls)
