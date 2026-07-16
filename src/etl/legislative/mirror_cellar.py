@@ -148,6 +148,36 @@ def fetch_window(client: httpx.Client, win_start: str, win_end: str):
         offset += WORK_PAGE
 
 
+def verified_artifact(out_dir: Path, window_tag: str) -> "dict | None":
+    """Existing artifact whose sha256 matches its manifest, else None.
+
+    This is what makes retries polite to CELLAR: a year re-attempt must
+    NOT re-export windows that already have a verified artifact on disk
+    (observed: a flaky month caused the same year to be re-fetched from
+    CELLAR five times in one day before this check existed).
+    """
+    path = out_dir / f"cellar-cdm-{window_tag}.nt.gz"
+    mpath = out_dir / f"cellar-cdm-{window_tag}.manifest.json"
+    if not (path.exists() and mpath.exists()):
+        return None
+    try:
+        with open(mpath, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        sha = hashlib.sha256()
+        with gzip.open(path, "rt", encoding="utf-8") as gz:
+            for line in gz:
+                sha.update(line.encode())
+        if sha.hexdigest() != manifest.get("sha256_uncompressed"):
+            logger.warning("window %s: artifact sha mismatch — will re-export",
+                           window_tag)
+            return None
+        return manifest
+    except (OSError, ValueError, EOFError):
+        # includes gzip.BadGzipFile and truncated streams — the exact
+        # corruption class that motivated this check
+        return None
+
+
 def write_artifact(lines, out_dir: Path, window_tag: str) -> dict:
     """Stream triples to a gzip N-Triples artifact + sha256 manifest.
     The artifact is the durable record; loading happens FROM it."""
@@ -261,10 +291,15 @@ def main(argv=None) -> int:  # pylint: disable=too-many-locals
                 os.environ["VIRTUOSO_DBA_PASSWORD"]))
         for win_start, win_end in month_windows(start, end):
             tag = win_start[:7]
-            manifest = write_artifact(
-                fetch_window(cellar, win_start, win_end), out_dir, tag)
-            logger.info("window %s: %d triples -> %s",
-                        tag, manifest["triples"], manifest["artifact"])
+            manifest = verified_artifact(out_dir, tag)
+            if manifest is not None:
+                logger.info("window %s: verified artifact exists — "
+                            "skipping CELLAR export", tag)
+            else:
+                manifest = write_artifact(
+                    fetch_window(cellar, win_start, win_end), out_dir, tag)
+                logger.info("window %s: %d triples -> %s",
+                            tag, manifest["triples"], manifest["artifact"])
             totals["windows"] += 1
             totals["triples"] += manifest["triples"]
             if auth_client and manifest["triples"]:
