@@ -221,10 +221,14 @@ def main(argv=None) -> int:
         update_url = f"{base}/sparql-auth"
 
     totals = {"windows": 0, "triples": 0, "loaded": 0}
-    with httpx.Client(timeout=300.0) as cellar:
+    # CELLAR's paged CONSTRUCTs stall past 300s on heavy month windows
+    # (first seen: 2007-12 killed the prod walk's year 5x). Generous
+    # default, env-tunable for the walk vs the small daily delta.
+    cellar_timeout = float(os.environ.get("CELLAR_EXPORT_TIMEOUT", "600"))
+    with httpx.Client(timeout=cellar_timeout) as cellar:
         auth_client = None
         if update_url:
-            auth_client = httpx.Client(timeout=300.0, auth=httpx.DigestAuth(
+            auth_client = httpx.Client(timeout=cellar_timeout, auth=httpx.DigestAuth(
                 os.environ.get("VIRTUOSO_DBA_USER", "dba"),
                 os.environ["VIRTUOSO_DBA_PASSWORD"]))
         for win_start, win_end in month_windows(start, end):
