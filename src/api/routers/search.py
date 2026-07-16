@@ -156,7 +156,14 @@ def _shape_row(row: dict) -> dict:
     }
 
 
-@router.get("/results")
+@router.get(
+    "/results",
+    responses={
+        503: {"description": "Hybrid search store not configured."},
+        504: {"description": "Search query exceeded its statement timeout."},
+        500: {"description": "Search store error."},
+    },
+)
 @inject
 # pylint: disable-next=too-many-arguments,too-many-positional-arguments,too-many-locals
 def search_results(
