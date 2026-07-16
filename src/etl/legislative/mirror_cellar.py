@@ -90,22 +90,50 @@ WHERE {{ VALUES ?w {{ {values} }}
     ]
 
 
+def _cellar_post(client: httpx.Client, data: dict, headers: dict) -> httpx.Response:
+    """POST to CELLAR with retry on throttling/transient failures.
+
+    CELLAR intermittently answers 503/429 (and drops reads) under
+    sustained export traffic; a single transient used to kill a whole
+    year attempt (~30 min of paced work). Retries 4 times with
+    exponential backoff before giving up.
+    """
+    delay = 30.0
+    for attempt in range(5):
+        try:
+            r = client.post(CELLAR_SPARQL, data=data, headers=headers)
+            if r.status_code in (429, 502, 503, 504) and attempt < 4:
+                logger.warning("CELLAR %d — backoff %.0fs (attempt %d/5)",
+                               r.status_code, delay, attempt + 1)
+                time.sleep(delay)
+                delay *= 2
+                continue
+            r.raise_for_status()
+            return r
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            if attempt == 4:
+                raise
+            logger.warning("CELLAR %s — backoff %.0fs (attempt %d/5)",
+                           type(exc).__name__, delay, attempt + 1)
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("unreachable")
+
+
 def fetch_window(client: httpx.Client, win_start: str, win_end: str):
     """Yield N-Triples lines for one window (paged; bounded calls)."""
     offset = 0
     while True:
-        r = client.post(CELLAR_SPARQL,
-                        data={"query": work_list_query(win_start, win_end, offset)},
-                        headers={"Accept": "application/sparql-results+json"})
-        r.raise_for_status()
+        r = _cellar_post(
+            client, {"query": work_list_query(win_start, win_end, offset)},
+            {"Accept": "application/sparql-results+json"})
         works = [b["w"]["value"] for b in r.json()["results"]["bindings"]]
         if not works:
             return
         for i in range(0, len(works), CLOSURE_BATCH):
             for query in closure_queries(works[i:i + CLOSURE_BATCH]):
-                rc = client.post(CELLAR_SPARQL, data={"query": query},
-                                 headers={"Accept": "application/n-triples"})
-                rc.raise_for_status()
+                rc = _cellar_post(client, {"query": query},
+                                  {"Accept": "application/n-triples"})
                 for line in rc.text.splitlines():
                     line = line.strip()
                     # CELLAR emits "# Empty NT" comment lines for
