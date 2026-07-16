@@ -1,16 +1,16 @@
 """Tiny synchronous client for the fontem-linguistics service.
 
-Search calls ``POST /keywords`` to strip stop words from the user's query
-before matching legislative titles. The dependency is soft in both
-directions:
+Search calls ``POST /embed`` to vectorise the user's query for hybrid
+(dense + sparse) matching. The dependency is soft in both directions:
 
-* ``from_env`` returns ``None`` when ``LINGUISTICS_URL`` is unset, so the
-  API boots in environments without the service;
-* ``keywords`` returns ``None`` on any transport/HTTP error, and the
-  caller falls back to naive tokenization — a degraded search beats a
-  500 on the results page.
+* ``from_env`` returns ``None`` when ``LINGUISTICS_URL`` is unset, so
+  the API boots in environments without the service;
+* ``embed`` returns ``None`` on any transport/HTTP error and the caller
+  falls back to lexical-only — a degraded search beats a 500 on the
+  results page.
 
-Timeout is short (3s) because this sits on the interactive search path.
+Timeout is short (3s default) because this sits on the interactive
+search path.
 """
 from __future__ import annotations
 
@@ -63,19 +63,4 @@ class LinguisticsClient:
                 return [float(x) for x in vec], enc
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("linguistics /embed unavailable: %s", exc)
-            return None
-
-    def keywords(self, text: str, lang: str | None = None) -> list[str] | None:
-        """Content-bearing keywords of ``text``, or None on failure."""
-        payload: dict = {"text": text}
-        if lang:
-            payload["lang"] = lang
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                resp = client.post(f"{self.base_url}/keywords", json=payload)
-                resp.raise_for_status()
-                kws = resp.json().get("keywords")
-                return list(kws) if isinstance(kws, list) else None
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning("linguistics /keywords unavailable: %s", exc)
             return None

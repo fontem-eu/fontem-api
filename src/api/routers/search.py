@@ -1,647 +1,269 @@
-"""Unified faceted search across the knowledge graph.
+"""Unified hybrid search — pgvector cosine + tsvector lexical, RRF fusion.
 
-This backs the dedicated ``/search`` results page in the web app (distinct
-from the header autocomplete, which stays on ``GET /api/search`` in
-``contracts.py``). Where the autocomplete returns a small type-grouped
-payload for a dropdown, this endpoint is built for a results page:
+Backs `GET /api/search/results` from the UI. One Postgres query, all
+entity types in one relevance-ranked list, no per-type Cypher fan-out
+and no cross-store federation.
 
-  * many entity types — companies, public bodies (authorities), people,
-    lobbyists, procurement contracts, cohesion projects, sanctioned
-    entities, EU legislation — selectable via the ``types`` facet;
-  * advanced filters — ``country`` (alpha-3), ``nuts`` (NUTS-code prefix),
-    and a ``date_from``/``date_to`` range, each applied only to the types
-    that carry the relevant property;
-  * pagination — a flat, relevance-ranked result list plus per-type counts
-    for the facet sidebar.
+Retrieval:
+  * dense — linguistics /embed (default minilm-local, 384-dim) → cosine
+    over search.entity_embeddings.embedding (HNSW index).
+  * sparse — plainto_tsquery('simple', $q) match on the same row's
+    name_lex tsvector (GIN index).
+  * merge — Reciprocal Rank Fusion, constant 60, weights 1/1.
 
-Match semantics stay ``toLower(...) CONTAINS`` for parity with the existing
-autocomplete (a full-text-index upgrade is tracked separately); each type
-carries a small rank so exact/prefix hits sort above mid-string ones.
-Legislation is the exception: it matches expression titles in the CELLAR
-mirror via Virtuoso's full-text index, after the query is reduced to
-content-bearing keywords by the linguistics service (stop-word removal).
+The 'simple' tsquery config means no per-language stop-word stripping.
+Deliberate: we serve 24 EU locales and query language isn't reliably
+known. Cost is that lexical ranking treats "the" as a real term; if
+that becomes visible as noise we detect language + swap the tsquery
+config, or reintroduce a keywords-endpoint call in front. For now,
+keep the path simple.
 
-Property names are the REAL materialized Neo4j properties (verified against
-prod), which differ from the ETL event kwargs — notably lobbyists store
-``detail_name``/``detail_acronym`` and cohesion projects live on
-``:Disclosure {system:'eu-cohesion'}`` with ``detail_*`` fields.
+Degradations:
+  * linguistics /embed unreachable → falls back to lexical-only. Users
+    still get results (no cross-lingual / paraphrase recall) rather
+    than a blank page.
+  * SEARCH_DATABASE_URL unset → 503 with an operator-visible message.
+
+Response shape mirrors what the SearchView Vue component reads: each
+result has `title` (parsed from embed_text[0]) + `subtitle` (embed_text[1])
++ `context` (remainder) + `type`, `id`, `country`, `date`, `meta`.
+`counts` groups the returned page by type (drives the facet sidebar);
+`has_more` is a peek at (limit+1) rows.
 """
 from __future__ import annotations
 
 import logging
-import re
+import os
+import time
 from typing import Annotated, Any
 
+import psycopg
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from src.api.lang import authority_name_expr, safe_lang
-from src.data.graph.neo4j_client import Neo4jClient
 from src.data.linguistics.client import LinguisticsClient
-from src.data.sparql.virtuoso_client import SparqlTimeout, VirtuosoClient
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/search", tags=["search"])
 
-# The entity types this endpoint can return, in the priority order used to
-# break ties when merging the per-type result lists into one ranked page.
-ALL_TYPES: tuple[str, ...] = (
-    "company",
-    "authority",
-    "person",
-    "lobbyist",
-    "contract",
-    "cohesion",
-    "sanction",
-    "legislation",
+
+# LIMIT is +1 so we can tell has_more without a second COUNT.
+_SQL_HYBRID = """
+WITH lex AS (
+  SELECT entity_type, entity_id, embed_text, country, event_date,
+         ROW_NUMBER() OVER (
+           ORDER BY ts_rank(name_lex, plainto_tsquery('simple', %(q)s)) DESC
+         ) AS rk
+  FROM search.entity_embeddings
+  WHERE name_lex @@ plainto_tsquery('simple', %(q)s)
+    AND (%(country)s::text IS NULL OR country = %(country)s)
+    AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
+    AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
+    AND (%(date_to)s::date   IS NULL OR event_date <= %(date_to)s::date)
+  ORDER BY rk
+  LIMIT 100
+),
+vec AS (
+  SELECT entity_type, entity_id, embed_text, country, event_date,
+         ROW_NUMBER() OVER (ORDER BY embedding <=> %(qvec)s::vector) AS rk
+  FROM search.entity_embeddings
+  WHERE encoder_id = %(enc)s
+    AND (%(country)s::text IS NULL OR country = %(country)s)
+    AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
+    AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
+    AND (%(date_to)s::date   IS NULL OR event_date <= %(date_to)s::date)
+  ORDER BY embedding <=> %(qvec)s::vector
+  LIMIT 100
 )
+SELECT
+  COALESCE(l.entity_type, v.entity_type) AS entity_type,
+  COALESCE(l.entity_id, v.entity_id)     AS entity_id,
+  COALESCE(l.embed_text, v.embed_text)   AS embed_text,
+  COALESCE(l.country, v.country)         AS country,
+  COALESCE(l.event_date, v.event_date)   AS event_date,
+  l.rk AS lex_rank,
+  v.rk AS vec_rank,
+  (
+    (CASE WHEN l.rk IS NULL THEN 0 ELSE 1.0 / (60 + l.rk) END) +
+    (CASE WHEN v.rk IS NULL THEN 0 ELSE 1.0 / (60 + v.rk) END)
+  )::real AS rrf_score
+FROM lex l
+FULL OUTER JOIN vec v USING (entity_type, entity_id)
+ORDER BY rrf_score DESC
+LIMIT %(limit_plus_one)s;
+"""
 
-# Per-type cap. We over-fetch (offset+limit+1) up to this ceiling so we can
-# merge/sort/slice deterministically and know whether more results exist,
-# without paying for an unbounded global COUNT over 3.6M companies.
-_MAX_PER_TYPE = 200
-
-# Conjunction used both in Cypher WHERE fragments and bif:contains patterns.
-_AND = " AND "
-
-
-def _parse_types(types: str | None) -> list[str]:
-    """Parse the comma-separated ``types`` facet into a validated list.
-
-    Unknown tokens are dropped; an empty/absent value means "all types".
-    """
-    if not types:
-        return list(ALL_TYPES)
-    wanted = [t.strip().lower() for t in types.split(",") if t.strip()]
-    picked = [t for t in ALL_TYPES if t in wanted]
-    return picked or list(ALL_TYPES)
-
-
-def _date_clause(prop: str, has_from: bool, has_to: bool) -> str:
-    """Build an inclusive ISO date-range WHERE fragment for ``prop``.
-
-    ISO ``yyyy-mm-dd`` strings compare lexicographically, so a plain string
-    ``>=``/``<=`` is a correct range test. Returns "" when no bound is set.
-    """
-    parts = []
-    if has_from:
-        parts.append(f"{prop} >= $date_from")
-    if has_to:
-        parts.append(f"{prop} <= $date_to")
-    return (_AND + _AND.join(parts)) if parts else ""
-
-
-def _ctx(*parts) -> str:
-    """Join non-empty context fragments with a middot separator."""
-    return " · ".join(
-        str(p).strip() for p in parts if p and str(p).strip()
-    )
-
-
-def _clip(text, limit: int = 130) -> str:
-    """Collapse whitespace and trim a long description for a card."""
-    if not text:
-        return ""
-    joined = " ".join(str(text).split())
-    return joined if len(joined) <= limit else joined[: limit - 1].rstrip() + "…"
-
-
-def _companies(session, params, want_geo_filter):
-    """Companies by name. Optional country / NUTS-region geo filter."""
-    geo = ""
-    if params.get("country"):
-        geo += (
-            " AND (toLower(c.country) = toLower($country) "
-            "OR toLower(coalesce(c.hq_country,'')) = toLower($country))"
-        )
-    if params.get("nuts"):
-        # via LOCATED_IN region code prefix (populated for NUTS-0 today,
-        # sub-country once the 1-3 load lands) OR the company's own region.
-        geo += (
-            " AND (EXISTS { MATCH (c)-[:LOCATED_IN]->(r:NUTSRegion) "
-            "WHERE r.code STARTS WITH $nuts } "
-            "OR toUpper(coalesce(c.region,'')) STARTS WITH $nuts "
-            "OR toUpper(coalesce(c.hq_region,'')) STARTS WITH $nuts)"
-        )
-    if not want_geo_filter:
-        geo = ""
-    rows = session.run(
-        "MATCH (c:Company) "
-        "WHERE c.name IS NOT NULL AND toLower(c.name) CONTAINS toLower($q) "
-        "  AND NOT toLower(trim(coalesce(c.name,''))) IN "
-        "      ['nan','','n/a','none','null','-'] "
-        f"{geo} "
-        "OPTIONAL MATCH (c)-[:LISTED_AS]->(l:Listing) "
-        "WITH c, collect(l.ticker)[0] AS ticker, "
-        "  CASE WHEN toLower(c.name) = toLower($q) THEN 3 "
-        "       WHEN toLower(c.name) STARTS WITH toLower($q) THEN 2 "
-        "       ELSE 0 END AS rank "
-        "RETURN c.gmr_id AS id, c.name AS title, c.country AS country, "
-        "  ticker, c.legal_form AS legal_form, c.city AS city, rank "
-        "ORDER BY rank DESC, size(c.name) ASC, c.name ASC "
-        "LIMIT $cap",
-        **params,
-    ).data()
-    return [
-        {
-            "type": "company",
-            "id": r["id"],
-            "title": r["title"],
-            "subtitle": r.get("ticker") or r.get("country") or "",
-            "country": r.get("country"),
-            "date": None,
-            "score": r["rank"],
-            "context": _ctx(r.get("city"), r.get("legal_form")),
-            "meta": {"ticker": r.get("ticker")},
-        }
-        for r in rows
-    ]
-
-
-def _authorities(session, params, want_geo_filter):
-    """Public bodies (contracting authorities) by name."""
-    geo = ""
-    if want_geo_filter and params.get("country"):
-        geo = " AND toLower(a.country) = toLower($country)"
-    name_expr = authority_name_expr("a", safe_lang(params.get("lang")))
-    rows = session.run(
-        "MATCH (a:Authority) "
-        "WHERE toLower(a.name) CONTAINS toLower($q) "
-        f"{geo} "
-        "WITH a, CASE WHEN toLower(a.name) = toLower($q) THEN 3 "
-        "             WHEN toLower(a.name) STARTS WITH toLower($q) THEN 2 "
-        "             ELSE 0 END AS rank "
-        "RETURN a.authority_id AS id, "
-        f"  {name_expr} AS title, a.country AS country, "
-        "  a.authority_type AS atype, rank "
-        "ORDER BY rank DESC, size(a.name) ASC, a.name ASC "
-        "LIMIT $cap",
-        **params,
-    ).data()
-    return [
-        {
-            "type": "authority",
-            "id": r["id"],
-            "title": r["title"],
-            "subtitle": r.get("country") or "",
-            "country": r.get("country"),
-            "date": None,
-            "score": r["rank"],
-            "context": _ctx(r.get("atype")),
-            "meta": {"authority_type": r.get("atype")},
-        }
-        for r in rows
-    ]
-
-
-def _persons(session, params, want_geo_filter):  # pylint: disable=unused-argument
-    """People (directors etc.) by full name."""
-    rows = session.run(
-        "MATCH (p:Person) "
-        "WHERE toLower(coalesce(p.first_name,'') + ' ' + coalesce(p.name,'')) "
-        "  CONTAINS toLower($q) "
-        "OPTIONAL MATCH (p)-[:DIRECTS {current: true}]->(c:Company) "
-        "WITH p, collect(DISTINCT c.name)[0..2] AS companies "
-        "RETURN p.person_id AS id, "
-        "  trim(coalesce(p.first_name,'') + ' ' + coalesce(p.name,'')) AS title, "
-        "  p.birth_year AS birth_year, companies "
-        "LIMIT $cap",
-        **params,
-    ).data()
-    return [
-        {
-            "type": "person",
-            "id": r["id"],
-            "title": r["title"],
-            "subtitle": ", ".join(r.get("companies") or []),
-            "country": None,
-            "date": None,
-            "score": 0,
-            "context": "",
-            "meta": {"birth_year": r.get("birth_year")},
-        }
-        for r in rows
-    ]
-
-
-def _lobbyists(session, params, want_geo_filter):
-    """EU transparency-register lobbyists (real props are ``detail_*``)."""
-    geo = ""
-    if want_geo_filter and params.get("country"):
-        geo = " AND toLower(coalesce(l.detail_country,'')) = toLower($country)"
-    date = _date_clause(
-        "l.detail_registration_date",
-        bool(params.get("date_from")), bool(params.get("date_to")),
-    )
-    rows = session.run(
-        "MATCH (l:Lobbyist) "
-        "WHERE (toLower(coalesce(l.detail_name, l.title, '')) CONTAINS toLower($q) "
-        "   OR toLower(coalesce(l.detail_acronym,'')) CONTAINS toLower($q)) "
-        f"{geo}{date} "
-        "WITH l, coalesce(l.detail_name, l.title, '') AS nm "
-        "RETURN l.disclosure_id AS id, nm AS title, "
-        "  l.detail_acronym AS acronym, l.detail_country AS country, "
-        "  l.detail_category AS category, "
-        "  l.detail_goals AS goals, l.url AS url, "
-        "  l.detail_registration_date AS reg_date "
-        "ORDER BY size(nm) ASC, nm ASC "
-        "LIMIT $cap",
-        **params,
-    ).data()
-    return [
-        {
-            "type": "lobbyist",
-            "id": r["id"],
-            "title": r["title"],
-            "subtitle": r.get("acronym") or r.get("category") or "",
-            "country": r.get("country"),
-            "date": r.get("reg_date"),
-            "score": 0,
-            "context": _clip(r.get("goals")),
-            "meta": {"category": r.get("category"), "url": r.get("url")},
-        }
-        for r in rows
-    ]
-
-
-def _contracts(session, params, want_geo_filter):
-    """Procurement contracts by title; date on ``publication_date``.
-
-    NUTS/geo filtering rides on the awarded company (contracts carry a buyer
-    ``country`` but no materialized NUTS of their own).
-    """
-    geo = ""
-    if want_geo_filter and params.get("country"):
-        geo += " AND toLower(coalesce(ct.country,'')) = toLower($country)"
-    if want_geo_filter and params.get("nuts"):
-        geo += (
-            " AND EXISTS { MATCH (ct)-[:AWARDED_TO]->(:Company)"
-            "-[:LOCATED_IN]->(r:NUTSRegion) WHERE r.code STARTS WITH $nuts }"
-        )
-    date = _date_clause(
-        "ct.publication_date",
-        bool(params.get("date_from")), bool(params.get("date_to")),
-    )
-    rows = session.run(
-        "MATCH (ct:Contract) "
-        "WHERE ct.title IS NOT NULL AND toLower(ct.title) CONTAINS toLower($q) "
-        f"{geo}{date} "
-        "RETURN ct.ted_notice_id AS id, ct.title AS title, "
-        "  ct.country AS country, ct.publication_date AS pub_date, "
-        "  ct.value_eur AS value_eur "
-        "ORDER BY ct.publication_date DESC "
-        "LIMIT $cap",
-        **params,
-    ).data()
-    return [
-        {
-            "type": "contract",
-            "id": r["id"],
-            "title": r["title"],
-            "subtitle": r.get("country") or "",
-            "country": r.get("country"),
-            "date": r.get("pub_date"),
-            "score": 0,
-            "context": "",
-            "meta": {"value_eur": r.get("value_eur")},
-        }
-        for r in rows
-    ]
-
-
-def _cohesion(session, params, want_geo_filter):
-    """EU cohesion projects — ``:Disclosure {system:'eu-cohesion'}``."""
-    geo = ""
-    if want_geo_filter and params.get("country"):
-        geo += " AND toLower(coalesce(d.detail_country,'')) = toLower($country)"
-    if want_geo_filter and params.get("nuts"):
-        geo += " AND toUpper(coalesce(d.detail_nuts_code,'')) STARTS WITH $nuts"
-    date = _date_clause(
-        "d.detail_start_date",
-        bool(params.get("date_from")), bool(params.get("date_to")),
-    )
-    rows = session.run(
-        "MATCH (d:Disclosure {system:'eu-cohesion'}) "
-        "WHERE d.title IS NOT NULL AND toLower(d.title) CONTAINS toLower($q) "
-        f"{geo}{date} "
-        "RETURN d.disclosure_id AS id, d.title AS title, "
-        "  d.detail_country AS country, d.detail_start_date AS start_date, "
-        "  d.detail_fund AS fund, d.detail_nuts_code AS nuts_code, "
-        "  d.detail_description AS description, d.detail_programme AS programme, "
-        "  d.company_gmr_id AS company_gmr_id "
-        "ORDER BY size(d.title) ASC "
-        "LIMIT $cap",
-        **params,
-    ).data()
-    return [
-        {
-            "type": "cohesion",
-            "id": r["id"],
-            "title": r["title"],
-            "subtitle": r.get("fund") or r.get("country") or "",
-            "country": r.get("country"),
-            "date": r.get("start_date"),
-            "score": 0,
-            "context": _clip(r.get("description")) or _ctx(r.get("programme")),
-            "meta": {
-                "nuts_code": r.get("nuts_code"), "fund": r.get("fund"),
-                "company_gmr_id": r.get("company_gmr_id"),
-            },
-        }
-        for r in rows
-    ]
-
-
-def _sanctions(session, params, want_geo_filter):  # pylint: disable=unused-argument
-    """Sanctioned entities by name or alias; date on ``designation_date``."""
-    date = _date_clause(
-        "s.designation_date",
-        bool(params.get("date_from")), bool(params.get("date_to")),
-    )
-    rows = session.run(
-        "MATCH (s:SanctionedEntity) "
-        "WHERE toLower(coalesce(s.name,'')) CONTAINS toLower($q) "
-        "   OR any(a IN coalesce(s.aliases, []) "
-        "          WHERE toLower(a) CONTAINS toLower($q)) "
-        f"{date} "
-        "WITH s, CASE WHEN toLower(coalesce(s.name,'')) = toLower($q) THEN 3 "
-        "             WHEN toLower(coalesce(s.name,'')) STARTS WITH toLower($q) THEN 2 "
-        "             ELSE 0 END AS rank "
-        "RETURN s.entity_id AS id, s.name AS title, "
-        "  s.sanction_regime AS regime, s.designation_date AS des_date, "
-        "  s.legal_basis AS legal_basis, rank "
-        "ORDER BY rank DESC, size(coalesce(s.name,'')) ASC "
-        "LIMIT $cap",
-        **params,
-    ).data()
-    return [
-        {
-            "type": "sanction",
-            "id": r["id"],
-            "title": r["title"],
-            "subtitle": r.get("regime") or "",
-            "country": None,
-            "date": r.get("des_date"),
-            "score": r["rank"],
-            "context": _ctx(r.get("legal_basis")),
-            "meta": {"regime": r.get("regime")},
-        }
-        for r in rows
-    ]
-
-
-# --- Legislation (CELLAR mirror in Virtuoso) --------------------------------
-
-_MIRROR_GRAPH = "http://data.fontem.eu/graph/mirror/cellar/eu"
-
-# ISO-639-1 → Publications Office language authority code, for picking the
-# display title in the viewer's language.
-_PO_LANG = {
-    "bg": "BUL", "cs": "CES", "da": "DAN", "de": "DEU", "el": "ELL",
-    "en": "ENG", "es": "SPA", "et": "EST", "fi": "FIN", "fr": "FRA",
-    "ga": "GLE", "hr": "HRV", "hu": "HUN", "it": "ITA", "lt": "LIT",
-    "lv": "LAV", "mt": "MLT", "nl": "NLD", "pl": "POL", "pt": "POR",
-    "ro": "RON", "sk": "SLK", "sl": "SLV", "sv": "SWE",
-}
-
-# CELEX sector-3 document-type letter (position 5 in 3YYYYLNNNN).
-_CELEX_SECTOR_3 = {
-    "L": "Directive", "R": "Regulation", "D": "Decision",
-    "H": "Recommendation", "A": "Opinion", "C": "Declaration",
-    "E": "CFSP common position", "F": "JHA framework decision",
-    "G": "Council resolution", "M": "Merger decision",
-    "Q": "Institutional rules", "S": "ECSC act",
-}
-
-_CELEX_SECTORS = {
-    "1": "Treaty", "2": "International agreement", "4": "Complementary act",
-    "5": "Preparatory act", "6": "Case-law",
-    "7": "National implementing measure", "9": "Parliamentary question",
-}
-
-_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
-
-
-def _celex_doc_type(celex: str) -> str:
-    """Human label for a CELEX number's sector/type, best-effort."""
-    if not celex:
-        return "Legal document"
-    if celex[0] == "3":
-        return _CELEX_SECTOR_3.get(celex[5:6], "Legal act")
-    return _CELEX_SECTORS.get(celex[0], "Legal document")
-
-
-def _fallback_keywords(q: str) -> list[str]:
-    """Naive keyword split for when the linguistics service is down.
-
-    Keeps every token of length ≥ 2 plus all digit-bearing tokens —
-    over-matching beats an empty results page.
-    """
-    return [t for t in _WORD_RE.findall(q.lower()) if len(t) >= 2 or t.isdigit()]
-
-
-def _ft_pattern(keywords: list[str]) -> str:
-    """AND-of-phrases pattern for Virtuoso ``bif:contains``.
-
-    Tokens arrive word-only from the tokenizers; the strip of quote/backslash
-    characters here is defence in depth, since the pattern is embedded in the
-    SPARQL string.
-    """
-    safe = [re.sub(r"['\"\\]", "", kw) for kw in keywords]
-    return _AND.join(f'"{kw}"' for kw in safe if kw)
-
-
-def _legislation_query(pattern: str, lang: str | None,
-                       date_from: str | None, date_to: str | None,
-                       cap: int) -> str:
-    """SPARQL over the CELLAR mirror: works whose expression titles match.
-
-    Groups by CELEX so a work counts once regardless of how many language
-    versions matched; the display title prefers the viewer's language and
-    falls back to any matched title.
-    """
-    po_lang = _PO_LANG.get(lang or "en", "ENG")
-    if date_from or date_to:
-        conds = []
-        if date_from:
-            conds.append(f'STR(?dd) >= "{date_from}"')
-        if date_to:
-            conds.append(f'STR(?dd) <= "{date_to}"')
-        date_block = (
-            "?w cdm:work_date_document ?dd . "
-            f"FILTER({' && '.join(conds)}) BIND(STR(?dd) AS ?d)"
-        )
-    else:
-        date_block = (
-            "OPTIONAL { ?w cdm:work_date_document ?dd . BIND(STR(?dd) AS ?d) }"
-        )
-    return f"""
-PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
-SELECT ?celex (SAMPLE(?d) AS ?date) (MAX(?sc) AS ?score)
-       (SAMPLE(?tpref) AS ?title_pref) (SAMPLE(?t) AS ?title_any)
-WHERE {{
-  GRAPH <{_MIRROR_GRAPH}> {{
-    ?e cdm:expression_title ?t .
-    ?t bif:contains '{pattern}' OPTION (score ?sc) .
-    ?e cdm:expression_belongs_to_work ?w .
-    ?w cdm:resource_legal_id_celex ?cx .
-    BIND(STR(?cx) AS ?celex)
-    {date_block}
-    OPTIONAL {{
-      ?ep cdm:expression_belongs_to_work ?w .
-      ?ep cdm:expression_uses_language
-        <http://publications.europa.eu/resource/authority/language/{po_lang}> .
-      ?ep cdm:expression_title ?tpref .
-    }}
-  }}
-}}
-GROUP BY ?celex
-ORDER BY DESC(MAX(?sc))
-LIMIT {cap}
+_SQL_LEXICAL_ONLY = """
+SELECT entity_type, entity_id, embed_text, country, event_date,
+       ROW_NUMBER() OVER (
+         ORDER BY ts_rank(name_lex, plainto_tsquery('simple', %(q)s)) DESC
+       ) AS lex_rank,
+       NULL::int AS vec_rank,
+       ts_rank(name_lex, plainto_tsquery('simple', %(q)s))::real AS rrf_score
+FROM search.entity_embeddings
+WHERE name_lex @@ plainto_tsquery('simple', %(q)s)
+  AND (%(country)s::text IS NULL OR country = %(country)s)
+  AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
+    AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
+    AND (%(date_to)s::date   IS NULL OR event_date <= %(date_to)s::date)
+ORDER BY rrf_score DESC
+LIMIT %(limit_plus_one)s;
 """
 
 
-def _legislation(virtuoso, linguistics, params):
-    """EU legal acts from the CELLAR mirror by title keywords.
+def _search_dsn() -> str | None:
+    dsn = os.environ.get("SEARCH_DATABASE_URL") or os.environ.get("EVENTS_DATABASE_URL")
+    if not dsn:
+        return None
+    return (dsn.replace("postgresql+asyncpg://", "postgresql://")
+               .replace("postgresql+psycopg://", "postgresql://"))
 
-    Soft-fails to an empty list when Virtuoso is not configured, the
-    query yields no keywords, or the store errors — search must degrade,
-    not 500. Stop-word removal comes from the linguistics service with a
-    naive local fallback.
+
+def _vec_literal(v: list[float]) -> str:
+    """pgvector accepts a stringified list literal '[0.1,-0.2,...]'."""
+    return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
+
+
+def _shape_row(row: dict) -> dict:
+    """Map a raw search row to the shape SearchView.vue expects.
+
+    embed_text was composed by fontem-embedding-sink as:
+      "<title> — <aliases-or-context> — <more-context...>"
+    so title is the first segment, subtitle the second, context the rest.
+    Fragile if the composer format ever changes — worth revisiting once
+    we add title/subtitle columns to the sink table directly (follow-up).
     """
-    if virtuoso is None:
-        return []
-    q = params["q"]
-    lang = safe_lang(params.get("lang"))
-    keywords = linguistics.keywords(q, lang) if linguistics else None
-    if keywords is None:
-        keywords = _fallback_keywords(q)
-    pattern = _ft_pattern(keywords[:8])
-    if not pattern:
-        return []
-    query = _legislation_query(
-        pattern, lang, params.get("date_from"), params.get("date_to"),
-        params["cap"],
-    )
-    try:
-        rows = virtuoso.query(query)
-    except SparqlTimeout:
-        logger.warning("legislation search timed out (pattern=%s)", pattern)
-        return []
-    except Exception:  # pylint: disable=broad-exception-caught
-        logger.exception("legislation search failed (pattern=%s)", pattern)
-        return []
-    ui_lang = (lang or "en").upper()
-    results = []
-    for r in rows:
-        celex = str(r.get("celex") or "")
-        title = r.get("title_pref") or r.get("title_any") or celex
-        results.append({
-            "type": "legislation",
-            "id": celex,
-            "title": title,
-            "subtitle": celex,
-            "country": None,
-            "date": r.get("date"),
-            "score": 0,
-            "context": _celex_doc_type(celex),
-            "meta": {
-                "celex": celex,
-                "eurlex_url": (
-                    "https://eur-lex.europa.eu/legal-content/"
-                    f"{ui_lang}/TXT/?uri=CELEX:{celex}"
-                ),
-            },
-        })
-    return results
-
-
-_HANDLERS = {
-    "company": _companies,
-    "authority": _authorities,
-    "person": _persons,
-    "lobbyist": _lobbyists,
-    "contract": _contracts,
-    "cohesion": _cohesion,
-    "sanction": _sanctions,
-}
-
-# Which types a given filter constrains — a type NOT listed is left
-# unfiltered by that filter (e.g. a date range doesn't drop companies,
-# which have no relevant date, so they still appear). A country/NUTS geo
-# filter, however, is a hard narrowing: a type with no geo dimension is
-# excluded entirely when a geo filter is set.
-_GEO_TYPES = {"company", "authority", "lobbyist", "contract", "cohesion"}
-_DATE_TYPES = {"lobbyist", "contract", "cohesion", "sanction", "legislation"}
+    text = row.get("embed_text") or ""
+    parts = [p.strip() for p in text.split(" — ") if p and p.strip()]
+    title = parts[0] if parts else ""
+    subtitle = parts[1] if len(parts) > 1 else ""
+    context = " · ".join(parts[2:]) if len(parts) > 2 else ""
+    date = row.get("event_date")
+    return {
+        "type": row["entity_type"],
+        "id": row["entity_id"],
+        "title": title,
+        "subtitle": subtitle,
+        "context": context,
+        "country": row.get("country"),
+        "date": date.isoformat() if date and not isinstance(date, str) else date,
+        "score": float(row["rrf_score"]),
+        "meta": {
+            "lex_rank": row.get("lex_rank"),
+            "vec_rank": row.get("vec_rank"),
+        },
+    }
 
 
 @router.get("/results")
 @inject
-def search_results(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+# pylint: disable-next=too-many-arguments,too-many-positional-arguments,too-many-locals
+def search_results(
     q: Annotated[str, Query(min_length=1, max_length=200)],
     types: Annotated[str | None, Query(max_length=200)] = None,
     country: Annotated[str | None, Query(max_length=3)] = None,
-    nuts: Annotated[str | None, Query(max_length=8)] = None,
-    date_from: Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")] = None,
-    date_to: Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")] = None,
+    # Accepted for API-compat with the old endpoint; NUTS-level geo
+    # filtering isn't wired yet because the sink doesn't project NUTS
+    # onto search.entity_embeddings rows. Silently ignored.
+    nuts: Annotated[str | None, Query(max_length=8)] = None,  # noqa: ARG001
+    date_from: Annotated[
+        str | None, Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ] = None,
+    date_to: Annotated[
+        str | None, Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
-    lang: Annotated[str | None, Query(max_length=8)] = None,
+    backend: Annotated[
+        str, Query(pattern=r"^(minilm-local|labse-local|mistral-embed)$"),
+    ] = "minilm-local",
     *,
-    neo4j: FromDishka[Neo4jClient],
-    virtuoso: FromDishka[VirtuosoClient | None],
     linguistics: FromDishka[LinguisticsClient | None],
 ) -> dict[str, Any]:
-    """Faceted keyword search across the graph for the results page.
+    """Faceted hybrid search across every entity type in one page.
 
-    Returns a flat, relevance-ranked page of typed results plus per-type
-    counts (bounded by an over-fetch cap) for the facet sidebar. When a
-    geo/date filter is set, only the types that carry that dimension are
-    constrained; the others still match on the keyword.
+    Returns SearchView-shaped envelope:
+      {query, results, counts, has_more, timing_ms, mode, backend}
     """
-    selected = _parse_types(types)
-    has_geo = bool(country or nuts)
-    has_date = bool(date_from or date_to)
-    cap = min(_MAX_PER_TYPE, offset + limit + 1)
+    del nuts  # accepted for API-compat; NUTS geo isn't wired to entity_embeddings yet
+    dsn = _search_dsn()
+    if not dsn:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "search unavailable "
+                "(SEARCH_DATABASE_URL / EVENTS_DATABASE_URL unset)"
+            ),
+        )
 
-    params = {
-        "q": q, "country": country, "nuts": (nuts or "").upper() or None,
-        "date_from": date_from, "date_to": date_to, "lang": lang, "cap": cap,
+    types_arr = [t.strip() for t in (types or "").split(",") if t.strip()] or None
+    params: dict[str, Any] = {
+        "q": q,
+        "country": country,
+        "types": types_arr,
+        "date_from": date_from,
+        "date_to": date_to,
+        # over-fetch by 1 to detect has_more without a second COUNT
+        "limit_plus_one": offset + limit + 1,
     }
 
-    merged: list[dict] = []
-    counts: dict[str, int] = {}
-    with neo4j.session() as session:
-        for t in selected:
-            # A geo filter is a hard narrowing: a type with no geo dimension
-            # can't satisfy it, so it's excluded. A date filter likewise
-            # excludes types with no date property.
-            if has_geo and t not in _GEO_TYPES:
-                counts[t] = 0
-                continue
-            if has_date and t not in _DATE_TYPES:
-                counts[t] = 0
-                continue
-            if t == "legislation":
-                rows = _legislation(virtuoso, linguistics, params)
-            else:
-                rows = _HANDLERS[t](session, params, want_geo_filter=has_geo)
-            counts[t] = len(rows)
-            merged.extend(rows)
+    t0 = time.perf_counter()
+    embedded = linguistics.embed(q, backend=backend) if linguistics is not None else None
+    t_embed_ms = (time.perf_counter() - t0) * 1000
 
-    # Rank across types: score desc, then the ALL_TYPES priority order,
-    # then title for stability.
-    prio = {t: i for i, t in enumerate(ALL_TYPES)}
-    merged.sort(
-        key=lambda r: (-r["score"], prio.get(r["type"], 99), (r["title"] or "")),
-    )
-    page = merged[offset:offset + limit]
+    if embedded is not None:
+        qvec, encoder_id = embedded
+        params["qvec"] = _vec_literal(qvec)
+        params["enc"] = encoder_id
+        sql = _SQL_HYBRID
+        mode = "hybrid"
+    else:
+        logger.warning(
+            "linguistics /embed unavailable; falling back to lexical-only for q=%r",
+            q[:50],
+        )
+        sql = _SQL_LEXICAL_ONLY
+        mode = "lexical_only"
+
+    t_sql_start = time.perf_counter()
+    try:
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            conn.read_only = True
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = 5000")
+                cur.execute(sql, params)
+                cols = [d.name for d in cur.description] if cur.description else []
+                raw_rows = cur.fetchall()
+    except psycopg.errors.QueryCanceled as exc:
+        raise HTTPException(status_code=504, detail="search timeout") from exc
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=500, detail=f"search error: {str(exc)[:200]}",
+        ) from exc
+    t_sql_ms = (time.perf_counter() - t_sql_start) * 1000
+
+    dict_rows = [dict(zip(cols, r)) for r in raw_rows]
+    # over-fetch: the +1 row (if present) means has_more, drop it before slicing
+    has_more = len(dict_rows) > offset + limit
+    dict_rows = dict_rows[offset:offset + limit]
+
+    # Per-type counts over what we surfaced (drives the facet sidebar).
+    counts: dict[str, int] = {}
+    for r in dict_rows:
+        t = r["entity_type"]
+        counts[t] = counts.get(t, 0) + 1
+
     return {
         "query": q,
-        "types": selected,
+        "results": [_shape_row(r) for r in dict_rows],
         "counts": counts,
-        "total_shown": len(merged),
-        "has_more": len(merged) > offset + limit,
-        "results": page,
+        "has_more": has_more,
+        "mode": mode,
+        "backend": backend if mode == "hybrid" else None,
+        "timing_ms": {
+            "embed": round(t_embed_ms, 1),
+            "sql": round(t_sql_ms, 1),
+            "total": round(t_embed_ms + t_sql_ms, 1),
+        },
     }
