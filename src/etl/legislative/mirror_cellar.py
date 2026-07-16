@@ -197,7 +197,7 @@ def _resolve_range(parser, args) -> tuple[date, date]:
             date(*[int(x) for x in args.date_to.split("-")], 1))
 
 
-def main(argv=None) -> int:
+def main(argv=None) -> int:  # pylint: disable=too-many-locals
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--from", dest="date_from",
                         help="window start, YYYY-MM")
