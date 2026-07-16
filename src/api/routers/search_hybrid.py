@@ -108,7 +108,17 @@ def _vec_literal(v: list[float]) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
 
 
-@router.get("/hybrid")
+@router.get(
+    "/hybrid",
+    # Document the error surface so the generated OpenAPI tells callers what
+    # the endpoint can return, not just the happy path.
+    responses={
+        500: {"description": "Search backend error."},
+        503: {"description": "Hybrid search unavailable — the search DSN "
+                             "(SEARCH_DATABASE_URL / EVENTS_DATABASE_URL) is unset."},
+        504: {"description": "Search timed out (statement timeout exceeded)."},
+    },
+)
 @inject
 # pylint: disable-next=too-many-arguments,too-many-positional-arguments,too-many-locals
 def search_hybrid(

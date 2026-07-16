@@ -58,3 +58,13 @@ def test_run_until_drained_stops_on_partial_batch():
     n = project_contracts._run_until_drained(  # pylint: disable=protected-access
         driver, project_contracts._RELABEL, "relabel", 5000)  # pylint: disable=protected-access
     assert n == 9999  # stops when a batch returns < batch size
+
+
+def test_relabel_excludes_projected_entities():
+    """finalize denormalises the canonical notice's fields — including
+    ted_notice_id — onto the :Contract entity, so ted_notice_id alone does NOT
+    distinguish a raw notice from an entity. The relabel must exclude anything
+    notices point at; without the guard a re-run turns every entity back into a
+    :Notice and destroys the model (contract totals -> 0)."""
+    q = project_contracts._RELABEL
+    assert "NOT (n)<-[:NOTICE_OF]-()" in q, "relabel would eat the entities"

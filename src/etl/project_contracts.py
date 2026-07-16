@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 _RELABEL = """
 MATCH (n:Contract)
 WHERE n.ted_notice_id IS NOT NULL
+  // Exclude the projected entities. finalize denormalises the canonical
+  // notice's fields (including ted_notice_id) onto the :Contract entity, so
+  // ted_notice_id alone does NOT distinguish a raw notice from an entity.
+  // An entity always has notices pointing at it; a freshly-sunk notice never
+  // does. Without this guard a re-run relabels every entity into a :Notice
+  // and destroys the model.
+  AND NOT (n)<-[:NOTICE_OF]-()
 WITH n LIMIT $batch
 SET n:Notice,
     n.notice_kind = CASE WHEN n.notice_type = 'can-modif'

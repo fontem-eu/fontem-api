@@ -231,6 +231,16 @@ ASSERTIONS: list[Assertion] = [
         "one means an unprojected notice leaked into the :Contract label.",
     ),
     Assertion(
+        "grain.contract_has_notices", GRAIN,
+        "Every :Contract has at least one :Notice", BLOCK, "cypher",
+        "MATCH (c:Contract) RETURN count(*) AS total, "
+        "count(CASE WHEN NOT (c)<-[:NOTICE_OF]-() THEN 1 END) AS violations",
+        zero_violations("contracts with no notices", "total"),
+        "A :Contract is projected from its notices, so it always has at least "
+        "one. A contract with none means the projection half-ran, or a raw "
+        "notice was mislabelled :Contract — either way totals are wrong.",
+    ),
+    Assertion(
         "keys.company_gmr_id_unique", KEYS,
         "Company.gmr_id is unique", BLOCK, "cypher",
         "MATCH (c:Company) WHERE c.gmr_id IS NOT NULL "
