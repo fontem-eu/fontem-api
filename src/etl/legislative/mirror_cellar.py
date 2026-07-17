@@ -220,11 +220,26 @@ def load_artifact(client: httpx.Client, update_url: str, path: Path,
         body = ("define sql:big-data-const 1\n"
                 "INSERT DATA { GRAPH <" + MIRROR_GRAPH + "> { "
                 + "\n".join(chunk) + " } }")
-        r = client.post(update_url, data={"query": body})
-        if r.status_code >= 400:
-            logger.error("load chunk failed (%d): %s",
-                         r.status_code, r.text[:300])
-        r.raise_for_status()
+        # Virtuoso drops the connection during checkpoint write-stalls;
+        # one transient drop used to fail the whole year attempt. Chunk
+        # INSERTs are idempotent (same triples, same graph), so retrying
+        # the chunk is always safe.
+        for chunk_try in range(4):
+            try:
+                r = client.post(update_url, data={"query": body})
+                if r.status_code >= 400:
+                    logger.error("load chunk failed (%d): %s",
+                                 r.status_code, r.text[:300])
+                r.raise_for_status()
+                break
+            except (httpx.RemoteProtocolError, httpx.TimeoutException,
+                    httpx.TransportError) as exc:
+                if chunk_try == 3:
+                    raise
+                wait = 30 * (chunk_try + 1)
+                logger.warning("chunk POST %s — retrying in %ds",
+                               type(exc).__name__, wait)
+                time.sleep(wait)
         loaded += len(chunk)
         chunk.clear()
         chunk_bytes = 0
