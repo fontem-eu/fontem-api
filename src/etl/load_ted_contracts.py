@@ -1054,22 +1054,14 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals
                     link_modifications,
                 )
                 link_modifications(driver, log)
-                # Re-collapse modification chains so current_value / is_current
-                # reflect the freshly-linked modifications (keeps company and
-                # authority value totals from double-counting restatements).
-                from .collapse_modifications import (  # pylint: disable=import-outside-toplevel
-                    collapse_modifications,
-                )
-                collapse_modifications(driver, log)
-                # Project the freshly-loaded notices into the Contract/Notice
-                # model (one :Contract entity per real contract; notices become
-                # :Notice-[:NOTICE_OF]->). Idempotent — only new notice nodes
-                # (still :Contract, carrying ted_notice_id) are converted — so
-                # the notice-grain double-count can never re-enter aggregates.
-                from .project_contracts import (  # pylint: disable=import-outside-toplevel
-                    migrate as project_contracts,
-                )
-                project_contracts(driver)
+                # collapse_modifications / project_contracts are retired as
+                # post-load hooks: the neo4j sink writes the Contract/Notice
+                # model natively (contract_key + notice_kind travel in the
+                # event payload). Running the batch projection concurrently
+                # with the native sink could relabel a Contract entity whose
+                # first NOTICE_OF edge has not landed yet. project_contracts
+                # remains available as a manual one-time converter for graphs
+                # ingested before the native sink.
     finally:
         currency_svc.close()
         log.close()
