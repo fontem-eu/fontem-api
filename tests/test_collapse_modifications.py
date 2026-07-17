@@ -78,3 +78,58 @@ def test_no_contracts_emits_nothing():
     n = collapse_modifications.collapse_modifications(_driver_returning({}), log)
     assert n == 0
     emit.upsert.assert_not_called()
+
+
+# ── derive_contract_key: the Python mirror of the Cypher grouping ──
+# The loader stamps this at emit time; the three cohort queries above
+# re-derive it from node props. These pin the coalesce order so the
+# two derivations cannot drift apart silently.
+
+
+def test_key_award_prefers_procedure_id():
+    assert collapse_modifications.derive_contract_key(
+        procedure_id="PROC-1", notice_type=None,
+        modifies_publication_number=None,
+        ted_publication_number="100-2026", ted_notice_id="uuid-1",
+    ) == "PROC-1"
+
+
+def test_key_award_without_procedure_uses_publication_number():
+    assert collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type="can-standard",
+        modifies_publication_number=None,
+        ted_publication_number="100-2026", ted_notice_id="uuid-1",
+    ) == "100-2026"
+
+
+def test_key_modification_uses_modifies_ref_not_own_pubnum():
+    # A can-modif groups under the notice it modifies — its OWN
+    # publication-number must never become a contract identity.
+    assert collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type="can-modif",
+        modifies_publication_number="111-2024",
+        ted_publication_number="555-2026", ted_notice_id="uuid-2",
+    ) == "111-2024"
+
+
+def test_key_modification_prefers_procedure_id():
+    assert collapse_modifications.derive_contract_key(
+        procedure_id="PROC-9", notice_type="can-modif",
+        modifies_publication_number="111-2024",
+        ted_publication_number="555-2026", ted_notice_id="uuid-2",
+    ) == "PROC-9"
+
+
+def test_key_falls_back_to_notice_id():
+    # Award with no pub-num yet (bulk skip_pub_num_lookup path)...
+    assert collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type=None,
+        modifies_publication_number=None,
+        ted_publication_number=None, ted_notice_id="uuid-3",
+    ) == "uuid-3"
+    # ...and an orphan modification with no modifies ref.
+    assert collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type="can-modif",
+        modifies_publication_number=None,
+        ted_publication_number="555-2026", ted_notice_id="uuid-4",
+    ) == "uuid-4"

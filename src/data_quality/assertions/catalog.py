@@ -968,6 +968,44 @@ ASSERTIONS: list[Assertion] = [
         "(name_country/fuzzy) attributions; an unknown value would break "
         "that read in queries and the UI.",
     ),
+    # ── parties[] fan-out (multi-supplier TED notices, schemas 0.2.0) ──
+    # The loader resolves EVERY named supplier and the sink fans the list
+    # out to AWARDED_TO (winners) / BID_ON (named losing bidders) edges.
+    Assertion(
+        "values.bid_on_match_confidence_range", VALUES,
+        "BID_ON.match_confidence is within [0,1]", BLOCK, "cypher",
+        "MATCH ()-[r:BID_ON]->() WHERE r.match_confidence IS NOT NULL "
+        "AND (r.match_confidence < 0 OR r.match_confidence > 1) "
+        "RETURN count(*) AS violations",
+        zero_violations("out-of-range match_confidence values"),
+        "Named-tenderer (losing bidder) edges carry the same consolidator "
+        "provenance the AWARDED_TO edge does; a confidence outside [0,1] "
+        "is a producer bug, not a real attribution.",
+    ),
+    Assertion(
+        "coverage.hu_eforms_bidder_edges", COVERAGE,
+        "eForms-era Hungarian contracts carry named-bidder BID_ON edges",
+        WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.country IN ['HUN', 'HU'] "
+        "AND c.publication_date >= '2023-01-01' "
+        "WITH count(c) AS total "
+        "OPTIONAL MATCH (hc:Contract)<-[b:BID_ON]-(:Company) "
+        "WHERE hc.country IN ['HUN', 'HU'] "
+        "AND hc.publication_date >= '2023-01-01' "
+        "WITH total, count(b) AS bid_edges "
+        "RETURN total, CASE WHEN total >= 1000 AND bid_edges = 0 "
+        "THEN 1 ELSE 0 END AS violations",
+        zero_violations("HU eForms cohorts with zero named-bidder edges",
+                        "total"),
+        "Hungarian EKR (like Swedish eSenders) attaches ALL received "
+        "tenders to eForms award notices, so once the parties[] re-"
+        "ingestion has run, a HU eForms-era cohort in the thousands with "
+        "not one BID_ON edge means the named-supplier fan-out is broken "
+        "(producer parties[] or sink edge render). WARN, not BLOCK: the "
+        "signal only exists after contracts re-ingest with eforms-parser "
+        ">=0.8.0 + schemas >=0.2.0, and losing-bidder disclosure is "
+        "per-country practice, not an EU-wide guarantee.",
+    ),
     Assertion(
         "coverage.fund_unit_security_type", COVERAGE,
         "Fund unit listings carry security_type", WARN,

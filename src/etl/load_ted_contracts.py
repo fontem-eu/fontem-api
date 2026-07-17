@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """
 TED Contract Awards → events.entity_events
 =============================================
@@ -25,8 +26,10 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import date as _date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fontem_event_schemas import builders
@@ -42,6 +45,7 @@ from ..services.location_service import LocationService
 from ..services.ted_lookup import TedLookupError, resolve_publication_number
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
+from .collapse_modifications import derive_contract_key
 from .contract_confidence import score_contract_value
 from . import value_review_queue
 from .ted_matcher import TedMatcher
@@ -293,6 +297,163 @@ def _amount_to_eur(currency_svc, resolved_currency, rate_date_obj, raw):
     return original, eur
 
 
+def _supplier_vat(contractor) -> str | None:
+    """Canonical VAT (or national/EORI identifier) for a supplier, or
+    None. eforms-parser 0.2.0+ returns ``legal_id`` as a LegalIdentifier."""
+    # pylint: disable=import-outside-toplevel
+    from src.etl.identifiers import canon_vat
+
+    if contractor.legal_id is None:
+        return None
+    scheme = (contractor.legal_id.scheme_name or "").upper()
+    if scheme in ("VAT", "NATIONAL", "EORI", ""):
+        return canon_vat(contractor.legal_id.value)
+    return None
+
+
+@dataclass
+class _ResolvedSupplier:
+    """One named supplier on a notice, resolved to a gmr_id."""
+
+    award: Any
+    contractor: Any
+    match: Any
+    is_winner: bool
+
+
+def _match_provenance(match) -> "tuple[str | None, float | None]":
+    """(match_tier, match_confidence) for a MatchResult. Layer 1 is the
+    local VAT cache (a deterministic VAT match); a created-new node
+    (layer 5) has no resolved tier or confidence against an existing
+    entity, only the layer is recorded."""
+    tier = match.resolver_tier or ("vat" if match.layer == 1 else None)
+    confidence = None if match.created_new else match.confidence
+    return tier, confidence
+
+
+def _resolve_suppliers(notice, matcher, emit, seen_companies) -> list:
+    """Resolve EVERY named supplier — winners AND named tenderers (the
+    losing bidders some eForms dialects publish) — through the
+    consolidator: same tiers, same confidence capture, and the same
+    create-if-not-found minting as the historical single-winner path.
+    Emits UpsertCompany once per first-seen gmr_id (per-run dedup; the
+    sink would MERGE either way)."""
+    resolved: list[_ResolvedSupplier] = []
+    for supplier_award in notice.awards:
+        contractor = notice.organizations.get(supplier_award.contractor_org_id)
+        if not contractor:
+            continue
+        raw_vat = _supplier_vat(contractor)
+        match = matcher.match_company(
+            contractor.name, contractor.country, raw_vat,
+        )
+        if match.gmr_id not in seen_companies:
+            emit.upsert(
+                "UpsertCompany",
+                iri=f"http://data.fontem.eu/id/Company/{match.gmr_id}",
+                domain="company",
+                payload=builders.upsert_company(
+                    gmr_id=str(match.gmr_id),
+                    name=contractor.name or None,
+                    country=LocationService.to_alpha3(contractor.country),
+                    vat=raw_vat,
+                    active=True,
+                ),
+            )
+            seen_companies.add(match.gmr_id)
+        resolved.append(_ResolvedSupplier(
+            award=supplier_award, contractor=contractor, match=match,
+            is_winner=bool(getattr(supplier_award, "is_winner", True)),
+        ))
+    return resolved
+
+
+def _build_parties(resolved) -> "list[dict] | None":
+    """The ``parties[]`` payload: one entry per distinct (company, role).
+
+    A supplier that won several lots appears once; a company can appear
+    as both 'winner' and 'named_tenderer' when it lost one lot and won
+    another. A supplier with no published name is still resolved (its
+    UpsertCompany went out) but is not representable — the schema
+    requires a non-empty name — so it is omitted from the list."""
+    parties: list[dict] = []
+    seen: set = set()
+    for entry in resolved:
+        if not entry.contractor.name:
+            continue
+        role = "winner" if entry.is_winner else "named_tenderer"
+        key = (str(entry.match.gmr_id), role)
+        if key in seen:
+            continue
+        seen.add(key)
+        tier, confidence = _match_provenance(entry.match)
+        parties.append(builders.contract_party(
+            company_gmr_id=str(entry.match.gmr_id),
+            name=entry.contractor.name,
+            role=role,
+            rank=getattr(entry.award, "rank", None),
+            is_consortium_member=bool(
+                getattr(entry.award, "is_consortium_member", False)),
+            tendering_party_id=getattr(
+                entry.award, "tendering_party_id", None),
+            match_tier=tier,
+            match_confidence=confidence,
+            match_layer=entry.match.layer,
+        ))
+    return parties or None
+
+
+def _sum_raw(values):
+    """Sum raw (pre-conversion) amounts. A single element passes
+    through unchanged so non-numeric raw amounts still reach the
+    currency parser exactly as the notice published them."""
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    try:
+        return sum(float(v) for v in values)
+    except (TypeError, ValueError):
+        return None
+
+
+def _winner_value_inputs(notice, resolved):
+    """The three raw money signals, from WINNER awards only.
+
+    A named tenderer's ``Award.value`` is its losing BID amount — never
+    contract money — so non-winners contribute nothing here. Consortium
+    members of one tendering party all restate the SAME undivided
+    tender value, so amounts are counted once per (lot, tendering
+    party), never once per member. The notice-level TotalAmount is only
+    attributable when there is exactly one winning party; with several
+    winners it is an aggregate we cannot split. Returns
+    ``(estimate_raw, total_raw, payable_raw)``."""
+    party_awards: dict = {}
+    for entry in resolved:
+        if not entry.is_winner:
+            continue
+        key = (
+            getattr(entry.award, "lot_id", None),
+            getattr(entry.award, "tendering_party_id", None)
+            or entry.award.contractor_org_id,
+        )
+        party_awards.setdefault(key, entry.award)
+    payable_raw = _sum_raw(
+        [a.value for a in party_awards.values() if a.value is not None])
+    total_raw = notice.total_value if len(party_awards) == 1 else None
+    estimates = []
+    seen_lots: set = set()
+    for winner_award in party_awards.values():
+        lot_id = getattr(winner_award, "lot_id", None)
+        if lot_id in seen_lots:
+            continue
+        seen_lots.add(lot_id)
+        estimate = _award_lot_estimate(notice, winner_award)
+        if estimate is not None:
+            estimates.append(estimate)
+    return _sum_raw(estimates), total_raw, payable_raw
+
+
 def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
     notice, emit, matcher, seen_authorities, seen_companies,
     currency_svc, skip_pub_num_lookup: bool,
@@ -306,9 +467,11 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     Per-call side effects:
       * Mutates ``seen_authorities`` / ``seen_companies`` for
         per-run dedup of repeated parents within a single archive.
-      * Calls ``emit.upsert`` zero or more times depending on how
-        many awards the notice has and how many distinct
-        (authority, contractor) pairs are encountered.
+      * Calls ``emit.upsert`` zero or more times: UpsertAuthority /
+        UpsertCompany for first-seen parents, then ONE UpsertContract
+        per notice (notice-grain). Every named supplier the notice
+        publishes is resolved and listed in ``parties[]``; the
+        top-level company/match fields stay the primary winner's.
 
     ``skip_pub_num_lookup``: when True, skip the per-notice TED v3
     search call and emit Contracts with ``ted_publication_number=None``.
@@ -317,9 +480,6 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     Without skip, each notice pays ~500ms in the TED API and the
     loader is bottlenecked by that.
     """
-    # pylint: disable=import-outside-toplevel
-    from src.etl.identifiers import canon_vat
-
     buyer = notice.buyer()
     if not buyer:
         return
@@ -371,223 +531,237 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     else:
         ted_publication_number = _resolve_pub_num_or_none(ted_notice_id)
 
-    for award in notice.awards:
-        contractor = notice.organizations.get(award.contractor_org_id)
-        if not contractor:
-            continue
+    # Every named supplier — winners AND named tenderers — resolves
+    # through the consolidator; unmatched ones mint a new node
+    # (create-if-not-found), exactly like the old single-winner path.
+    resolved = _resolve_suppliers(notice, matcher, emit, seen_companies)
+    if not resolved:
+        return
 
-        # eforms-parser 0.2.0 returns ``legal_id`` as a LegalIdentifier.
-        raw_vat: str | None = None
-        if contractor.legal_id is not None:
-            value = contractor.legal_id.value
-            scheme = (contractor.legal_id.scheme_name or "").upper()
-            if scheme == "VAT":
-                raw_vat = canon_vat(value)
-            elif scheme in ("NATIONAL", "EORI", ""):
-                raw_vat = canon_vat(value)
+    # The primary winner (first is_winner award) drives the top-level
+    # company/match fields (backward compat) and the date/currency
+    # context. A notice that names tenderers but resolves no winner
+    # (rare, eForms SettledContract-era) still emits — its named
+    # tenderers matter — but carries no company attribution and no
+    # awarded value (the winner-only aggregation below yields None).
+    primary = next((e for e in resolved if e.is_winner), None)
+    context_award = (primary or resolved[0]).award
 
-        match = matcher.match_company(
-            contractor.name, contractor.country, raw_vat,
+    declared_currency = context_award.currency or notice.currency
+    effective_date, _date_source = _coalesce_date(context_award, notice)
+
+    # Resolve currency + FX-rate date once; the estimate, the awarded
+    # total, and the payable all convert at the same rate.
+    resolved_currency = None
+    rate_date_obj = None
+    if currency_svc:
+        rate_date_str = effective_date or notice.issue_date
+        try:
+            rate_date_obj = (
+                _date.fromisoformat(rate_date_str[:10])
+                if rate_date_str else None
+            )
+        except (ValueError, TypeError):
+            rate_date_obj = None
+        resolved_currency, _inferred = currency_svc.resolve_currency(
+            declared_currency,
+            country=(buyer.country or "").upper(),
+            on=rate_date_obj,
         )
-
-        declared_currency = award.currency or notice.currency
-        effective_date, _date_source = _coalesce_date(award, notice)
-
-        # Resolve currency + FX-rate date once; the estimate, the awarded
-        # total, and the payable all convert at the same rate.
+    else:
+        resolved_currency = declared_currency
+    # TED uses non-currency placeholders (UNPUBLISHED, OP_DATPRO) in the
+    # currency field when no value is published. Null them so the contract
+    # carries no spurious currency (and no value to convert downstream).
+    if resolved_currency and not re.fullmatch(r"[A-Z]{3}", resolved_currency):
         resolved_currency = None
-        rate_date_obj = None
-        if currency_svc:
-            rate_date_str = effective_date or notice.issue_date
-            try:
-                rate_date_obj = (
-                    _date.fromisoformat(rate_date_str[:10])
-                    if rate_date_str else None
-                )
-            except (ValueError, TypeError):
-                rate_date_obj = None
-            resolved_currency, _inferred = currency_svc.resolve_currency(
-                declared_currency,
-                country=(buyer.country or "").upper(),
-                on=rate_date_obj,
-            )
-        else:
-            resolved_currency = declared_currency
-        # TED uses non-currency placeholders (UNPUBLISHED, OP_DATPRO) in the
-        # currency field when no value is published. Null them so the contract
-        # carries no spurious currency (and no value to convert downstream).
-        if resolved_currency and not re.fullmatch(r"[A-Z]{3}", resolved_currency):
-            resolved_currency = None
 
-        # The three money signals. The notice-level TotalAmount is only
-        # attributable to one award; for multi-award notices it is an
-        # aggregate, so we omit it and rely on the payable + estimate.
-        estimate_raw = _award_lot_estimate(notice, award)
-        total_raw = (
-            notice.total_value if len(notice.awards or []) == 1 else None
+    # The three money signals — WINNER-only, one undivided value per
+    # winning tendering party (see _winner_value_inputs). Loser bids
+    # and consortium-member restatements never reach the contract value.
+    estimate_raw, total_raw, payable_raw = _winner_value_inputs(
+        notice, resolved,
+    )
+
+    _est_orig, est_eur = _amount_to_eur(
+        currency_svc, resolved_currency, rate_date_obj, estimate_raw,
+    )
+    tot_orig, tot_eur = _amount_to_eur(
+        currency_svc, resolved_currency, rate_date_obj, total_raw,
+    )
+    pay_orig, pay_eur = _amount_to_eur(
+        currency_svc, resolved_currency, rate_date_obj, payable_raw,
+    )
+    # Pre-modification total: legacy F20 modification notices
+    # self-contain before+after, so a modification self-describes its
+    # value change. Convert at the same rate as the after-value so the
+    # before->after delta is a pure value change, free of FX drift.
+    before_orig, before_eur = _amount_to_eur(
+        currency_svc, resolved_currency, rate_date_obj,
+        getattr(notice, "modification_value_before", None),
+    )
+
+    score = score_contract_value(
+        estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
+        total_original=tot_orig, payable_original=pay_orig,
+    )
+    # Store the chosen value (TotalAmount-preferred) in both
+    # currencies. Low-confidence values are kept but flagged.
+    if score.chosen_field == "total":
+        value_eur_float, value_original_float = tot_eur, tot_orig
+    elif score.chosen_field == "payable":
+        value_eur_float, value_original_float = pay_eur, pay_orig
+    else:
+        value_eur_float, value_original_float = None, None
+
+    # A no-awarded-value contract must not carry a (stray, often
+    # sign-flipped) monetary value; keep value_eur clean.
+    if score.flag.value == "no_awarded_value":
+        value_eur_float, value_original_float = None, None
+
+    if score.is_low_confidence:
+        logger.warning(
+            "TED notice %s value EUR %.3g flagged '%s' "
+            "(confidence %.2f) — stored but excluded from default "
+            "aggregates: %s",
+            ted_notice_id, value_eur_float or 0.0,
+            score.flag.value, score.confidence, score.reason,
         )
-        payable_raw = award.value
 
-        _est_orig, est_eur = _amount_to_eur(
-            currency_svc, resolved_currency, rate_date_obj, estimate_raw,
-        )
-        tot_orig, tot_eur = _amount_to_eur(
-            currency_svc, resolved_currency, rate_date_obj, total_raw,
-        )
-        pay_orig, pay_eur = _amount_to_eur(
-            currency_svc, resolved_currency, rate_date_obj, payable_raw,
-        )
-        # Pre-modification total: legacy F20 modification notices
-        # self-contain before+after, so a modification self-describes its
-        # value change. Convert at the same rate as the after-value so the
-        # before->after delta is a pure value change, free of FX drift.
-        before_orig, before_eur = _amount_to_eur(
-            currency_svc, resolved_currency, rate_date_obj,
-            getattr(notice, "modification_value_before", None),
-        )
-
-        score = score_contract_value(
-            estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
-            total_original=tot_orig, payable_original=pay_orig,
-        )
-        # Store the chosen value (TotalAmount-preferred) in both
-        # currencies. Low-confidence values are kept but flagged.
-        if score.chosen_field == "total":
-            value_eur_float, value_original_float = tot_eur, tot_orig
-        elif score.chosen_field == "payable":
-            value_eur_float, value_original_float = pay_eur, pay_orig
-        else:
-            value_eur_float, value_original_float = None, None
-
-        # A no-awarded-value contract must not carry a (stray, often
-        # sign-flipped) monetary value; keep value_eur clean.
-        if score.flag.value == "no_awarded_value":
-            value_eur_float, value_original_float = None, None
-
-        if score.is_low_confidence:
-            logger.warning(
-                "TED notice %s value EUR %.3g flagged '%s' "
-                "(confidence %.2f) — stored but excluded from default "
-                "aggregates: %s",
-                ted_notice_id, value_eur_float or 0.0,
-                score.flag.value, score.confidence, score.reason,
-            )
-
-        # Emit Company once per archive (per-run dedup); the sink
-        # would MERGE either way.
-        if match.gmr_id not in seen_companies:
-            emit.upsert(
-                "UpsertCompany",
-                iri=f"http://data.fontem.eu/id/Company/{match.gmr_id}",
-                domain="company",
-                payload=builders.upsert_company(
-                    gmr_id=str(match.gmr_id),
-                    name=contractor.name or None,
-                    country=LocationService.to_alpha3(contractor.country),
-                    vat=raw_vat,
-                    active=True,
-                ),
-            )
-            seen_companies.add(match.gmr_id)
-
-        # ── Value quarantine ────────────────────────────────────
-        # A value that fails hard sanity checks is WITHHELD, not
-        # flagged-and-hoped: the event carries no monetary fields (the
-        # sinks also clear any previously rendered ones) plus the
-        # quarantine marker + reason. Review-tier claims go to
-        # events.value_review for a human decision; a published 0
-        # (zero_value) is auto-withheld — non-disclosure in costume —
-        # and keeps the independent estimate. The claimed numbers are
-        # never lost: event log + queue snapshot hold them.
-        if score.quarantined:
-            if score.needs_review:
-                value_review_queue.enqueue_default(
-                    ted_notice_id=ted_notice_id,
-                    reason=score.flag.value,
-                    claimed_value_eur=value_eur_float,
-                    claimed_value_original=value_original_float,
-                    claimed_currency=resolved_currency,
-                    claimed_estimated_eur=est_eur,
-                    claimed_payable_eur=pay_eur,
-                    detail=score.reason,
-                )
-            value_eur_float = value_original_float = None
-            resolved_currency = None
-            if score.flag.value != "zero_value":
-                est_eur = pay_eur = None
-                before_eur = before_orig = None
-
-        # Match provenance — lets exact (lei/vat/cik) and name-based
-        # (name_country/fuzzy) attributions be told apart on the
-        # AWARDED_TO edge downstream. Layer 1 is the local VAT cache (a
-        # deterministic VAT match); layer 5 minted a new node, so there
-        # is no resolved tier or confidence against an existing entity.
-        match_tier = match.resolver_tier or (
-            "vat" if match.layer == 1 else None)
-        contract_payload = builders.upsert_contract(
+    # ── Value quarantine ────────────────────────────────────
+    # A value that fails hard sanity checks is WITHHELD, not
+    # flagged-and-hoped: the event carries no monetary fields (the
+    # sinks also clear any previously rendered ones) plus the
+    # quarantine marker + reason. Review-tier claims go to
+    # events.value_review for a human decision; a published 0
+    # (zero_value) is auto-withheld — non-disclosure in costume —
+    # and keeps the independent estimate. The claimed numbers are
+    # never lost: event log + queue snapshot hold them.
+    if score.quarantined:
+        if score.needs_review:
+            value_review_queue.enqueue_default(
                 ted_notice_id=ted_notice_id,
-                ted_publication_number=ted_publication_number,
-                title=notice.title or None,
-                authority_id=authority_id,
-                company_gmr_id=str(match.gmr_id),
-                match_tier=match_tier,
-                match_confidence=(None if match.created_new
-                                  else match.confidence),
-                match_layer=match.layer,
-                publication_date=notice.issue_date or None,
-                value_eur=value_eur_float,
-                value_currency=resolved_currency,
-                value_original=value_original_float,
-                value_before_eur=before_eur,
-                value_before_original=before_orig,
-                estimated_value_eur=est_eur,
-                value_payable_eur=pay_eur,
-                value_confidence=score.confidence,
-                value_confidence_consistency=score.consistency,
-                value_confidence_plausibility=score.plausibility,
-                value_quality_flag=score.flag.value,
-                value_low_confidence=score.is_low_confidence,
-                value_payable_discrepancy=score.has_payable_discrepancy,
-                value_quarantined=score.quarantined or None,
-                value_quarantine_reason=(score.flag.value
-                                         if score.quarantined else None),
-                cpv=notice.cpv_main,
-                nuts=getattr(notice, "place_nuts", None),
-                language=getattr(notice, "language", None),
-                # Country of the contracting authority (the buyer /
-                # acquirer). Cascaded onto the Contract because TED
-                # contracts are jurisdictionally grouped by the
-                # procuring entity, not the awarded vendor.
-                country=LocationService.to_alpha3(buyer.country),
-                # Tender-integrity fields (eForms) — inputs to the SMSB
-                # single-bidder / non-open indicators + the CRI red flags.
-                procedure_type=notice.procedure_type,
-                tenders_received=award.tenders_received,
-                award_criterion_type=notice.award_criterion_type,
-                submission_deadline=notice.submission_deadline,
-                is_framework=notice.is_framework,
-                eu_funded=notice.eu_funded,
-                funding_programme=notice.funding_programme,
+                reason=score.flag.value,
+                claimed_value_eur=value_eur_float,
+                claimed_value_original=value_original_float,
+                claimed_currency=resolved_currency,
+                claimed_estimated_eur=est_eur,
+                claimed_payable_eur=pay_eur,
+                detail=score.reason,
             )
-        # Incremental/modification stamps (procedure_id, notice_type,
-        # modifies_publication_number) are added to the payload dict
-        # directly. These three are optional fields in the UpsertContract
-        # schema (UpsertContract.json), so the payload validates; both sinks
-        # read them from props. Augmenting here keeps the builder signature
-        # stable while the schema stays the single source of truth.
-        if extra_props:
-            contract_payload.update(
-                {k: v for k, v in extra_props.items() if v is not None}
-            )
-        emit.upsert(
-            "UpsertContract",
-            # IRI keyed by the stable UUID (notice_id) so it doesn't
-            # change once TED assigns / revises a publication-number
-            # after first ingest.
-            iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
-            domain="contract",
-            payload=contract_payload,
+        value_eur_float = value_original_float = None
+        resolved_currency = None
+        if score.flag.value != "zero_value":
+            est_eur = pay_eur = None
+            before_eur = before_orig = None
+
+    # Match provenance — lets exact (lei/vat/cik) and name-based
+    # (name_country/fuzzy) attributions be told apart on the
+    # AWARDED_TO edge downstream. The top-level fields stay the
+    # PRIMARY winner's for backward compat; per-party provenance
+    # rides each parties[] entry.
+    if primary is not None:
+        match_tier, match_confidence = _match_provenance(primary.match)
+        company_gmr_id = str(primary.match.gmr_id)
+        match_layer = primary.match.layer
+    else:
+        match_tier = match_confidence = None
+        company_gmr_id = match_layer = None
+
+    # Incremental stamps (procedure_id / notice_type /
+    # modifies_publication_number) arrive via ``extra_props`` from the
+    # search-API path; the bulk-archive path falls back to what the
+    # parser read off the notice itself. contract_key / notice_kind
+    # are derived with the shared helper so the producer stamp, the
+    # sink's native Contract/Notice model and collapse_modifications'
+    # Cypher grouping all agree on contract identity. (Bulk historical
+    # loads with skip_pub_num_lookup stamp the notice UUID; the
+    # collapse pass re-derives from node props once the
+    # publication-number backfill has run.)
+    stamps = extra_props or {}
+    procedure_id = stamps.get("procedure_id")
+    notice_type = (
+        stamps.get("notice_type") or getattr(notice, "notice_type", None)
+    )
+    notice_kind = (
+        "modification" if notice_type == _MODIFICATION_NOTICE_TYPE
+        else "award"
+    )
+    modifies_publication_number = None
+    if notice_kind == "modification":
+        modifies_publication_number = (
+            stamps.get("modifies_publication_number")
+            or getattr(notice, "modifies_publication_number", None)
         )
+    contract_key = derive_contract_key(
+        procedure_id=procedure_id,
+        notice_type=notice_type,
+        modifies_publication_number=modifies_publication_number,
+        ted_publication_number=ted_publication_number,
+        ted_notice_id=ted_notice_id,
+    )
+
+    contract_payload = builders.upsert_contract(
+        ted_notice_id=ted_notice_id,
+        ted_publication_number=ted_publication_number,
+        title=notice.title or None,
+        authority_id=authority_id,
+        company_gmr_id=company_gmr_id,
+        match_tier=match_tier,
+        match_confidence=match_confidence,
+        match_layer=match_layer,
+        publication_date=notice.issue_date or None,
+        value_eur=value_eur_float,
+        value_currency=resolved_currency,
+        value_original=value_original_float,
+        value_before_eur=before_eur,
+        value_before_original=before_orig,
+        estimated_value_eur=est_eur,
+        value_payable_eur=pay_eur,
+        value_confidence=score.confidence,
+        value_confidence_consistency=score.consistency,
+        value_confidence_plausibility=score.plausibility,
+        value_quality_flag=score.flag.value,
+        value_low_confidence=score.is_low_confidence,
+        value_payable_discrepancy=score.has_payable_discrepancy,
+        value_quarantined=score.quarantined or None,
+        value_quarantine_reason=(score.flag.value
+                                 if score.quarantined else None),
+        cpv=notice.cpv_main,
+        nuts=getattr(notice, "place_nuts", None),
+        language=getattr(notice, "language", None),
+        # Country of the contracting authority (the buyer /
+        # acquirer). Cascaded onto the Contract because TED
+        # contracts are jurisdictionally grouped by the
+        # procuring entity, not the awarded vendor.
+        country=LocationService.to_alpha3(buyer.country),
+        # Tender-integrity fields (eForms) — inputs to the SMSB
+        # single-bidder / non-open indicators + the CRI red flags.
+        # tenders_received stays the notice's published bidder COUNT;
+        # parties[] (the named subset) must never redefine it.
+        procedure_type=notice.procedure_type,
+        tenders_received=context_award.tenders_received,
+        award_criterion_type=notice.award_criterion_type,
+        submission_deadline=notice.submission_deadline,
+        is_framework=notice.is_framework,
+        eu_funded=notice.eu_funded,
+        funding_programme=notice.funding_programme,
+        procedure_id=procedure_id,
+        notice_type=notice_type,
+        notice_kind=notice_kind,
+        modifies_publication_number=modifies_publication_number,
+        contract_key=contract_key,
+        parties=_build_parties(resolved),
+    )
+    emit.upsert(
+        "UpsertContract",
+        # IRI keyed by the stable UUID (notice_id) so it doesn't
+        # change once TED assigns / revises a publication-number
+        # after first ingest.
+        iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
+        domain="contract",
+        payload=contract_payload,
+    )
 
 
 _WATERMARK_ID = "ted-incremental"
