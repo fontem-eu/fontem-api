@@ -66,7 +66,13 @@ def _mock_matcher(stub_authority_id: str, stub_company_gmr: str):
     return matcher
 
 
-def _stub_award(currency="EUR", value=1000.0, contractor_org_id="O1"):
+def _stub_award(currency="EUR", value=1000.0, contractor_org_id="O1",  # pylint: disable=too-many-arguments,too-many-positional-arguments
+                is_winner=True, rank=None, is_consortium_member=False,
+                tendering_party_id=None, lot_id="LOT-0001"):
+    """One parser Award. Defaults mirror the common case (a single
+    winning supplier); the multi-supplier tests pass is_winner=False /
+    tendering_party_id to model named losers and consortia (parser
+    0.8.0 emits one Award per named supplier)."""
     award = MagicMock()
     award.contractor_org_id = contractor_org_id
     award.value = value
@@ -74,6 +80,11 @@ def _stub_award(currency="EUR", value=1000.0, contractor_org_id="O1"):
     award.award_date = "2025-09-15"
     award.conclusion_date = None
     award.tenders_received = 1  # single-bidder, for the integrity assertions
+    award.is_winner = is_winner
+    award.rank = rank
+    award.is_consortium_member = is_consortium_member
+    award.tendering_party_id = tendering_party_id
+    award.lot_id = lot_id
     return award
 
 
@@ -1155,3 +1166,401 @@ def test_emit_notice_no_before_value_for_plain_contract():
     ).kwargs["payload"]
     assert "value_before_eur" not in payload
     assert "value_before_original" not in payload
+
+
+# ── parties[] + contract identity (eforms-parser 0.8.0 / schemas 0.2.0) ──
+
+
+def _matcher_by_name(authority_id, results_by_name):
+    """A TedMatcher stand-in resolving each supplier name to its own
+    MatchResult — the multi-supplier tests need per-party provenance."""
+    matcher = MagicMock()
+    matcher.match_authority.return_value = authority_id
+    matcher.match_company.side_effect = (
+        lambda name, _country, _vat=None: results_by_name[name]
+    )
+    return matcher
+
+
+def _org(name, country="HU"):
+    org = MagicMock()
+    org.name = name
+    org.country = country
+    org.legal_id = None
+    return org
+
+
+def _contract_payload(emit):
+    return next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+
+
+def test_contract_key_prefers_procedure_id():
+    """An award that carries a procedure_id groups under it — same
+    coalesce order as collapse_modifications' Cypher."""
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+        pub_num_override="100-2026",
+        extra_props={"procedure_id": "PROC-7", "notice_type": "can-standard",
+                     "modifies_publication_number": None},
+    )
+    payload = _contract_payload(emit)
+    assert payload["contract_key"] == "PROC-7"
+    assert payload["notice_kind"] == "award"
+
+
+def test_contract_key_award_falls_back_to_publication_number():
+    """No procedure_id: an award groups under its own publication-number
+    (coalesce(procedure_id, ted_publication_number, ted_notice_id))."""
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+        pub_num_override="24047-2024",
+    )
+    payload = _contract_payload(emit)
+    assert payload["contract_key"] == "24047-2024"
+    assert payload["notice_kind"] == "award"
+
+
+def test_contract_key_modification_uses_modifies_ref():
+    """A can-modif notice groups under the publication-number of the
+    notice it modifies, never its own — otherwise every modification
+    would become its own 'contract' and totals double-count."""
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+        pub_num_override="555-2026",
+        extra_props={"procedure_id": None, "notice_type": "can-modif",
+                     "modifies_publication_number": "111-2024"},
+    )
+    payload = _contract_payload(emit)
+    assert payload["contract_key"] == "111-2024"
+    assert payload["notice_kind"] == "modification"
+    assert payload["notice_type"] == "can-modif"
+    assert payload["modifies_publication_number"] == "111-2024"
+
+
+def test_contract_key_modification_parsed_fallback():
+    """The bulk path has no search-API stamps: a parsed legacy F20
+    modification still derives kind + key from what the parser read
+    off the notice itself."""
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
+    )
+    notice.notice_type = "can-modif"
+    notice.modifies_publication_number = "111-2020"
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = _contract_payload(emit)
+    assert payload["notice_kind"] == "modification"
+    assert payload["contract_key"] == "111-2020"
+
+
+def test_contract_key_falls_back_to_notice_uuid():
+    """Historical bulk loads (skip_pub_num_lookup) have neither a
+    procedure_id nor a publication-number yet: the notice UUID is the
+    last-resort key, mirroring the Cypher coalesce."""
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = _contract_payload(emit)
+    assert payload["contract_key"] == "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+
+
+def test_parties_mixed_winner_loser_consortium():
+    """A HU-style eForms notice: a two-member winning consortium plus a
+    named losing bidder. Every supplier is resolved and listed; the
+    top-level company/match fields stay the primary winner's; the
+    contract value counts the consortium's undivided value ONCE and the
+    loser's bid never."""
+    awards = [
+        _stub_award(value=1000.0, contractor_org_id="O1",
+                    is_consortium_member=True, tendering_party_id="TPA-1"),
+        _stub_award(value=1000.0, contractor_org_id="O2",
+                    is_consortium_member=True, tendering_party_id="TPA-1"),
+        _stub_award(value=800.0, contractor_org_id="O3", is_winner=False,
+                    rank=2, tendering_party_id="TPA-2"),
+    ]
+    notice = _stub_notice(
+        awards=awards,
+        organizations={"O1": _org("Alfa Zrt."), "O2": _org("Beta Kft."),
+                       "O3": _org("Gamma Bt.")},
+    )
+    notice.total_value = 1000.0
+    matcher = _matcher_by_name("auth-1", {
+        "Alfa Zrt.": MatchResult(gmr_id="gmr-alfa", layer=2, confidence=0.99,
+                                 resolver_tier="vat"),
+        "Beta Kft.": MatchResult(gmr_id="gmr-beta", layer=3, confidence=0.92,
+                                 resolver_tier="fuzzy"),
+        "Gamma Bt.": MatchResult(gmr_id="gmr-gamma", layer=5, confidence=0.0,
+                                 created_new=True),
+    })
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = _contract_payload(emit)
+
+    # Backward compat: top-level fields are the primary winner's.
+    assert payload["company_gmr_id"] == "gmr-alfa"
+    assert payload["match_tier"] == "vat"
+    assert payload["match_confidence"] == 0.99
+    assert payload["match_layer"] == 2
+
+    # parties[]: all three suppliers, with roles + per-party provenance.
+    parties = payload["parties"]
+    by_gmr = {p["company_gmr_id"]: p for p in parties}
+    assert set(by_gmr) == {"gmr-alfa", "gmr-beta", "gmr-gamma"}
+    assert by_gmr["gmr-alfa"]["role"] == "winner"
+    assert by_gmr["gmr-alfa"]["is_consortium_member"] is True
+    assert by_gmr["gmr-alfa"]["tendering_party_id"] == "TPA-1"
+    assert by_gmr["gmr-beta"]["role"] == "winner"
+    assert by_gmr["gmr-beta"]["match_tier"] == "fuzzy"
+    assert by_gmr["gmr-beta"]["match_confidence"] == 0.92
+    assert by_gmr["gmr-gamma"]["role"] == "named_tenderer"
+    assert by_gmr["gmr-gamma"]["rank"] == 2
+    # created_new: no tier/confidence against an existing entity.
+    assert "match_tier" not in by_gmr["gmr-gamma"]
+    assert "match_confidence" not in by_gmr["gmr-gamma"]
+    assert by_gmr["gmr-gamma"]["match_layer"] == 5
+
+    # Value correctness: the consortium's shared 1000 counts once (not
+    # 2000) and the loser's 800 bid is excluded entirely.
+    assert payload["value_eur"] == 1000.0
+    assert payload["value_payable_eur"] == 1000.0
+    # tenders_received stays the published bidder count — never len(parties).
+    assert payload["tenders_received"] == 1
+
+    # Every named supplier got the create-if-not-found UpsertCompany path.
+    company_ids = [
+        c.kwargs["payload"]["gmr_id"] for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertCompany"
+    ]
+    assert sorted(company_ids) == ["gmr-alfa", "gmr-beta", "gmr-gamma"]
+
+
+def test_value_excludes_loser_bids():
+    """A named tenderer's Award.value is its BID amount. Summing it into
+    the contract value would fabricate money — winner-only."""
+    awards = [
+        _stub_award(value=500.0, contractor_org_id="O1"),
+        _stub_award(value=9_999_999.0, contractor_org_id="O2",
+                    is_winner=False, tendering_party_id="TPB-9"),
+    ]
+    notice = _stub_notice(
+        awards=awards,
+        organizations={"O1": _org("Winner Kft."), "O2": _org("Loser Zrt.")},
+    )
+    notice.total_value = 500.0
+    matcher = _matcher_by_name("auth-1", {
+        "Winner Kft.": MatchResult(gmr_id="gmr-w", layer=2, confidence=0.99,
+                                   resolver_tier="vat"),
+        "Loser Zrt.": MatchResult(gmr_id="gmr-l", layer=2, confidence=0.97,
+                                  resolver_tier="name_country"),
+    })
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = _contract_payload(emit)
+    assert payload["value_eur"] == 500.0
+    assert payload["value_payable_eur"] == 500.0
+    roles = {p["company_gmr_id"]: p["role"] for p in payload["parties"]}
+    assert roles == {"gmr-w": "winner", "gmr-l": "named_tenderer"}
+
+
+def test_multi_winner_total_not_attributed():
+    """Two winning parties on different lots: the notice-level
+    TotalAmount is an aggregate we cannot split, so it is dropped and
+    the per-party payables sum instead (100 + 200, never the 999)."""
+    lot_a, lot_b = MagicMock(), MagicMock()
+    lot_a.lot_id, lot_a.estimated_value = "LOT-A", 100.0
+    lot_b.lot_id, lot_b.estimated_value = "LOT-B", 200.0
+    awards = [
+        _stub_award(value=100.0, contractor_org_id="O1", lot_id="LOT-A"),
+        _stub_award(value=200.0, contractor_org_id="O2", lot_id="LOT-B"),
+    ]
+    notice = _stub_notice(
+        awards=awards,
+        organizations={"O1": _org("Uno Kft."), "O2": _org("Duo Kft.")},
+    )
+    notice.lots = [lot_a, lot_b]
+    notice.total_value = 999.0
+    matcher = _matcher_by_name("auth-1", {
+        "Uno Kft.": MatchResult(gmr_id="gmr-1", layer=2, confidence=0.99,
+                                resolver_tier="vat"),
+        "Duo Kft.": MatchResult(gmr_id="gmr-2", layer=2, confidence=0.99,
+                                resolver_tier="vat"),
+    })
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = _contract_payload(emit)
+    assert payload["value_payable_eur"] == 300.0
+    assert payload["value_eur"] == 300.0
+    assert payload["estimated_value_eur"] == 300.0
+
+
+def test_no_winner_notice_emits_named_tenderers_only():
+    """SettledContract references that resolve no winner: the notice
+    still lands (its named tenderers matter) but carries no company
+    attribution and no awarded value — a loser's bid must not become
+    the contract value."""
+    awards = [
+        _stub_award(value=700.0, contractor_org_id="O1", is_winner=False),
+    ]
+    notice = _stub_notice(
+        awards=awards, organizations={"O1": _org("Solo Bt.")},
+    )
+    notice.total_value = None
+    matcher = _matcher_by_name("auth-1", {
+        "Solo Bt.": MatchResult(gmr_id="gmr-s", layer=2, confidence=0.95,
+                                resolver_tier="name_country"),
+    })
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = _contract_payload(emit)
+    assert "company_gmr_id" not in payload
+    assert "value_eur" not in payload
+    assert "value_payable_eur" not in payload
+    assert payload["parties"][0]["role"] == "named_tenderer"
+    # The loser is still resolved + minted (create-if-not-found).
+    assert any(c.args[0] == "UpsertCompany"
+               for c in emit.upsert.call_args_list)
+
+
+def test_parties_dedupe_supplier_winning_several_lots():
+    """A supplier that won two lots is one party entry (and one
+    UpsertCompany), not two."""
+    awards = [
+        _stub_award(value=100.0, contractor_org_id="O1", lot_id="LOT-A"),
+        _stub_award(value=200.0, contractor_org_id="O1", lot_id="LOT-B"),
+    ]
+    notice = _stub_notice(
+        awards=awards, organizations={"O1": _org("Repeat Kft.")},
+    )
+    matcher = _matcher_by_name("auth-1", {
+        "Repeat Kft.": MatchResult(gmr_id="gmr-r", layer=2, confidence=0.99,
+                                   resolver_tier="vat"),
+    })
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = _contract_payload(emit)
+    assert len(payload["parties"]) == 1
+    assert payload["parties"][0]["company_gmr_id"] == "gmr-r"
+    companies = [c for c in emit.upsert.call_args_list
+                 if c.args[0] == "UpsertCompany"]
+    assert len(companies) == 1
+
+
+def test_legacy_single_contractor_path_unchanged():
+    """Oldgen/F03 regression: a single CONTRACTOR award (parser default
+    is_winner=True, no rank / tendering party / consortium flags)
+    produces the same top-level fields as before, and its parties[] is
+    exactly one plain winner entry — no named_tenderer entries, no
+    spurious rank/consortium keys."""
+    award = _stub_award(rank=None, tendering_party_id=None,
+                        is_consortium_member=False, lot_id=None)
+    notice = _stub_notice(
+        awards=[award], organizations={"O1": _org("S.C. Fortat-House S.R.L.",
+                                                  country="RO")},
+    )
+    notice.total_value = 1000.0
+    matcher = _mock_matcher("auth-1", "company-1")
+    matcher.match_company.return_value = MatchResult(
+        gmr_id="company-1", layer=2, confidence=0.95,
+        resolver_tier="name_country",
+    )
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        pub_num_override="24047-2024", notice_id_override="24047-2024",
+    )
+    payload = _contract_payload(emit)
+    # Top-level shape is byte-for-byte the pre-parties contract.
+    assert payload["ted_notice_id"] == "24047-2024"
+    assert payload["company_gmr_id"] == "company-1"
+    assert payload["match_tier"] == "name_country"
+    assert payload["match_confidence"] == 0.95
+    assert payload["match_layer"] == 2
+    assert payload["value_eur"] == 1000.0
+    assert payload["tenders_received"] == 1
+    # parties[] is the single plain winner.
+    assert payload["parties"] == [{
+        "company_gmr_id": "company-1",
+        "name": "S.C. Fortat-House S.R.L.",
+        "role": "winner",
+        "match_tier": "name_country",
+        "match_confidence": 0.95,
+        "match_layer": 2,
+    }]
+
+
+def test_emitted_payload_validates_against_schema():
+    """Smoke emit: the full multi-supplier payload passes the same
+    jsonschema validation the producer runs at emit time (the event
+    would be rejected before landing otherwise)."""
+    # pylint: disable=import-outside-toplevel
+    from fontem_event_schemas.validate import validate
+
+    awards = [
+        _stub_award(value=1000.0, contractor_org_id="O1",
+                    is_consortium_member=True, tendering_party_id="TPA-1"),
+        _stub_award(value=800.0, contractor_org_id="O2", is_winner=False,
+                    rank=2, tendering_party_id="TPA-2"),
+    ]
+    notice = _stub_notice(
+        awards=awards,
+        organizations={"O1": _org("Alfa Zrt."), "O2": _org("Beta Kft.")},
+    )
+    notice.total_value = 1000.0
+    matcher = _matcher_by_name(
+        "11111111-2222-5333-8444-555555555555", {
+            "Alfa Zrt.": MatchResult(
+                gmr_id="00040372-dad6-5d34-882c-8b8624b4e734", layer=2,
+                confidence=0.99, resolver_tier="vat"),
+            "Beta Kft.": MatchResult(
+                gmr_id="00040372-dad6-5d34-882c-8b8624b4e735", layer=5,
+                confidence=0.0, created_new=True),
+        })
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        pub_num_override="295342-2026",
+        extra_props={"procedure_id": "PROC-1",
+                     "notice_type": "can-standard",
+                     "modifies_publication_number": None},
+    )
+    for call in emit.upsert.call_args_list:
+        event_type = call.args[0]
+        validate(event_type, 1, call.kwargs["payload"])
+    payload = _contract_payload(emit)
+    assert payload["contract_key"] == "PROC-1"
+    assert len(payload["parties"]) == 2

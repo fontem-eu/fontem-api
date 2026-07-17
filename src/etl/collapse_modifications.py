@@ -53,6 +53,35 @@ logger = logging.getLogger(__name__)
 
 _MOD = "can-modif"
 
+
+def derive_contract_key(
+    *,
+    procedure_id: str | None,
+    notice_type: str | None,
+    modifies_publication_number: str | None,
+    ted_publication_number: str | None,
+    ted_notice_id: str,
+) -> str:
+    """The stable contract identity a notice groups under.
+
+    Python mirror of the Cypher grouping in the three collapse queries
+    below — KEEP THEM IN SYNC. Awards coalesce (procedure_id,
+    ted_publication_number, ted_notice_id); modification notices
+    (notice_type = 'can-modif') coalesce (procedure_id,
+    modifies_publication_number, ted_notice_id). The TED loader stamps
+    this on every UpsertContract at emit time so the sink can build the
+    Contract/Notice model natively; the collapse pass re-derives the
+    same key from node props for notices that predate the stamp (or
+    whose publication-number was backfilled after ingest).
+    """
+    if procedure_id:
+        return procedure_id
+    linking_ref = (
+        modifies_publication_number if notice_type == _MOD
+        else ted_publication_number
+    )
+    return linking_ref or ted_notice_id
+
 # Cohort 1: awards that have >=1 modification. current_value = latest non-null
 # restated value across the award + its modifications (mods restate the full
 # value, so the most recent notice by publication_date wins; fall back to the
