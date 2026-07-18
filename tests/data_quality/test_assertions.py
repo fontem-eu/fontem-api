@@ -8,6 +8,7 @@ drive every code path with in-memory fakes.
 # pylint: disable=protected-access,unused-argument
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -15,8 +16,9 @@ import pytest
 from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
     ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
-    CONSISTENCY,
-    COVERAGE, ORACLE, GRAIN, Assertion, by_id, le_threshold, min_coverage, oracle_band,
+    CONSISTENCY, LINGUISTICS, RESOLUTION,
+    COVERAGE, ORACLE, GRAIN, Assertion, by_id, le_threshold, min_coverage,
+    no_confident_pair, oracle_band, resolves_confidently, resolves_via_tier,
     zero_violations,
     zero_with_detail,
 )
@@ -38,11 +40,12 @@ def test_ids_unique():
 
 def test_families_and_severities_valid():
     fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE, ORACLE,
-            CONSISTENCY, GRAIN}
+            CONSISTENCY, GRAIN, LINGUISTICS, RESOLUTION}
     for a in ASSERTIONS:
         assert a.family in fams, a.id
         assert a.severity in (BLOCK, WARN), a.id
-        assert a.engine in ("cypher", "sql", "consistency", "prices"), a.id
+        assert a.engine in ("cypher", "sql", "consistency", "prices",
+                            "consolidator"), a.id
         assert a.query.strip(), a.id
         assert callable(a.evaluate), a.id
 
@@ -54,6 +57,13 @@ def test_two_tier_severity_mapping():
             assert a.severity == BLOCK, a.id
         if a.family in (PIPELINE, FRESHNESS):
             assert a.severity == WARN, a.id
+        # linguistics is enrichment progress (red for weeks until the
+        # pipeline first runs) — never a gate; resolution probes service
+        # correctness — always a gate.
+        if a.family == LINGUISTICS:
+            assert a.severity == WARN, a.id
+        if a.family == RESOLUTION:
+            assert a.severity == BLOCK, a.id
 
 
 def test_values_block_except_documented_warn():
@@ -69,6 +79,12 @@ def test_engine_matches_family():
             assert a.engine == "cypher", a.id
         elif a.family == CONSISTENCY:
             assert a.engine == "consistency", a.id
+        elif a.family == LINGUISTICS:
+            # graph-side coverage is cypher; search-store floors +
+            # sink lag are sql — per assertion.
+            assert a.engine in ("cypher", "sql"), a.id
+        elif a.family == RESOLUTION:
+            assert a.engine == "consolidator", a.id
         else:
             # events families are sql; the price-layer freshness pair
             # reads the NFS index via the dedicated prices engine.
@@ -175,7 +191,24 @@ def _all_clean_cypher(_q):
 
 
 def _all_clean_sql(_q):
-    return {"violations": 0, "lag": 0, "dl": 0, "detail": "", "found": 300000}
+    # `found` clears every sql at_least floor (largest: the 3M company
+    # embedding-row floor).
+    return {"violations": 0, "lag": 0, "dl": 0, "detail": "", "found": 3_500_000}
+
+
+def _all_clean_consolidator(query):
+    """Dispatch on the parsed JSON spec, the way the real runner does —
+    the nonsense-name probe must NOT pair while the known-entity probes
+    must, so a single static row cannot satisfy the family."""
+    body = json.loads(query)["body"]
+    if "Zzqx" in (body.get("name") or ""):
+        return {"hint": "no_match", "match_found": 0, "n_candidates": 0,
+                "top_confidence": 0.0, "top_tier": ""}
+    if body.get("vat"):
+        return {"hint": "matched", "match_found": 1, "n_candidates": 0,
+                "top_confidence": 0.99, "top_tier": "vat"}
+    return {"hint": "matched", "match_found": 1, "n_candidates": 0,
+            "top_confidence": 0.95, "top_tier": "name_country"}
 
 
 def test_run_catalog_all_pass():
@@ -183,7 +216,8 @@ def test_run_catalog_all_pass():
         _all_clean_cypher, _all_clean_sql,
         consistency=lambda et: {"violations": 0, "total": 12, "detail": ""},
         prices=lambda q: {"index_present": True, "universe_present": True,
-                          "fresh_ratio": 1.0, "fresh_7d": 1, "with_data": 1})
+                          "fresh_ratio": 1.0, "fresh_7d": 1, "with_data": 1},
+        consolidator=_all_clean_consolidator)
     assert len(results) == len(ASSERTIONS)
     assert all(r.status == PASS for r in results)
     assert exit_code(results) == 0
@@ -213,7 +247,8 @@ def test_summarise_counts():
 
 
 def test_format_report_contains_verdict_and_families():
-    results = run_catalog(_all_clean_cypher, _all_clean_sql)
+    results = run_catalog(_all_clean_cypher, _all_clean_sql,
+                          consolidator=_all_clean_consolidator)
     text = format_report(results, "staging")
     assert "staging" in text
     assert "[keys]" in text and "[freshness]" in text
@@ -611,3 +646,201 @@ def test_cellar_ft_index_check():
     unbuilt = consistency.cellar_ft_index_check(_PetFakeVirtuoso(0))
     assert unbuilt["violations"] == 1
     assert "canary" in unbuilt["detail"]
+
+
+# ── linguistics + resolution families (embeddings/translations/consolidator) ──
+
+
+def test_linguistics_assertions_present_and_warn():
+    cat = by_id()
+    for aid in ("linguistics.authority_embedding_coverage",
+                "linguistics.authority_translation_coverage",
+                "linguistics.search_embedding_company_floor",
+                "linguistics.search_embedding_authority_floor",
+                "linguistics.search_embedding_single_encoder",
+                "linguistics.embedding_sink_lag"):
+        assert aid in cat, aid
+        assert cat[aid].family == LINGUISTICS, aid
+        assert cat[aid].severity == WARN, aid
+
+
+def test_authority_translation_query_lists_all_24_langs():
+    """The coverage query must enumerate every EU official language —
+    a dropped property silently shrinks the natural-full count."""
+    q = by_id()["linguistics.authority_translation_coverage"].query
+    langs = ("bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr",
+             "ga", "hr", "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt",
+             "ro", "sk", "sl", "sv")
+    assert len(langs) == 24
+    for code in langs:
+        assert f"a.name_{code}" in q, code
+    assert ">= 20" in q
+
+
+def test_authority_embedding_query_requires_768d():
+    q = by_id()["linguistics.authority_embedding_coverage"].query
+    assert "name_embedding_dim = 768" in q
+
+
+def test_linguistics_floor_and_encoder_evaluators():
+    company = by_id()["linguistics.search_embedding_company_floor"]
+    assert company.evaluate({"found": 3_824_256})[0] is True
+    assert company.evaluate({"found": 2_999_999})[0] is False
+    authority = by_id()["linguistics.search_embedding_authority_floor"]
+    assert authority.evaluate({"found": 78_398})[0] is True
+    assert authority.evaluate({"found": 59_999})[0] is False
+    encoder = by_id()["linguistics.search_embedding_single_encoder"]
+    assert encoder.evaluate({"n_encoders": 1})[0] is True
+    assert encoder.evaluate({"n_encoders": 0})[0] is True   # empty table
+    ok, obs = encoder.evaluate({"n_encoders": 2})
+    assert not ok and "distinct encoder_ids=2 (limit 1)" == obs
+
+
+def test_embedding_sink_lag_evaluator_generous_ceiling():
+    lag = by_id()["linguistics.embedding_sink_lag"]
+    # 10-22M is the current backfill-flood reality: must WARN-pass.
+    assert lag.evaluate({"lag": 22_000_000})[0] is True
+    assert lag.evaluate({"lag": 30_000_001})[0] is False
+    # the ceiling is documented as temporary
+    assert "tighten" in lag.rationale.lower()
+
+
+def test_resolution_assertions_present_and_blocking():
+    cat = by_id()
+    for aid in ("resolution.known_company_resolves",
+                "resolution.nonsense_name_no_pair",
+                "resolution.vat_exact_wins",
+                "resolution.known_authority_resolves"):
+        assert aid in cat, aid
+        assert cat[aid].family == RESOLUTION, aid
+        assert cat[aid].severity == BLOCK, aid
+        assert cat[aid].engine == "consolidator", aid
+
+
+def test_resolution_query_specs_are_valid_json():
+    """Every consolidator query is a JSON spec the runner can POST."""
+    for a in ASSERTIONS:
+        if a.engine != "consolidator":
+            continue
+        spec = json.loads(a.query)
+        assert spec["path"] == "/resolve", a.id
+        assert spec["body"]["entity_type"] in ("Company", "Authority"), a.id
+        assert spec["body"].get("name") or spec["body"].get("vat"), a.id
+
+
+def test_resolves_confidently_accepts_match_or_candidates():
+    ev = resolves_confidently(0.9, "probe")
+    # today's ambiguous-duplicate state: candidates only
+    ok, obs = ev({"hint": "ambiguous", "match_found": 0, "n_candidates": 2,
+                  "top_confidence": 0.95, "top_tier": "name_country"})
+    assert ok and "candidates=2" in obs
+    # future post-merge state: direct match
+    assert ev({"hint": "matched", "match_found": 1, "n_candidates": 0,
+               "top_confidence": 0.95, "top_tier": "name_country"})[0] is True
+    # broken: nothing came back
+    assert ev({"hint": "no_match", "match_found": 0, "n_candidates": 0,
+               "top_confidence": 0.0, "top_tier": ""})[0] is False
+    # broken: only low-confidence fuzz
+    assert ev({"hint": "ambiguous", "match_found": 0, "n_candidates": 3,
+               "top_confidence": 0.4, "top_tier": "fuzzy"})[0] is False
+
+
+def test_no_confident_pair_evaluator():
+    ev = no_confident_pair(0.9, "nonsense")
+    assert ev({"hint": "no_match", "match_found": 0, "n_candidates": 0,
+               "top_confidence": 0.0, "top_tier": ""})[0] is True
+    # low-confidence fuzzy chatter is fine — it is not a pairing
+    assert ev({"hint": "ambiguous", "match_found": 0, "n_candidates": 2,
+               "top_confidence": 0.5, "top_tier": "fuzzy"})[0] is True
+    # a direct match on garbage is the failure mode
+    assert ev({"hint": "matched", "match_found": 1, "n_candidates": 0,
+               "top_confidence": 0.95, "top_tier": "name_country"})[0] is False
+    # so is a near-certain candidate
+    assert ev({"hint": "ambiguous", "match_found": 0, "n_candidates": 1,
+               "top_confidence": 0.94, "top_tier": "fuzzy"})[0] is False
+
+
+def test_resolves_via_tier_evaluator():
+    ev = resolves_via_tier("vat", 0.99, "vat probe")
+    ok, obs = ev({"hint": "matched", "match_found": 1, "n_candidates": 0,
+                  "top_confidence": 0.99, "top_tier": "vat"})
+    assert ok and "tier=vat" in obs
+    # hard IDs must not come back through a name tier...
+    assert ev({"hint": "matched", "match_found": 1, "n_candidates": 0,
+               "top_confidence": 0.99, "top_tier": "name_country"})[0] is False
+    # ...nor as an ambiguous candidate list
+    assert ev({"hint": "ambiguous", "match_found": 0, "n_candidates": 2,
+               "top_confidence": 0.99, "top_tier": "vat"})[0] is False
+
+
+def test_consolidator_engine_unwired_blocks_error_not_crash():
+    """No consolidator runner wired -> the BLOCK resolution assertions
+    surface as ERROR (the existing no-runner path), never a crash."""
+    for a in ASSERTIONS:
+        if a.engine != "consolidator":
+            continue
+        res = evaluate_assertion(a, cypher=lambda q: {}, sql=lambda q: {})
+        assert res.status == ERROR, (a.id, res.status)
+        assert "no runner" in res.observed
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.raised = False
+
+    def raise_for_status(self):
+        self.raised = True
+
+    def json(self):
+        return self._payload
+
+
+def test_consolidator_runner_flattens_match(monkeypatch):
+    import httpx  # pylint: disable=import-outside-toplevel
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen["url"] = url
+        seen["json"] = kwargs.get("json")
+        return _FakeResponse({
+            "hint": "matched",
+            "match": {"gmr_id": "x", "name": "Pink Aviation", "country": "AUT",
+                      "lei": None, "tier": "vat", "confidence": 0.99},
+            "candidates": [], "normalised_country": None,
+        })
+    monkeypatch.setenv("CONSOLIDATOR_URL", "http://consolidator.test")
+    monkeypatch.setattr(httpx, "post", fake_post)
+    run = cli._build_consolidator_runner()
+    row = run(json.dumps({"path": "/resolve",
+                          "body": {"entity_type": "Company", "vat": "ATU13722300"}}))
+    assert seen["url"] == "http://consolidator.test/resolve"
+    assert seen["json"] == {"entity_type": "Company", "vat": "ATU13722300"}
+    assert row == {"hint": "matched", "match_found": 1, "n_candidates": 0,
+                   "top_confidence": 0.99, "top_tier": "vat"}
+
+
+def test_consolidator_runner_flattens_candidates_taking_top(monkeypatch):
+    import httpx  # pylint: disable=import-outside-toplevel
+
+    def fake_post(url, **kwargs):
+        return _FakeResponse({
+            "hint": "ambiguous", "match": None,
+            "candidates": [
+                {"gmr_id": "a", "tier": "fuzzy", "confidence": 0.61},
+                {"gmr_id": "b", "tier": "name_country", "confidence": 0.95},
+            ],
+            "normalised_country": "AUT",
+        })
+    monkeypatch.setattr(httpx, "post", fake_post)
+    run = cli._build_consolidator_runner()
+    row = run(json.dumps({"path": "/resolve",
+                          "body": {"entity_type": "Company",
+                                   "name": "STRABAG AG", "country": "AUT"}}))
+    assert row == {"hint": "ambiguous", "match_found": 0, "n_candidates": 2,
+                   "top_confidence": 0.95, "top_tier": "name_country"}
+
+
+def test_consolidator_runner_unwired_when_url_emptied(monkeypatch):
+    monkeypatch.setenv("CONSOLIDATOR_URL", "")
+    assert cli._build_consolidator_runner() is None

@@ -18,6 +18,7 @@ see ``apoc.meta.nodeTypeProperties`` for the property set per label.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -36,6 +37,8 @@ COVERAGE = "coverage"    # field-population coverage (graph)
 ORACLE = "oracle"        # computed indicators validated vs published external figures
 CONSISTENCY = "consistency"  # Neo4j <-> Virtuoso cross-store agreement (sampled)
 GRAIN = "grain"          # Contract/Notice model integrity (label carries the grain)
+LINGUISTICS = "linguistics"  # translation + embedding enrichment (graph + search store)
+RESOLUTION = "resolution"    # consolidator /resolve service correctness (live probes)
 
 Evaluator = Callable[[Mapping[str, Any]], "tuple[bool, str]"]
 
@@ -122,6 +125,76 @@ def zero_with_detail(label: str = "stale") -> Evaluator:
         obs = f"{v} {label}" + (f": {detail}" if v and detail else "")
         return v == 0, obs
     return _ev
+
+
+def _resolution_row(row: Mapping[str, Any]) -> "tuple[int, int, float, str, str]":
+    """Pull the consolidator runner's flattened /resolve row apart."""
+    found = int(row.get("match_found") or 0)
+    n = int(row.get("n_candidates") or 0)
+    conf = float(row.get("top_confidence") or 0.0)
+    tier = str(row.get("top_tier") or "")
+    hint = str(row.get("hint") or "")
+    return found, n, conf, tier, hint
+
+
+def resolves_confidently(min_confidence: float, label: str) -> Evaluator:
+    """OK when the resolver returned a direct match OR at least one
+    candidate at/above ``min_confidence``. Accepting either shape keeps
+    the assertion green both while a known duplicate makes the answer
+    ambiguous (candidates only) and after a merge collapses it to a
+    direct match."""
+    def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
+        found, n, conf, _tier, hint = _resolution_row(row)
+        ok = (found == 1 or n >= 1) and conf >= min_confidence
+        return ok, (f"{label}: hint={hint} match_found={found} "
+                    f"candidates={n} top_confidence={conf} "
+                    f"(min {min_confidence})")
+    return _ev
+
+
+def no_confident_pair(max_confidence: float, label: str) -> Evaluator:
+    """OK when the resolver refused to pair: no direct match, and any
+    fuzzy candidates it floats stay below ``max_confidence``."""
+    def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
+        found, n, conf, _tier, hint = _resolution_row(row)
+        ok = found == 0 and (n == 0 or conf < max_confidence)
+        return ok, (f"{label}: hint={hint} match_found={found} "
+                    f"candidates={n} top_confidence={conf} "
+                    f"(max {max_confidence})")
+    return _ev
+
+
+def resolves_via_tier(tier: str, min_confidence: float,
+                      label: str) -> Evaluator:
+    """OK when the resolver returned a DIRECT match through the given
+    tier at/above ``min_confidence`` — hard-ID lookups must never come
+    back ambiguous or downgraded to a name tier."""
+    def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
+        found, _n, conf, got_tier, hint = _resolution_row(row)
+        ok = found == 1 and got_tier == tier and conf >= min_confidence
+        return ok, (f"{label}: hint={hint} match_found={found} "
+                    f"tier={got_tier or '-'} top_confidence={conf} "
+                    f"(want tier={tier}, min {min_confidence})")
+    return _ev
+
+
+def _resolve_spec(**body: "str") -> str:
+    """Serialise a consolidator-engine query: the runner POSTs ``body``
+    to ``path`` and flattens the response into the evaluator's row."""
+    return json.dumps({"path": "/resolve", "body": body}, sort_keys=True)
+
+
+# The 24 EU official languages the enrichment rule targets — kept in
+# sync with fontem-consolidator src/consolidator/clients/linguistics.py
+# EU_OFFICIAL_LANGS (itself mirrored from fontem-linguistics
+# src/domain/languages.py).
+_EU_OFFICIAL_LANGS = [
+    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "ga", "hr",
+    "hu", "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "sk", "sl", "sv",
+]
+_NAME_LANG_LIST_CYPHER = (
+    "[" + ", ".join(f"a.name_{code}" for code in _EU_OFFICIAL_LANGS) + "]"
+)
 
 
 # ISO-4217 codes we expect in TED contract values (EU + common global).
@@ -1148,6 +1221,144 @@ ASSERTIONS: list[Assertion] = [
         "though the index rule existed (found 2026-07-13: 15.2M rows "
         "pending on shared, 1.2B on prod). This assertion is the 'is the "
         "index actually done' signal during and after backfills.",
+    ),
+    # ── Linguistics enrichment (translations + embeddings) ────────────
+    # Verified live 2026-07-18 (prod): 165,397 :Authority, ZERO with a
+    # name_embedding and ZERO with name_<lang> translations — the
+    # consolidator rule translation_enrichment_authority has never run.
+    # These are WARN, not BLOCK: they would stay red for weeks and are
+    # the metric that drives the enrichment fix, not a deploy gate.
+    Assertion(
+        "linguistics.authority_embedding_coverage", LINGUISTICS,
+        "Authorities carry a 768-d name_embedding", WARN, "cypher",
+        "MATCH (a:Authority) RETURN count(a) AS total, "
+        "count(CASE WHEN a.name_embedding IS NOT NULL "
+        "AND a.name_embedding_dim = 768 THEN 1 END) AS covered",
+        min_coverage(0.90, "authorities with a 768-d name_embedding"),
+        "The consolidator's embedding_cosine_authority dedup rule only "
+        "considers authorities whose name_embedding is 768-d (LaBSE) "
+        "AND whose encoder is on its allowlist — a vector of any other "
+        "shape is dead weight. Coverage is currently 0 of 165,397: the "
+        "translation_enrichment_authority rule has never run. WARN "
+        "severity on purpose — this is the progress metric for turning "
+        "the enrichment pipeline on, not a gate.",
+    ),
+    Assertion(
+        "linguistics.authority_translation_coverage", LINGUISTICS,
+        "Authorities carry >=20 of 24 EU-language names", WARN, "cypher",
+        "MATCH (a:Authority) RETURN count(a) AS total, "
+        "count(CASE WHEN size([p IN " + _NAME_LANG_LIST_CYPHER + " "
+        "WHERE p IS NOT NULL]) >= 20 THEN 1 END) AS covered",
+        min_coverage(0.90, "authorities with >=20 EU-language names"),
+        "translation_enrichment_authority fills name_<lang> for the 24 "
+        "EU official languages (list mirrored from fontem-consolidator's "
+        "EU_OFFICIAL_LANGS). The source language is never translated to "
+        "itself, so 23 is the natural-full count; >=20 tolerates a few "
+        "per-language failures without hiding a broken pipeline. "
+        "Currently 0 of 165,397 — the rule has never run; WARN drives "
+        "the fix rather than gating deploys.",
+    ),
+    Assertion(
+        "linguistics.search_embedding_company_floor", LINGUISTICS,
+        "search.entity_embeddings holds >=3M company rows", WARN, "sql",
+        "SELECT count(*) AS found FROM search.entity_embeddings "
+        "WHERE entity_type = 'company'",
+        at_least("found", 3_000_000, "company embedding rows"),
+        "Regression tripwire, not a target: the search store held "
+        "3,824,256 company rows on 2026-07-18. A drop below 3M means a "
+        "table wipe, a misrouted writer, or an encoder migration that "
+        "deleted before it re-embedded — none of which should pass "
+        "silently.",
+    ),
+    Assertion(
+        "linguistics.search_embedding_authority_floor", LINGUISTICS,
+        "search.entity_embeddings holds >=60K authority rows", WARN, "sql",
+        "SELECT count(*) AS found FROM search.entity_embeddings "
+        "WHERE entity_type = 'authority'",
+        at_least("found", 60_000, "authority embedding rows"),
+        "Same tripwire as the company floor: 78,398 authority rows on "
+        "2026-07-18. Authorities are the smallest of the big entity "
+        "types in the search store, so a wipe or misroute shows up here "
+        "proportionally first.",
+    ),
+    Assertion(
+        "linguistics.search_embedding_single_encoder", LINGUISTICS,
+        "search.entity_embeddings uses exactly one encoder", WARN, "sql",
+        "SELECT count(DISTINCT encoder_id) AS n_encoders "
+        "FROM search.entity_embeddings",
+        le_threshold("n_encoders", 1, "distinct encoder_ids"),
+        "The table's PK is (entity_type, entity_id) — encoder_id is NOT "
+        "part of the key, so two encoders writing concurrently clobber "
+        "each other last-writer-wins and cosine distances silently mix "
+        "vector spaces. All 5.15M rows are minilm@1.0.0-e8f8c21 today; "
+        "a second encoder_id appearing means an A/B experiment or "
+        "migration started without a keying plan.",
+    ),
+    Assertion(
+        "linguistics.embedding_sink_lag", LINGUISTICS,
+        "Embedding sink lag below 30M events", WARN, "sql",
+        "SELECT (SELECT max(seq) FROM events.entity_events) - "
+        "coalesce((SELECT last_seq FROM events.consumer_offsets "
+        "WHERE consumer_name = 'embedding_sink_b'), 0) AS lag",
+        le_threshold("lag", 30_000_000, "embedding sink lag"),
+        "embedding_sink_b trails max(seq) by 10-22M right now because "
+        "the TED historical backfill flooded the event log — hence the "
+        "deliberately generous 30M ceiling (WARN only). Once the "
+        "backfill drains, tighten this to ~1M so ordinary sink stalls "
+        "become visible again.",
+    ),
+    # ── Consolidator resolution (live service probes) ─────────────────
+    # BLOCK: these test /resolve correctness, not data coverage — they
+    # only fail if resolution itself breaks. Every expectation below was
+    # verified against prod on 2026-07-18; /resolve is read-only.
+    Assertion(
+        "resolution.known_company_resolves", RESOLUTION,
+        "A known company resolves confidently", BLOCK, "consolidator",
+        _resolve_spec(entity_type="Company", name="STRABAG AG",
+                      country="AUT"),
+        resolves_confidently(0.9, "STRABAG AG (AUT)"),
+        "STRABAG AG/AUT currently resolves ambiguous with two "
+        "name_country candidates at 0.95 (a known duplicate pair). The "
+        "evaluator accepts either a direct match or >=1 candidate at "
+        ">=0.9, so it passes in today's ambiguous state and keeps "
+        "passing once the duplicate is merged. Failing means the "
+        "name_country tier (name_clean index or country guard) broke.",
+    ),
+    Assertion(
+        "resolution.nonsense_name_no_pair", RESOLUTION,
+        "A nonsense name does not pair", BLOCK, "consolidator",
+        _resolve_spec(entity_type="Company",
+                      name="Zzqx Vylonter Quantum Bakery 9931 Kft.",
+                      country="HUN"),
+        no_confident_pair(0.9, "nonsense name (HUN)"),
+        "A fabricated name must never produce a confident pairing — a "
+        "match here means the fuzzy tier lost its guardrails and the "
+        "consolidator would start merging strangers. Verified live: "
+        "hint=no_match with zero candidates.",
+    ),
+    Assertion(
+        "resolution.vat_exact_wins", RESOLUTION,
+        "A hard VAT id resolves directly via the vat tier", BLOCK,
+        "consolidator",
+        _resolve_spec(entity_type="Company", vat="ATU13722300"),
+        resolves_via_tier("vat", 0.99, "VAT ATU13722300"),
+        "VAT is a tier-2 hard identifier: resolver.py assigns it "
+        "confidence 0.99 (not 1.0 — that is reserved for LEI), verified "
+        "live: ATU13722300 -> matched, tier=vat, confidence=0.99 (Pink "
+        "Aviation Services, AUT). An ambiguous or name-tier answer for "
+        "a hard ID means canonicalisation or the vat lookup regressed.",
+    ),
+    Assertion(
+        "resolution.known_authority_resolves", RESOLUTION,
+        "A known authority resolves confidently", BLOCK, "consolidator",
+        _resolve_spec(entity_type="Authority", name="Ministerstvo vnitra",
+                      country="CZE"),
+        resolves_confidently(0.9, "Ministerstvo vnitra (CZE)"),
+        "The Czech Ministry of the Interior is a country-level ministry "
+        "with 2,142 awarded contracts — a stable, high-degree anchor. "
+        "Verified live: matched via name_country at 0.95. Failure means "
+        "authority resolution (name_clean/apoc.text.clean agreement or "
+        "the country guard) broke for the most ordinary case there is.",
     ),
 ]
 
