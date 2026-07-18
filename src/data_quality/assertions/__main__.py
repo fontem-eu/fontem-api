@@ -124,6 +124,40 @@ def _build_prices_runner():
     return _run
 
 
+def _build_consolidator_runner():
+    """Consolidator-engine runner: each assertion's ``query`` is a JSON
+    spec ``{"path": ..., "body": ...}``; POST it to the consolidator and
+    flatten the /resolve response into the single row the evaluators
+    read. Returns None (engine unwired -> BLOCK assertions surface as
+    ERROR, per the no-runner path) when CONSOLIDATOR_URL is explicitly
+    emptied — e.g. an environment without the service."""
+    base_url = os.environ.get(
+        "CONSOLIDATOR_URL", "http://fontem-consolidator:8000").rstrip("/")
+    if not base_url:
+        return None
+
+    def _run(query: str) -> Mapping[str, Any]:
+        import httpx  # pylint: disable=import-outside-toplevel  # lazy
+        spec = json.loads(query)
+        resp = httpx.post(base_url + spec["path"], json=spec["body"],
+                          timeout=60.0)
+        resp.raise_for_status()
+        payload = resp.json()
+        match = payload.get("match")
+        candidates = payload.get("candidates") or []
+        top = match or max(
+            candidates, key=lambda c: c.get("confidence") or 0.0,
+            default=None)
+        return {
+            "hint": payload.get("hint") or "",
+            "match_found": 1 if match else 0,
+            "n_candidates": len(candidates),
+            "top_confidence": float((top or {}).get("confidence") or 0.0),
+            "top_tier": (top or {}).get("tier") or "",
+        }
+    return _run
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(prog="dq-assert", description=__doc__)
     parser.add_argument(
@@ -151,7 +185,8 @@ def main(argv: "list[str] | None" = None) -> int:
         consistency_runner = _build_consistency_runner(client)
         prices_runner = _build_prices_runner()
         results = run_catalog(cypher, sql, _select(args.family),
-                              consistency_runner, prices_runner)
+                              consistency_runner, prices_runner,
+                              _build_consolidator_runner())
     finally:
         client.close()
 

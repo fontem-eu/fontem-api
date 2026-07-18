@@ -37,16 +37,17 @@ class AssertionResult:
         return self.status == PASS
 
 
-def evaluate_assertion(
+def evaluate_assertion(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     assertion: Assertion,
     cypher: RowRunner,
     sql: RowRunner,
     consistency: "RowRunner | None" = None,
     prices: "RowRunner | None" = None,
+    consolidator: "RowRunner | None" = None,
 ) -> AssertionResult:
     """Run one assertion and classify the outcome."""
     runner = {"cypher": cypher, "sql": sql, "consistency": consistency,
-              "prices": prices}.get(assertion.engine)
+              "prices": prices, "consolidator": consolidator}.get(assertion.engine)
     if runner is None:
         # An assertion whose engine has no runner wired (e.g. the cross-store
         # consistency engine when Virtuoso is unconfigured) is surfaced, not
@@ -77,15 +78,16 @@ def evaluate_assertion(
     )
 
 
-def run_catalog(
+def run_catalog(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     cypher: RowRunner,
     sql: RowRunner,
     assertions: "list[Assertion] | None" = None,
     consistency: "RowRunner | None" = None,
     prices: "RowRunner | None" = None,
+    consolidator: "RowRunner | None" = None,
 ) -> "list[AssertionResult]":
     """Run every assertion (or a supplied subset) and return results."""
-    return [evaluate_assertion(a, cypher, sql, consistency, prices)
+    return [evaluate_assertion(a, cypher, sql, consistency, prices, consolidator)
             for a in (assertions or ASSERTIONS)]
 
 
