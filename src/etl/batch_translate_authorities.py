@@ -264,6 +264,36 @@ def _rows_from_lines(lines: list, by_id: dict) -> tuple:
     return rows, skipped
 
 
+# Mistral Batch pricing (USD per 1M tokens) = 50% of standard list. Defaults
+# are mistral-medium (std $1.5 in / $7.5 out -> batch $0.75 / $3.75);
+# override via env for mistral-small (~10x cheaper) or when list prices move.
+_PRICE_IN_PER_M = float(os.environ.get("MISTRAL_BATCH_PRICE_IN_PER_M", "0.75"))
+_PRICE_OUT_PER_M = float(os.environ.get("MISTRAL_BATCH_PRICE_OUT_PER_M", "3.75"))
+
+
+def _cost_report(lines: list) -> dict:
+    """Sum token usage across Batch output lines and estimate spend. Token
+    counts are exact (from each response's ``usage``); the USD figure is an
+    estimate at the configured batch rate. Logged so a run's cost is visible
+    and can be extrapolated to the full 203k-authority backfill."""
+    tin = tout = counted = 0
+    for line in lines:
+        body = (line.get("response") or {}).get("body") or {}
+        usage = body.get("usage") or {}
+        if usage:
+            tin += usage.get("prompt_tokens", 0)
+            tout += usage.get("completion_tokens", 0)
+            counted += 1
+    usd = tin / 1e6 * _PRICE_IN_PER_M + tout / 1e6 * _PRICE_OUT_PER_M
+    report = {"responses_with_usage": counted, "prompt_tokens": tin,
+              "completion_tokens": tout, "total_tokens": tin + tout,
+              "est_usd": round(usd, 4),
+              "rate_in_per_m": _PRICE_IN_PER_M, "rate_out_per_m": _PRICE_OUT_PER_M}
+    per = round(usd / counted, 5) if counted else 0.0
+    log.info("COST: %s (~$%.5f/authority -> ~$%.0f for 203k)", report, per, per * 203000)
+    return report
+
+
 def integrate(driver, lines: list, by_id: dict, batch: int = 500) -> dict:
     """Write name_<lang> back to Neo4j. Returns counts."""
     rows, skipped = _rows_from_lines(lines, by_id)
@@ -302,6 +332,9 @@ def _submit_and_integrate(driver, records: list, args) -> dict:
         if args.resume_job:
             job_id = args.resume_job
         else:
+            with open(args.jsonl_path, encoding="utf-8") as fh:
+                sample = fh.readline().strip()
+            log.info("sample request: %s", sample[:400])
             file_id = client.upload(args.jsonl_path)
             job_id = client.create_job(file_id, args.model)
         job = client.poll(job_id, args.poll_interval)
@@ -312,7 +345,9 @@ def _submit_and_integrate(driver, records: list, args) -> dict:
         if not out_id:
             return {"job_id": job_id, "status": job.get("status"),
                     "written": 0, "error": "no output_file"}
-        summary = integrate(driver, client.download(out_id), by_id)
+        lines = client.download(out_id)
+        summary = integrate(driver, lines, by_id)
+        summary["cost"] = _cost_report(lines)
         summary.update({"job_id": job_id, "status": job.get("status")})
         return summary
     finally:

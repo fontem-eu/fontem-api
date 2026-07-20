@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from src.etl.batch_translate_authorities import (
     EU_LANGS,
     _build_request,
+    _cost_report,
     _extract_translations,
     _rows_from_lines,
     _source_lang,
@@ -94,3 +95,18 @@ def test_integrate_writes_in_chunks_and_counts():
     assert summary["parsed"] == 1
     assert summary["written"] == 1
     assert summary["langs_total"] == 2
+
+
+def test_cost_report_sums_usage_and_estimates():
+    lines = [
+        {"response": {"body": {"usage": {"prompt_tokens": 300, "completion_tokens": 400}}}},
+        {"response": {"body": {"usage": {"prompt_tokens": 100, "completion_tokens": 200}}}},
+        {"response": {"body": {}}},  # no usage -> ignored
+    ]
+    rep = _cost_report(lines)
+    assert rep["responses_with_usage"] == 2
+    assert rep["prompt_tokens"] == 400
+    assert rep["completion_tokens"] == 600
+    assert rep["total_tokens"] == 1000
+    # est_usd = 400/1e6*rate_in + 600/1e6*rate_out, both rates > 0
+    assert rep["est_usd"] > 0
