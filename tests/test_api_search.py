@@ -188,3 +188,74 @@ def test_types_facet_filter_forwarded(app_and_client, monkeypatch):
     r = client.get("/search/results?q=x&types=company,authority")
     assert r.status_code == 200
     assert captured.get("types") == ["company", "authority"]
+
+
+def test_nuts_and_sector_filters_forwarded(app_and_client, monkeypatch):
+    """Advanced-search filters: nuts + sector both get forwarded as SQL
+    bind params. Also validates the strict nuts pattern (uppercase
+    ISO-3166-2 style, up to 8 chars)."""
+    _, client = app_and_client
+    captured: dict = {}
+
+    class _Cur(_FakeCursor):
+        # pylint: disable=arguments-differ
+        def execute(self, *a, **k):
+            params = a[1] if len(a) > 1 else k.get("params")
+            if params is not None:
+                for key in ("nuts", "sector"):
+                    if key in params:
+                        captured[key] = params[key]
+
+    class _C(_FakeConn):
+        def cursor(self):
+            cols = [MagicMock(name=c) for c in self._cols]
+            for m, name in zip(cols, self._cols):
+                m.name = name
+            return _Cur(self._rows, cols)
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _C(
+        [], ["entity_type", "entity_id", "embed_text", "country",
+             "event_date", "nuts", "sector", "meta",
+             "lex_rank", "vec_rank", "rrf_score"]))
+
+    r = client.get("/search/results?q=x&nuts=PT18&sector=90")
+    assert r.status_code == 200, r.text
+    assert captured.get("nuts") == "PT18"
+    assert captured.get("sector") == "90"
+
+
+def test_nuts_rejects_bad_format(app_and_client):
+    """Reject anything that isn't the [A-Z]{2}[A-Z0-9]{0,6} shape —
+    keeps garbage out of the LIKE prefix and avoids injection surface."""
+    _, client = app_and_client
+    for bad in ("pt18", "18PT", "P", "PT18!", "'; DROP TABLE"):
+        r = client.get(f"/search/results?q=x&nuts={bad}")
+        assert r.status_code == 422, f"expected 422 for {bad!r}, got {r.status_code}"
+
+
+def test_meta_fields_surface_in_response(app_and_client, monkeypatch):
+    """Rows carrying a jsonb `meta` get merged into the per-result
+    `meta` envelope so SearchView can render per-type extras (ticker,
+    value_eur, etc.)."""
+    _, client = app_and_client
+    cols = [
+        "entity_type", "entity_id", "embed_text", "country", "event_date",
+        "nuts", "sector", "meta",
+        "lex_rank", "vec_rank", "rrf_score",
+    ]
+    rows = [
+        ("contract", "TED-1",
+         "Cleaning services HQ — PT", "PT", "2026-05-01",
+         "PT18", "90",
+         {"cpv": "90910000", "value_eur": 350000, "value_tier": "M"},
+         1, 2, 0.033),
+    ]
+    _stub_conn(monkeypatch, rows, cols)
+    r = client.get("/search/results?q=cleaning&nuts=PT18&sector=90")
+    assert r.status_code == 200
+    row = r.json()["results"][0]
+    assert row["meta"]["nuts"] == "PT18"
+    assert row["meta"]["sector"] == "90"
+    assert row["meta"]["cpv"] == "90910000"
+    assert row["meta"]["value_tier"] == "M"
+    assert row["meta"]["value_eur"] == 350000

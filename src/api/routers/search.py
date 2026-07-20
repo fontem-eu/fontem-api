@@ -52,6 +52,7 @@ router = APIRouter(prefix="/search", tags=["search"])
 _SQL_HYBRID = """
 WITH lex AS (
   SELECT entity_type, entity_id, embed_text, country, event_date,
+         nuts, sector, meta,
          ROW_NUMBER() OVER (
            ORDER BY ts_rank(name_lex, plainto_tsquery('simple', %(q)s)) DESC
          ) AS rk
@@ -66,6 +67,7 @@ WITH lex AS (
 ),
 vec AS (
   SELECT entity_type, entity_id, embed_text, country, event_date,
+         nuts, sector, meta,
          ROW_NUMBER() OVER (ORDER BY embedding <=> %(qvec)s::vector) AS rk
   FROM search.entity_embeddings
   WHERE encoder_id = %(enc)s
@@ -73,6 +75,8 @@ vec AS (
     AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
     AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
     AND (%(date_to)s::date   IS NULL OR event_date <= %(date_to)s::date)
+    AND (%(nuts)s::text IS NULL OR nuts LIKE %(nuts)s || '%%')
+    AND (%(sector)s::text IS NULL OR sector = %(sector)s)
   ORDER BY embedding <=> %(qvec)s::vector
   LIMIT 100
 )
@@ -82,6 +86,9 @@ SELECT
   COALESCE(l.embed_text, v.embed_text)   AS embed_text,
   COALESCE(l.country, v.country)         AS country,
   COALESCE(l.event_date, v.event_date)   AS event_date,
+  COALESCE(l.nuts, v.nuts)               AS nuts,
+  COALESCE(l.sector, v.sector)           AS sector,
+  COALESCE(l.meta, v.meta)               AS meta,
   l.rk AS lex_rank,
   v.rk AS vec_rank,
   (
@@ -96,6 +103,7 @@ LIMIT %(limit_plus_one)s;
 
 _SQL_LEXICAL_ONLY = """
 SELECT entity_type, entity_id, embed_text, country, event_date,
+       nuts, sector, meta,
        ROW_NUMBER() OVER (
          ORDER BY ts_rank(name_lex, plainto_tsquery('simple', %(q)s)) DESC
        ) AS lex_rank,
@@ -152,6 +160,10 @@ def _shape_row(row: dict) -> dict:
         "meta": {
             "lex_rank": row.get("lex_rank"),
             "vec_rank": row.get("vec_rank"),
+            "nuts": row.get("nuts"),
+            "sector": row.get("sector"),
+            # per-type extras from sink's jsonb column
+            **(row.get("meta") or {}),
         },
     }
 
@@ -170,10 +182,11 @@ def search_results(
     q: Annotated[str, Query(min_length=1, max_length=200)],
     types: Annotated[str | None, Query(max_length=200)] = None,
     country: Annotated[str | None, Query(max_length=3)] = None,
-    # Accepted for API-compat with the old endpoint; NUTS-level geo
-    # filtering isn't wired yet because the sink doesn't project NUTS
-    # onto search.entity_embeddings rows. Silently ignored.
-    nuts: Annotated[str | None, Query(max_length=8)] = None,  # noqa: ARG001
+    # NUTS region prefix cascade (PT18 matches PT18X/PT18Y at NUTS3
+    # depth); sector = coarse taxonomy (CPV top-2 for contracts,
+    # authority_type for authorities, etc.). Populated by the sink.
+    nuts: Annotated[str | None, Query(max_length=8, pattern=r"^[A-Z]{2}[A-Z0-9]{0,6}$")] = None,
+    sector: Annotated[str | None, Query(max_length=8)] = None,
     date_from: Annotated[
         str | None, Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ] = None,
@@ -193,7 +206,6 @@ def search_results(
     Returns SearchView-shaped envelope:
       {query, results, counts, has_more, timing_ms, mode, backend}
     """
-    del nuts  # accepted for API-compat; NUTS geo isn't wired to entity_embeddings yet
     dsn = _search_dsn()
     if not dsn:
         raise HTTPException(
@@ -211,6 +223,8 @@ def search_results(
         "types": types_arr,
         "date_from": date_from,
         "date_to": date_to,
+        "nuts": nuts,
+        "sector": sector,
         # over-fetch by 1 to detect has_more without a second COUNT
         "limit_plus_one": offset + limit + 1,
     }
