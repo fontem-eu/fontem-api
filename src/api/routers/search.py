@@ -62,6 +62,8 @@ WITH lex AS (
     AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
     AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
     AND (%(date_to)s::date   IS NULL OR event_date <= %(date_to)s::date)
+    AND (%(nuts)s::text IS NULL OR nuts LIKE %(nuts)s || '%%')
+    AND (%(sector)s::text IS NULL OR sector = %(sector)s)
   ORDER BY rk
   LIMIT 100
 ),
@@ -115,6 +117,8 @@ WHERE name_lex @@ plainto_tsquery('simple', %(q)s)
   AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
     AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
     AND (%(date_to)s::date   IS NULL OR event_date <= %(date_to)s::date)
+  AND (%(nuts)s::text IS NULL OR nuts LIKE %(nuts)s || '%%')
+  AND (%(sector)s::text IS NULL OR sector = %(sector)s)
 ORDER BY rrf_score DESC
 LIMIT %(limit_plus_one)s;
 """
