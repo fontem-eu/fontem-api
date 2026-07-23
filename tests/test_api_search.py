@@ -233,19 +233,23 @@ def test_nuts_rejects_bad_format(app_and_client):
         assert r.status_code == 422, f"expected 422 for {bad!r}, got {r.status_code}"
 
 
-def test_nuts_country_fallback_is_in_sql(app_and_client, monkeypatch):
-    """A 2-letter (NUTS-0) nuts value should also match on `country` so
-    rows without a nuts code (companies) still surface for country-scoped
-    searches. The nuts filter is a static SQL template — a single request
-    is enough to see the fallback clause."""
+def test_nuts_country_fallback_binds_iso3(app_and_client, monkeypatch):
+    """A 2-letter (NUTS-0) nuts value must resolve to its ISO alpha-3 form
+    for the country fallback — the search table stores country as ISO3
+    (`PRT`) so a raw `PT` compare would never match. Deeper NUTS codes
+    (PT18) get None here and the fallback clause becomes a no-op."""
     _, client = app_and_client
+    captured: dict = {}
     captured_sql: list[str] = []
 
     class _Cur(_FakeCursor):
         # pylint: disable=arguments-differ
-        def execute(self, *a, **_k):
+        def execute(self, *a, **k):
             if a:
                 captured_sql.append(a[0])
+            params = a[1] if len(a) > 1 else k.get("params")
+            if params is not None and "nuts_country_iso3" in params:
+                captured["nuts_country_iso3"] = params["nuts_country_iso3"]
 
     class _C(_FakeConn):
         def cursor(self):
@@ -261,9 +265,13 @@ def test_nuts_country_fallback_is_in_sql(app_and_client, monkeypatch):
 
     r = client.get("/search/results?q=x&nuts=PT")
     assert r.status_code == 200, r.text
-    fallback = "LENGTH(%(nuts)s) = 2 AND country = %(nuts)s"
-    assert any(fallback in sql for sql in captured_sql),         f"country fallback missing from SQL: {captured_sql}"
+    assert captured.get("nuts_country_iso3") == "PRT"
+    assert any("nuts_country_iso3" in sql for sql in captured_sql)
 
+    captured.clear()
+    r = client.get("/search/results?q=x&nuts=PT18")
+    assert r.status_code == 200, r.text
+    assert captured.get("nuts_country_iso3") is None
 
 def test_meta_fields_surface_in_response(app_and_client, monkeypatch):
     """Rows carrying a jsonb `meta` get merged into the per-result

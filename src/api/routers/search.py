@@ -40,8 +40,24 @@ from typing import Annotated, Any
 import psycopg
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
+import pycountry
 
 from src.data.linguistics.client import LinguisticsClient
+
+# ISO alpha-2 → alpha-3 lookup for the NUTS-0 country fallback below.
+# Contract/authority events in the search table only carry the alpha-3
+# country (`PRT`) — a nuts=PT query needs the alpha-3 form to match.
+_ISO2_TO_ISO3: dict[str, str] = {c.alpha_2: c.alpha_3 for c in pycountry.countries}
+
+
+def _nuts_country_iso3(nuts: str | None) -> str | None:
+    """When `nuts` is a 2-letter (NUTS-0) code, return its ISO alpha-3
+    form. Returns None for deeper NUTS codes (PT18, PT170) or unknown 2-letter
+    inputs — the SQL fallback clause treats None as "no country match"."""
+    if nuts is not None and len(nuts) == 2:
+        return _ISO2_TO_ISO3.get(nuts)
+    return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +81,8 @@ WITH lex AS (
     AND (
       %(nuts)s::text IS NULL
       OR nuts LIKE %(nuts)s || '%%'
-      OR (LENGTH(%(nuts)s) = 2 AND country = %(nuts)s)
+      OR (%(nuts_country_iso3)s::text IS NOT NULL
+          AND country = %(nuts_country_iso3)s)
     )
     AND (%(sector)s::text IS NULL OR sector = %(sector)s)
   ORDER BY rk
@@ -84,7 +101,8 @@ vec AS (
     AND (
       %(nuts)s::text IS NULL
       OR nuts LIKE %(nuts)s || '%%'
-      OR (LENGTH(%(nuts)s) = 2 AND country = %(nuts)s)
+      OR (%(nuts_country_iso3)s::text IS NOT NULL
+          AND country = %(nuts_country_iso3)s)
     )
     AND (%(sector)s::text IS NULL OR sector = %(sector)s)
   ORDER BY embedding <=> %(qvec)s::vector
@@ -128,7 +146,8 @@ WHERE name_lex @@ plainto_tsquery('simple', %(q)s)
   AND (
     %(nuts)s::text IS NULL
     OR nuts LIKE %(nuts)s || '%%'
-    OR (LENGTH(%(nuts)s) = 2 AND country = %(nuts)s)
+    OR (%(nuts_country_iso3)s::text IS NOT NULL
+        AND country = %(nuts_country_iso3)s)
   )
   AND (%(sector)s::text IS NULL OR sector = %(sector)s)
 ORDER BY rrf_score DESC
@@ -240,6 +259,7 @@ def search_results(
         "date_from": date_from,
         "date_to": date_to,
         "nuts": nuts,
+        "nuts_country_iso3": _nuts_country_iso3(nuts),
         "sector": sector,
         # over-fetch by 1 to detect has_more without a second COUNT
         "limit_plus_one": offset + limit + 1,
