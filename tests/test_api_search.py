@@ -233,6 +233,38 @@ def test_nuts_rejects_bad_format(app_and_client):
         assert r.status_code == 422, f"expected 422 for {bad!r}, got {r.status_code}"
 
 
+def test_nuts_country_fallback_is_in_sql(app_and_client, monkeypatch):
+    """A 2-letter (NUTS-0) nuts value should also match on `country` so
+    rows without a nuts code (companies) still surface for country-scoped
+    searches. The nuts filter is a static SQL template — a single request
+    is enough to see the fallback clause."""
+    _, client = app_and_client
+    captured_sql: list[str] = []
+
+    class _Cur(_FakeCursor):
+        # pylint: disable=arguments-differ
+        def execute(self, *a, **_k):
+            if a:
+                captured_sql.append(a[0])
+
+    class _C(_FakeConn):
+        def cursor(self):
+            cols = [MagicMock(name=c) for c in self._cols]
+            for m, name in zip(cols, self._cols):
+                m.name = name
+            return _Cur(self._rows, cols)
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _C(
+        [], ["entity_type", "entity_id", "embed_text", "country",
+             "event_date", "nuts", "sector", "meta",
+             "lex_rank", "vec_rank", "rrf_score"]))
+
+    r = client.get("/search/results?q=x&nuts=PT")
+    assert r.status_code == 200, r.text
+    fallback = "LENGTH(%(nuts)s) = 2 AND country = %(nuts)s"
+    assert any(fallback in sql for sql in captured_sql),         f"country fallback missing from SQL: {captured_sql}"
+
+
 def test_meta_fields_surface_in_response(app_and_client, monkeypatch):
     """Rows carrying a jsonb `meta` get merged into the per-result
     `meta` envelope so SearchView can render per-type extras (ticker,
