@@ -114,11 +114,12 @@ def _stub_notice(*, awards, organizations):
     notice.total_value = None
     notice.modification_value_before = None
     notice.modifies_publication_number = None
-    notice.place_nuts = "FR101"
+    notice.nuts = "FR101"
     notice.language = "fr"
     buyer = MagicMock()
     buyer.name = "Conseil constitutionnel"
     buyer.country = "FR"
+    buyer.nuts = "FR101"
     buyer.legal_id = MagicMock(value="FR-CC-001", scheme_name="NATIONAL")
     notice.buyer.return_value = buyer
     return notice
@@ -1564,3 +1565,35 @@ def test_emitted_payload_validates_against_schema():
     payload = _contract_payload(emit)
     assert payload["contract_key"] == "PROC-1"
     assert len(payload["parties"]) == 2
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_forwards_nuts_on_authority_and_contract(
+    mock_matcher_cls, mock_stream,
+):
+    """Authority + contract payloads carry the parser-extracted NUTS.
+    The previous code path read notice.place_nuts (a name never set by
+    the parser) and passed nothing at all for the authority — so every
+    downstream search.entity_embeddings row landed with nuts=NULL."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="11111111-2222-5333-8444-555555555555",
+        stub_company_gmr="00040372-dad6-5d34-882c-8b8624b4e734",
+    )
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = MagicMock(value="NL850456592B01", scheme_name="VAT")
+    notice = _stub_notice(
+        awards=[_stub_award()],
+        organizations={"O1": contractor},
+    )
+    mock_stream.return_value = iter([notice])
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    load_contracts(driver, log, "/fake/path.tar.gz")
+
+    by_type = {c.args[0]: c for c in emit.upsert.call_args_list}
+    assert by_type["UpsertAuthority"].kwargs["payload"].get("nuts") == "FR101"
+    assert by_type["UpsertContract"].kwargs["payload"].get("nuts") == "FR101"
