@@ -506,6 +506,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
                 country=LocationService.to_alpha3(buyer.country),
                 authority_type="contracting",
                 national_id=buyer_legal_value,
+                nuts=buyer.nuts,
             ),
         )
         seen_authorities.add(authority_id)
@@ -728,7 +729,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         value_quarantine_reason=(score.flag.value
                                  if score.quarantined else None),
         cpv=notice.cpv_main,
-        nuts=getattr(notice, "place_nuts", None),
+        nuts=notice.nuts,
         language=getattr(notice, "language", None),
         # Country of the contracting authority (the buyer /
         # acquirer). Cascaded onto the Contract because TED
