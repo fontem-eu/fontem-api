@@ -157,8 +157,11 @@ def normalize_scale(  # pylint: disable=too-many-branches,too-many-arguments
         )
 
     # Tier B: everything consistent but absurd, on an affected gateway.
+    # `chosen` falls back to the estimate for estimate-only notices
+    # (no award value published) — the 4.3B "fuel purchase" case where
+    # only EstimatedOverallContractAmount leaked.
     if country in _AFFECTED_COUNTRIES:
-        chosen = tot if tot is not None else pay
+        chosen = tot if tot is not None else (pay if pay is not None else est)
         internally_consistent = est is None or not (
             _is_x1000(_ratio(chosen, est)) or _is_x1000(_ratio(est, chosen))
         )

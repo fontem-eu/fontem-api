@@ -37,9 +37,9 @@ FROM events.entity_events
 WHERE domain = 'contract'
   AND event_type = 'UpsertContract'
   AND (
-    COALESCE(NULLIF(payload->>'value_eur',''),'0')::float >= 1e8
-    OR COALESCE(NULLIF(payload->>'estimated_value_eur',''),'0')::float >= 1e8
-    OR COALESCE(NULLIF(payload->>'value_payable_eur',''),'0')::float >= 1e8
+    COALESCE(NULLIF(payload->>'value_eur',''),'0')::float >= %(floor)s
+    OR COALESCE(NULLIF(payload->>'estimated_value_eur',''),'0')::float >= %(floor)s
+    OR COALESCE(NULLIF(payload->>'value_payable_eur',''),'0')::float >= %(floor)s
   )
 ORDER BY iri, seq DESC
 """
@@ -95,6 +95,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--floor", type=float, default=1e8,
+        help="Candidate pre-filter: only events with a monetary field "
+             ">= this (EUR) are scanned. Lower for a completeness pass "
+             "(the correction rules themselves are unchanged).",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -112,7 +118,7 @@ def main(argv=None):
         log = EventLog.from_env()
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
-        cur.execute(_CANDIDATE_SQL)
+        cur.execute(_CANDIDATE_SQL, {"floor": args.floor})
         rows = cur.fetchall()
     logger.info("candidates: %d", len(rows))
 
