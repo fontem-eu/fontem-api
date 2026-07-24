@@ -30,6 +30,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import unicodedata
+from datetime import date
 import re
 import sys
 
@@ -115,6 +117,47 @@ WHERE {{
 GROUP BY ?cx
 """
 
+_ANSWER_REF_QUERY = """
+PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+SELECT DISTINCT (STR(?cx) AS ?celex) (SAMPLE(STR(?dd)) AS ?date)
+                (SAMPLE(?t) AS ?title)
+WHERE {{
+  GRAPH <{graph}> {{
+    ?w cdm:work_id_document ?wid .
+    FILTER(STRSTARTS(STR(?wid), "immc:{ref}/"))
+    ?w cdm:resource_legal_id_celex ?cx .
+    OPTIONAL {{ ?w cdm:work_date_document ?dd }}
+    OPTIONAL {{
+      ?xe cdm:expression_belongs_to_work ?w .
+      ?xe cdm:expression_uses_language
+        <http://publications.europa.eu/resource/authority/language/ENG> .
+      ?xe cdm:expression_title ?t .
+    }}
+  }}
+}}
+GROUP BY ?cx
+"""
+
+_ANSWER_CANDIDATES_QUERY = """
+PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
+SELECT DISTINCT (STR(?cx) AS ?celex) (SAMPLE(STR(?dd)) AS ?date)
+                (SAMPLE(?t) AS ?title)
+WHERE {{
+  GRAPH <{graph}> {{
+    ?e cdm:expression_title ?t .
+    ?t bif:contains "communication AND commission AND citizens AND initiative" .
+    ?e cdm:expression_belongs_to_work ?w .
+    ?e cdm:expression_uses_language
+      <http://publications.europa.eu/resource/authority/language/ENG> .
+    ?w cdm:resource_legal_id_celex ?cx .
+    FILTER(STRSTARTS(STR(?cx), "5"))
+    OPTIONAL {{ ?w cdm:work_date_document ?dd }}
+  }}
+}}
+GROUP BY ?cx
+LIMIT 400
+"""
+
 _CELEX_SECTOR_3 = {
     "L": "Directive", "R": "Regulation", "D": "Decision",
     "H": "Recommendation", "A": "Opinion", "C": "Declaration",
@@ -130,12 +173,80 @@ def doc_type(celex: str) -> str:
     return "Legal document"
 
 
-def answer_ref_to_celex(ref: str) -> str | None:
-    """C(2026)4110 → candidate CELEX 52026DC4110 (Commission C-doc)."""
-    m = _ANSWER_REF_RE.match(ref or "")
-    if not m:
+def _norm(text: str) -> str:
+    """Casefold, strip diacritics/punctuation, collapse whitespace."""
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
+
+
+_TOKEN_STOP = frozenset(
+    {"the", "a", "an", "of", "for", "in", "on", "and", "to", "eu", "european"})
+
+
+def _tokens(text: str) -> set[str]:
+    return {w for w in _norm(text).split() if w not in _TOKEN_STOP}
+
+
+# The Commission answers ECIs with a communication titled on this fixed
+# institutional pattern; matching is restricted to that document class so
+# title matching never roams the open corpus.
+ANSWER_CLASS_RE = re.compile(
+    r"^\s*communication from the commission on the european "
+    r"citizens.{0,3}initiative", re.I)
+
+#: |work_date_document - register answered_date| ceiling for a title match.
+ANSWER_DATE_TOLERANCE_DAYS = 45
+
+
+def _parse_date(value) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
         return None
-    return f"5{m.group(1)}DC{int(m.group(2)):04d}"
+
+
+def match_answers(petitions: list[dict], candidates: dict) -> dict:
+    """Assign answer communications to ANSWERED petitions, fail-closed.
+
+    ``candidates`` maps celex -> {"title": str, "date": str}. Tiers:
+    T1 exact normalized-substring, T2 token containment. A petition links
+    only when its tier yields EXACTLY one candidate AND the candidate's
+    document date agrees with the register's answered_date within
+    ANSWER_DATE_TOLERANCE_DAYS. Assignments must be injective: a candidate
+    claimed by two petitions drops both (validated empirically 2026-07-24:
+    10/10 real T1 pairs linked at delta <= 30d; the one near-miss —
+    register "cultures" vs title "culture" — was correctly refused).
+    Returns pid -> (celex, tier, delta_days).
+    """
+    picked: dict = {}
+    for pet in petitions:
+        title = pet.get("title") or ""
+        norm_title = _norm(title)
+        toks = _tokens(title)
+        hits = [cx for cx, c in candidates.items()
+                if norm_title and norm_title in _norm(c["title"])]
+        tier = "title-substring"
+        if not hits:
+            hits = [cx for cx, c in candidates.items()
+                    if toks and toks <= set(_norm(c["title"]).split())]
+            tier = "title-tokens"
+        if len(hits) != 1:
+            continue
+        answered = _parse_date(pet.get("answered_date"))
+        doc_date = _parse_date(candidates[hits[0]].get("date"))
+        if not answered or not doc_date:
+            continue
+        delta = abs((answered - doc_date).days)
+        if delta > ANSWER_DATE_TOLERANCE_DAYS:
+            continue
+        picked[pet["pid"]] = (hits[0], tier, delta)
+
+    claims: dict = {}
+    for pid, (celex, _, _) in picked.items():
+        claims.setdefault(celex, []).append(pid)
+    return {pid: v for pid, v in picked.items()
+            if len(claims[v[0]]) == 1}
 
 
 def sparql(endpoint: str, query: str) -> list[dict]:
@@ -205,12 +316,50 @@ def materialize_spine(endpoint: str, driver) -> int:
     return total
 
 
+def resolve_answers(endpoint: str, petitions: list[dict]) -> dict:
+    """Three-tier answer resolution against the mirror, fail-closed.
+
+    T0: exact join on cdm:work_id_document via the register's C-number —
+    deterministic; the C(YYYY)NNNN ref is the Commission's internal id
+    and does NOT map arithmetically to a CELEX (Fur Free Europe:
+    C(2023)8362 is 52023XC01559, not 52023DC8362).
+    T1/T2 (match_answers): title matching inside the fixed answer-
+    communication class, gated on uniqueness, injectivity and register/
+    mirror date agreement. Returns pid -> (celex, tier, delta, row).
+    """
+    answered = [p for p in petitions if p.get("status") == "ANSWERED"]
+    resolved: dict = {}
+    for pet in answered:
+        for ref in pet.get("refs") or []:
+            if not _ANSWER_REF_RE.match(ref or ""):
+                continue
+            rows = sparql(endpoint, _ANSWER_REF_QUERY.format(
+                graph=MIRROR_GRAPH, ref=ref))
+            if len(rows) == 1:
+                resolved[pet["pid"]] = (rows[0]["celex"], "ref-exact", 0,
+                                        rows[0])
+                break
+
+    remaining = [p for p in answered if p["pid"] not in resolved]
+    if remaining:
+        cand_rows = sparql(
+            endpoint, _ANSWER_CANDIDATES_QUERY.format(graph=MIRROR_GRAPH))
+        candidates = {r["celex"]: r for r in cand_rows
+                      if ANSWER_CLASS_RE.match(r.get("title") or "")}
+        for pid, (celex, tier, delta) in match_answers(
+                remaining, candidates).items():
+            resolved[pid] = (celex, tier, delta, candidates[celex])
+    return resolved
+
+
 def link_petitions(endpoint: str, driver) -> dict:  # pylint: disable=too-many-locals
     """Resolve petition CELEX refs in the mirror; edge only when found."""
     with driver.session() as session:
         petitions = session.run(
             "MATCH (p:Petition) "
             "RETURN p.system AS system, p.petition_id AS pid, "
+            "       p.title AS title, p.status AS status, "
+            "       p.answered_date AS answered_date, "
             "       p.registration_decision_celex AS reg, "
             "       p.answer_refs AS refs"
         ).data()
@@ -218,17 +367,26 @@ def link_petitions(endpoint: str, driver) -> dict:  # pylint: disable=too-many-l
     for p in petitions:
         if p.get("reg"):
             wanted.setdefault(p["reg"], []).append(
-                (p["system"], p["pid"], "REGISTERED_BY"))
-        for ref in p.get("refs") or []:
-            if cx := answer_ref_to_celex(ref):
-                wanted.setdefault(cx, []).append(
-                    (p["system"], p["pid"], "ANSWERED_BY"))
+                (p["system"], p["pid"], "REGISTERED_BY", "celex", None))
+
+    answers = resolve_answers(endpoint, petitions)
+    by_pid = {p["pid"]: p for p in petitions}
+    answer_rows = {}
+    for pid, (celex, tier, delta, row) in answers.items():
+        p = by_pid[pid]
+        wanted.setdefault(celex, []).append(
+            (p["system"], pid, "ANSWERED_BY", tier, delta))
+        answer_rows[celex] = row
     if not wanted:
         return {"petitions": len(petitions), "resolved": 0, "edges": 0}
 
-    values = " ".join(f'"{c}"^^xsd:string' for c in sorted(wanted))
-    found = {r["celex"]: r for r in sparql(
-        endpoint, _LOOKUP_QUERY.format(graph=MIRROR_GRAPH, values=values))}
+    reg_celexes = sorted(set(wanted) - set(answer_rows))
+    found = dict(answer_rows)
+    if reg_celexes:
+        values = " ".join(f'"{c}"^^xsd:string' for c in reg_celexes)
+        found.update({r["celex"]: r for r in sparql(
+            endpoint, _LOOKUP_QUERY.format(graph=MIRROR_GRAPH,
+                                           values=values))})
 
     edges = 0
     with driver.session() as session:
@@ -241,14 +399,16 @@ def link_petitions(endpoint: str, driver) -> dict:  # pylint: disable=too-many-l
                 celex=celex, title=row.get("title"),
                 date=row.get("date"), doc_type=doc_type(celex),
             )
-            for system, pid, rel in wanted[celex]:
+            for system, pid, rel, matched, delta in wanted.get(celex, []):
                 session.run(
                     f"MATCH (p:Petition {{system: $system, petition_id: $pid}}) "
                     f"MATCH (a:LegalAct {{celex: $celex}}) "
                     f"MERGE (p)-[r:{rel}]->(a) "
                     f"SET r.provenance = 'eci-register', "
-                    f"    r.matched = 'celex'",
+                    f"    r.matched = $matched, "
+                    f"    r.date_delta_days = $delta",
                     system=system, pid=pid, celex=celex,
+                    matched=matched, delta=delta,
                 )
                 edges += 1
     unresolved = sorted(set(wanted) - set(found))

@@ -1211,6 +1211,32 @@ ASSERTIONS: list[Assertion] = [
         "must not exist.",
     ),
     Assertion(
+        "coverage.petitions_answered_linked", COVERAGE,
+        "Answered petitions link to their answer communication", WARN,
+        "cypher",
+        "MATCH (:Petition)-[r:ANSWERED_BY]->(:LegalAct) "
+        "RETURN count(r) AS found",
+        at_least("found", 1, "ANSWERED_BY edges"),
+        "The three-tier answer linker (ref-exact via cdm:work_id_document, "
+        "then gated title matching inside the answer-communication class) "
+        "must produce edges wherever the mirror holds the communication — "
+        "11 of 14 answered ECIs on prod as of 2026-07-24; the other three "
+        "(2015-2021 C-series answers) were never published to CELLAR. Zero "
+        "edges means the linker or its candidate query regressed.",
+    ),
+    Assertion(
+        "refs.petition_answer_match_method", REFS,
+        "ANSWERED_BY edges carry a known match method", BLOCK, "cypher",
+        "MATCH (:Petition)-[r:ANSWERED_BY]->(:LegalAct) "
+        "WHERE NOT r.matched IN ['ref-exact', 'title-substring', "
+        "'title-tokens'] RETURN count(*) AS violations",
+        zero_violations("edges with unknown match method"),
+        "Every answer link records which tier produced it (and its "
+        "register/mirror date delta) so any single link can be audited. "
+        "An edge outside the known tiers was not written by the gated "
+        "linker.",
+    ),
+    Assertion(
         "consistency.cellar_ft_searchable", CONSISTENCY,
         "The mirror's full-text index is built and searchable", WARN,
         "consistency", "CellarFtIndex",
