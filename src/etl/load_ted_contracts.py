@@ -47,6 +47,7 @@ from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
 from .collapse_modifications import derive_contract_key
 from .contract_confidence import score_contract_value
+from .scale_normalization import normalize_scale
 from . import value_review_queue
 from .ted_matcher import TedMatcher
 from . import ted_search
@@ -602,6 +603,26 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         getattr(notice, "modification_value_before", None),
     )
 
+    # Undo the national-gateway milli-euro leak (x1000) BEFORE scoring,
+    # so the confidence scorer sees the corrected magnitudes. The marker
+    # is carried onto the payload for dashboards + upstream reporting.
+    buyer_country_a3 = (
+        LocationService.to_alpha3(buyer.country) if buyer else None
+    )
+    scale = normalize_scale(
+        estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
+        total_original=tot_orig, payable_original=pay_orig,
+        country=buyer_country_a3,
+    )
+    if scale.corrected:
+        logger.warning(
+            "TED notice %s: monetary fields rescaled /1000 (%s): %s",
+            ted_notice_id, scale.tier, scale.detail,
+        )
+        est_eur = scale.estimate_eur
+        tot_eur, tot_orig = scale.total_eur, scale.total_original
+        pay_eur, pay_orig = scale.payable_eur, scale.payable_original
+
     score = score_contract_value(
         estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
         total_original=tot_orig, payable_original=pay_orig,
@@ -728,6 +749,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         value_quarantined=score.quarantined or None,
         value_quarantine_reason=(score.flag.value
                                  if score.quarantined else None),
+        value_scale_corrected=scale.tier if scale.corrected else None,
         cpv=notice.cpv_main,
         nuts=notice.nuts,
         language=getattr(notice, "language", None),
