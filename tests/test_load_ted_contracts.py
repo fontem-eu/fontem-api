@@ -1597,3 +1597,44 @@ def test_forwards_nuts_on_authority_and_contract(
     by_type = {c.args[0]: c for c in emit.upsert.call_args_list}
     assert by_type["UpsertAuthority"].kwargs["payload"].get("nuts") == "FR101"
     assert by_type["UpsertContract"].kwargs["payload"].get("nuts") == "FR101"
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_milli_euro_leak_rescaled_at_emit(
+    mock_matcher_cls, mock_stream,
+):
+    """A notice whose award total is ~x1000 its own estimate gets its
+    monetary fields rescaled /1000 before scoring, and the emitted
+    payload carries the value_scale_corrected marker."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="11111111-2222-5333-8444-555555555555",
+        stub_company_gmr="00040372-dad6-5d34-882c-8b8624b4e734",
+    )
+    contractor = MagicMock()
+    contractor.name = "Veiga Lopes SA"
+    contractor.country = "PT"
+    contractor.legal_id = MagicMock(value="503079235", scheme_name="VAT")
+    award = _stub_award()
+    award.value = 9281922790.0          # milli-euro leak (x1000)
+    notice = _stub_notice(
+        awards=[award], organizations={"O1": contractor},
+    )
+    notice.total_value = 9281922790.0
+    # the estimate signal comes from the awarded lot's
+    # EstimatedOverallContractAmount — give it the SANE value so the
+    # x1000 ratio evidence fires (the aircraft-case shape)
+    lot = MagicMock()
+    lot.lot_id = "LOT-0001"
+    lot.estimated_value = 9289549.17
+    notice.lots = [lot]
+
+    mock_stream.return_value = iter([notice])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    load_contracts(driver, log, "/fake/path.tar.gz")
+
+    by_type = {c.args[0]: c for c in emit.upsert.call_args_list}
+    payload = by_type["UpsertContract"].kwargs["payload"]
+    assert payload.get("value_scale_corrected") in ("ratio", "country_prior")
+    assert payload.get("value_eur") == 9281922.79
+
