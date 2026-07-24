@@ -52,7 +52,7 @@ _AFFECTED_COUNTRIES = frozenset({"PRT"})
 
 
 @dataclass(frozen=True)
-class ScaleNormalization:
+class ScaleNormalization:  # pylint: disable=too-many-instance-attributes
     """Outcome of the pre-scoring scale check for one notice."""
 
     estimate_eur: float | None
@@ -76,7 +76,7 @@ def _is_x1000(r: float | None) -> bool:
     return r is not None and _RATIO_LO <= r <= _RATIO_HI
 
 
-def normalize_scale(  # pylint: disable=too-many-branches
+def normalize_scale(  # pylint: disable=too-many-branches,too-many-arguments
     *,
     estimate_eur: float | None,
     total_eur: float | None,

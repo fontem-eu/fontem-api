@@ -1637,4 +1637,3 @@ def test_milli_euro_leak_rescaled_at_emit(
     payload = by_type["UpsertContract"].kwargs["payload"]
     assert payload.get("value_scale_corrected") in ("ratio", "country_prior")
     assert payload.get("value_eur") == 9281922.79
-
