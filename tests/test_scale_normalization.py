@@ -113,3 +113,22 @@ def test_round_thousand_on_pt_still_corrected():
         payable_eur=None, country="PRT",
     )
     assert r.corrected and r.tier == "ratio"
+
+
+def test_estimate_only_notice_rescaled_on_prt():
+    """No award value published, only an inflated estimate (the 4.3B
+    'fuel purchase'): tier B rescales the estimate."""
+    r = normalize_scale(
+        estimate_eur=4334378400.0, total_eur=None, payable_eur=None,
+        country="PRT",
+    )
+    assert r.corrected and r.tier == "country_prior"
+    assert r.estimate_eur == 4334378.4
+
+
+def test_estimate_only_below_floor_untouched():
+    r = normalize_scale(
+        estimate_eur=925162000.0, total_eur=None, payable_eur=None,
+        country="PRT",
+    )
+    assert not r.corrected  # 925M < 1B prior floor: ambiguous, left alone
