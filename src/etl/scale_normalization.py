@@ -76,6 +76,31 @@ def _is_x1000(r: float | None) -> bool:
     return r is not None and _RATIO_LO <= r <= _RATIO_HI
 
 
+def _has_cents_signature(v: float | None) -> bool:
+    """True when v looks like (X.XX euros) * 1000: divisible by 10 but
+    NOT by 1000 — the embedded-cents fingerprint of the milli-euro
+    leak. A round-thousand value is ambiguous (could be a real award
+    that genuinely disagrees with its estimate), so it does NOT count.
+
+    2026-07 census: the fingerprint appears exclusively on PT notices;
+    the ~x1000 disagreements elsewhere (POL, ESP, NLD) are all round
+    thousands — different phenomena that must stay flagged, not
+    "corrected" into plausible-looking wrong numbers.
+    """
+    if v is None:
+        return False
+    n = round(v)
+    return abs(v - n) < 1e-6 and n % 10 == 0 and n % 1000 != 0
+
+
+def _ratio_correctable(inflated: float | None, country: str | None) -> bool:
+    """Ratio evidence alone says the two fields disagree by ~x1000 —
+    but only the cents fingerprint (or a gateway already proven to
+    leak) says which one is wrong AND why. Without either, leave the
+    row to the value_disagreement flag path."""
+    return _has_cents_signature(inflated) or country in _AFFECTED_COUNTRIES
+
+
 def normalize_scale(  # pylint: disable=too-many-branches,too-many-arguments
     *,
     estimate_eur: float | None,
@@ -94,7 +119,7 @@ def normalize_scale(  # pylint: disable=too-many-branches,too-many-arguments
     tot_orig, pay_orig = total_original, payable_original
 
     # Tier A: a sane sibling proves the scale.
-    if _is_x1000(_ratio(tot, est)):
+    if _is_x1000(_ratio(tot, est)) and _ratio_correctable(tot, country):
         detail = (
             f"award total {tot:,.0f} is ~x1000 its own estimate "
             f"{est:,.0f}; milli-euro leak on the award fields"
@@ -108,7 +133,7 @@ def normalize_scale(  # pylint: disable=too-many-branches,too-many-arguments
             est, tot, pay, tot_orig, pay_orig, True, "ratio", detail,
         )
 
-    if _is_x1000(_ratio(est, tot)):
+    if _is_x1000(_ratio(est, tot)) and _ratio_correctable(est, country):
         detail = (
             f"estimate {est:,.0f} is ~x1000 the award total {tot:,.0f}; "
             "milli-euro leak on the estimate field"
@@ -119,7 +144,8 @@ def normalize_scale(  # pylint: disable=too-many-branches,too-many-arguments
         )
 
     # Payable-only leak: total absent, payable disagrees with estimate.
-    if tot is None and _is_x1000(_ratio(pay, est)):
+    if tot is None and _is_x1000(_ratio(pay, est)) \
+            and _ratio_correctable(pay, country):
         detail = (
             f"payable {pay:,.0f} is ~x1000 the estimate {est:,.0f}; "
             "milli-euro leak on the payable field"
