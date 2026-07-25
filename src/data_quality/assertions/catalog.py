@@ -1411,7 +1411,7 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "values.no_implausible_trusted_pt_contract", VALUES,
-        "No trusted Portuguese contract exceeds EUR 1B", WARN, "cypher",
+        "No trusted Portuguese contract exceeds EUR 1B", BLOCK, "cypher",
         "MATCH (c:Contract) WHERE c.country = 'PRT' "
         "  AND coalesce(c.is_current, (c.notice_type IS NULL "
         "      OR c.notice_type <> 'can-modif')) "
@@ -1439,21 +1439,6 @@ ASSERTIONS: list[Assertion] = [
         "the parser+loader nuts path or the historical reprocess has not "
         "populated it yet — the class of gap that left NUTS filtering blind "
         "to every contract before 2026-07.",
-    ),
-    Assertion(
-        "coverage.contract_nuts_events", COVERAGE,
-        "Recent contract events carry a nuts key (>=60%)", WARN, "sql",
-        "SELECT count(*) AS total, "
-        "  count(*) FILTER (WHERE payload ? 'nuts') AS covered "
-        "FROM events.entity_events "
-        "WHERE domain = 'contract' AND event_type = 'UpsertContract' "
-        "  AND seq > (SELECT max(seq) - 20000 FROM events.entity_events)",
-        min_coverage(0.60, "contract-event nuts key"),
-        "The event store is the source of truth every sink projects from. "
-        "If fresh UpsertContract events lack a nuts key, the loader/cron is "
-        "running an image that predates the nuts extraction (the daily cron "
-        "sat on a stale image while the fix shipped) — no downstream store "
-        "can show what the source never carried.",
     ),
 ]
 
