@@ -111,4 +111,4 @@ def test_package_store_save_has_fetch(tmp_path):
 
 
 def test_package_store_key():
-    assert TedPackageStore._key(2026, 3) == "ted-2026-03.tar.gz"
+    assert TedPackageStore._key(2026, 3) == "ted-2026-03.tar.gz"  # pylint: disable=protected-access
