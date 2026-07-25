@@ -40,10 +40,15 @@ import json
 import logging
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Final
 
 import httpx
 from neo4j import GraphDatabase
+
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 
 log = logging.getLogger("batch_translate_authorities")
 
@@ -104,14 +109,23 @@ ORDER BY nc DESC
 LIMIT $limit
 """
 
-_WRITE = """
-UNWIND $rows AS row
-MATCH (a:Authority {authority_id: row.id})
-SET a += row.props,
-    a.name_lang = coalesce(a.name_lang, row.src),
-    a.multilingual_updated_at = datetime()
-RETURN count(a) AS written
+# Cypher: authorities that ALREADY carry at least one name_<lang>. Used by
+# --backfill to re-emit the translations we already wrote directly to Neo4j
+# as TranslateAuthorityName events, so they flow through the event log to
+# every sink (the search index never saw the directly-written ones).
+_SELECT_EXISTING = """
+MATCH (a:Authority)
+WHERE a.authority_id IS NOT NULL AND a.name IS NOT NULL
+  AND any(code IN $langs WHERE a["name_" + code] IS NOT NULL)
+RETURN a.authority_id AS id, a.name AS name, a.name_lang AS name_lang,
+       [code IN $langs WHERE a["name_" + code] IS NOT NULL | [code, a["name_" + code]]] AS pairs
+ORDER BY a.authority_id
+SKIP $skip LIMIT $limit
 """
+
+def _authority_iri(authority_id: str) -> str:
+    return f"http://data.fontem.eu/id/Authority/{authority_id}"
+
 
 _TERMINAL = {"SUCCESS", "FAILED", "TIMEOUT_EXCEEDED", "CANCELLED"}
 
@@ -309,17 +323,95 @@ def _cost_report(lines: list) -> dict:
     return report
 
 
-def integrate(driver, lines: list, by_id: dict, batch: int = 500) -> dict:
-    """Write name_<lang> back to Neo4j. Returns counts."""
+def _emit_translation_events(items: list, *, method: str, producer: str) -> int:
+    """Emit one TranslateAuthorityName event per item into the event log.
+
+    ``items`` are dicts of {id, name, src, translations{lang: name}}. The
+    sinks apply them: Neo4j name_<lang> props, the search index
+    (embed_text/name_lex, so translated names become searchable), and
+    Virtuoso skos:altLabel. Requires EVENTS_DATABASE_URL.
+    """
+    items = [it for it in items if it.get("translations") and it.get("name")]
+    if not items:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    emitted = 0
+    elog = EventLog.from_env()
+    try:
+        with elog.batch(uuid.uuid4(), producer=producer) as emit:
+            for it in items:
+                emit.upsert(
+                    "TranslateAuthorityName",
+                    iri=_authority_iri(it["id"]),
+                    domain="authority",
+                    payload=builders.translate_authority_name(
+                        authority_id=it["id"],
+                        name=it["name"],
+                        translations=it["translations"],
+                        source_lang=it.get("src"),
+                        method=method,
+                        translated_at=now,
+                    ),
+                )
+                emitted += 1
+    finally:
+        elog.close()
+    return emitted
+
+
+def integrate(lines: list, by_id: dict, *, method: str) -> dict:
+    """Emit TranslateAuthorityName events from Mistral Batch output.
+
+    Replaces the old direct Neo4j write: translations now travel through
+    the event log so every sink (incl. the search index) picks them up.
+    """
     rows, skipped = _rows_from_lines(lines, by_id)
-    written = 0
-    with driver.session() as session:
-        for i in range(0, len(rows), batch):
-            written += session.run(_WRITE, rows=rows[i:i + batch]).single()["written"]
-    summary = {"parsed": len(rows), "skipped": skipped, "written": written,
-               "langs_total": sum(len(r["props"]) for r in rows)}
+    items = []
+    for r in rows:
+        rec = by_id.get(r["id"]) or {}
+        items.append({
+            "id": r["id"],
+            "name": rec.get("name") or "",
+            "src": r["src"],
+            "translations": {
+                code[len("name_"):]: text for code, text in r["props"].items()
+            },
+        })
+    emitted = _emit_translation_events(
+        items, method=method, producer="batch_translate_authorities")
+    summary = {"parsed": len(rows), "skipped": skipped, "emitted": emitted,
+               "langs_total": sum(len(it["translations"]) for it in items)}
     log.info("integrate: %s", summary)
     return summary
+
+
+def backfill_from_neo4j(driver, *, page: int = 1000) -> dict:
+    """Re-emit every authority's EXISTING name_<lang> translations as
+    TranslateAuthorityName events. One-time seed so the translations we
+    wrote directly to Neo4j before the event path existed reach the sinks
+    (the search index in particular never saw them). Idempotent; paginated.
+    """
+    skip, total = 0, 0
+    while True:
+        with driver.session() as session:
+            recs = [dict(r) for r in session.run(
+                _SELECT_EXISTING, langs=list(EU_LANGS), skip=skip, limit=page)]
+        if not recs:
+            break
+        items = []
+        for rec in recs:
+            src = (rec.get("name_lang") or "").strip().lower()
+            translations = {
+                code: text for code, text in rec["pairs"] if code != src
+            }
+            items.append({"id": rec["id"], "name": rec["name"],
+                          "src": src or None, "translations": translations})
+        total += _emit_translation_events(
+            items, method="backfill:neo4j",
+            producer="batch_translate_authorities:backfill")
+        log.info("backfill: %d events emitted so far (skip=%d)", total, skip)
+        skip += page
+    return {"backfilled": total}
 
 
 def _driver():
@@ -342,7 +434,7 @@ def _select(driver, limit: int, min_contracts: int = 0) -> list:
     return recs
 
 
-def _submit_and_integrate(driver, records: list, args) -> dict:
+def _submit_and_integrate(records: list, args) -> dict:
     """Upload/create (unless resuming), poll, download, write back."""
     by_id = {r["id"]: r for r in records}
     client = MistralBatch(
@@ -367,7 +459,7 @@ def _submit_and_integrate(driver, records: list, args) -> dict:
             return {"job_id": job_id, "status": job.get("status"),
                     "written": 0, "error": "no output_file"}
         lines = client.download(out_id)
-        summary = integrate(driver, lines, by_id)
+        summary = integrate(lines, by_id, method=args.model)
         summary["cost"] = _cost_report(lines)
         summary.update({"job_id": job_id, "status": job.get("status")})
         return summary
@@ -378,6 +470,8 @@ def _submit_and_integrate(driver, records: list, args) -> dict:
 def run(args) -> dict:
     driver = _driver()
     try:
+        if args.backfill:
+            return backfill_from_neo4j(driver)
         records = _select(driver, args.limit, args.min_contracts)
         if not records:
             return {"selected": 0}
@@ -387,7 +481,7 @@ def run(args) -> dict:
                 log.info("dry-run: stopping after compile (%s)", args.jsonl_path)
                 return {"selected": len(records), "compiled": len(records),
                         "dry_run": True, "jsonl_path": args.jsonl_path}
-        return _submit_and_integrate(driver, records, args)
+        return _submit_and_integrate(records, args)
     finally:
         driver.close()
 
@@ -408,6 +502,10 @@ def main() -> None:
     ap.add_argument("--resume-job", default=None,
                     help="skip compile/submit; poll+integrate this job id")
     ap.add_argument("--jsonl-path", default="/tmp/authority_translations.jsonl")
+    ap.add_argument("--backfill", action="store_true",
+                    help="re-emit existing Neo4j name_<lang> translations as "
+                         "TranslateAuthorityName events (no Mistral call); seeds "
+                         "the event log + search index. Needs EVENTS_DATABASE_URL.")
     log.info("done %s", run(ap.parse_args()))
 
 

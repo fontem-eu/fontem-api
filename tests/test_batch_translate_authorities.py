@@ -7,6 +7,7 @@ codes, empty values, fenced JSON, and the source language leaking back in).
 """
 from unittest.mock import MagicMock
 
+import src.etl.batch_translate_authorities as m
 from src.etl.batch_translate_authorities import (
     EU_LANGS,
     _build_request,
@@ -15,7 +16,6 @@ from src.etl.batch_translate_authorities import (
     _rows_from_lines,
     _source_lang,
     _targets,
-    integrate,
 )
 
 
@@ -83,18 +83,84 @@ def test_rows_from_lines_filters_source_and_unknown_ids():
     assert rows[0]["src"] == "hu"
 
 
-def test_integrate_writes_in_chunks_and_counts():
+class _FakeEmit:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def upsert(self, event_type, *, iri, domain, payload):
+        self._sink.append((event_type, iri, domain, payload))
+        return len(self._sink)
+
+
+class _FakeBatchCtx:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def __enter__(self):
+        return _FakeEmit(self._sink)
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeEventLog:
+    """Records emitted events; stands in for fontem_events.EventLog."""
+
+    last_events: list = []
+
+    def batch(self, *_a, **_k):
+        return _FakeBatchCtx(_FakeEventLog.last_events)
+
+    def close(self):
+        pass
+
+
+def _patch_eventlog(monkeypatch):
+    _FakeEventLog.last_events = []
+    monkeypatch.setattr(
+        m.EventLog, "from_env", classmethod(lambda cls: _FakeEventLog()))
+    return _FakeEventLog.last_events
+
+
+def test_integrate_emits_translation_events(monkeypatch):
+    events = _patch_eventlog(monkeypatch)
     by_id = {"a": {"id": "a", "name": "X", "country": "FRA", "name_lang": "fr"}}
     lines = [{"custom_id": "a", "response": {"body": {"choices": [{"message": {
         "content": '{"en":"X-en","de":"X-de"}'}}]}}}]
+    summary = m.integrate(lines, by_id, method="mistral-medium-latest")
+    assert summary["parsed"] == 1
+    assert summary["emitted"] == 1
+    assert summary["langs_total"] == 2
+    assert len(events) == 1
+    et, iri, domain, payload = events[0]
+    assert et == "TranslateAuthorityName"
+    assert iri == "http://data.fontem.eu/id/Authority/a"
+    assert domain == "authority"
+    assert payload["translations"] == {"en": "X-en", "de": "X-de"}
+    assert payload["name"] == "X"
+    assert payload["source_lang"] == "fr"
+    assert payload["method"] == "mistral-medium-latest"
+
+
+def test_backfill_emits_events_from_existing_neo4j(monkeypatch):
+    events = _patch_eventlog(monkeypatch)
+    rec = {"id": "a", "name": "Urzad Miasta", "name_lang": "pl",
+           "pairs": [["de", "Stadtamt"], ["en", "City Office"],
+                     ["pl", "Urzad Miasta"]]}
     session = MagicMock()
-    session.run.return_value.single.return_value = {"written": 1}
+    # first page returns one record, second page empty -> loop terminates
+    session.run.side_effect = [[dict(rec)], []]
     driver = MagicMock()
     driver.session.return_value.__enter__.return_value = session
-    summary = integrate(driver, lines, by_id)
-    assert summary["parsed"] == 1
-    assert summary["written"] == 1
-    assert summary["langs_total"] == 2
+    summary = m.backfill_from_neo4j(driver, page=1000)
+    assert summary["backfilled"] == 1
+    assert len(events) == 1
+    et, _iri, _domain, payload = events[0]
+    assert et == "TranslateAuthorityName"
+    # source language 'pl' is dropped from the translations map
+    assert payload["translations"] == {"de": "Stadtamt", "en": "City Office"}
+    assert payload["source_lang"] == "pl"
+    assert payload["method"] == "backfill:neo4j"
 
 
 def test_cost_report_sums_usage_and_estimates():
