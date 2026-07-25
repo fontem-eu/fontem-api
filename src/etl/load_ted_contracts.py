@@ -40,6 +40,7 @@ from eforms.filters import awards_only
 from eforms.parser import parse as parse_notice_xml
 from eforms.stream import stream_notices
 
+from src.data.ted_raw_store import TedRawStore
 from ..services.currency.client import CurrencyClient
 from ..services.location_service import LocationService
 from ..services.ted_lookup import TedLookupError, resolve_publication_number
@@ -813,7 +814,7 @@ def _advance_watermark(session, watermark_id: str, day_iso: str) -> None:
     )
 
 
-def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments,too-many-statements
     driver,
     log: EventLog,
     since: _date,
@@ -836,6 +837,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     without advancing, so we never silently skip a date.
     """
     totals = {"days": 0, "emitted": 0, "skipped": 0, "modifications": 0, "errors": 0}
+    raw_store = TedRawStore.from_env()
     http = httpx.Client(timeout=ted_search.SEARCH_TIMEOUT)
     try:
         with driver.session() as session:
@@ -863,7 +865,16 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                         continue
                     is_mod = rec.get("notice-type") == _MODIFICATION_NOTICE_TYPE
                     try:
-                        notice = parse_notice_xml(ted_search.fetch_xml(url, client=http))
+                        xml_bytes = ted_search.fetch_xml(url, client=http)
+                        # Persist raw XML (full-fidelity backstop) BEFORE
+                        # parsing, keyed by publication-number, so any
+                        # future field is a local re-parse, never a
+                        # TED re-fetch. No-op if the store is unconfigured.
+                        if raw_store is not None:
+                            raw_store.put(
+                                rec.get("publication-number") or nid, xml_bytes,
+                            )
+                        notice = parse_notice_xml(xml_bytes)
                         extra = {
                             "procedure_id": rec.get("procedure-identifier"),
                             "notice_type": rec.get("notice-type"),
