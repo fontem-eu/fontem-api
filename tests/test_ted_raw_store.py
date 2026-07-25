@@ -2,7 +2,7 @@
 import gzip
 import io
 
-from src.data.ted_raw_store import TedRawStore, _safe_key
+from src.data.ted_raw_store import TedRawStore, TedPackageStore, _safe_key
 
 
 class _Resp:
@@ -99,7 +99,6 @@ class _FakeMinioFiles(_FakeMinio):
 
 
 def test_package_store_save_has_fetch(tmp_path):
-    from src.data.ted_raw_store import TedPackageStore
     store = TedPackageStore(_FakeMinioFiles(), "ted-packages")
     pkg = tmp_path / "ted-2025-01.tar.gz"
     pkg.write_bytes(b"PKGDATA" * 100)
@@ -112,5 +111,4 @@ def test_package_store_save_has_fetch(tmp_path):
 
 
 def test_package_store_key():
-    from src.data.ted_raw_store import TedPackageStore
     assert TedPackageStore._key(2026, 3) == "ted-2026-03.tar.gz"
