@@ -631,7 +631,7 @@ def test_main_overrides_year_month_when_explicit(monkeypatch):
     """
     captured: dict = {}
 
-    def _fake_download(year, month, dest):
+    def _fake_download(year, month, dest, package_store=None):  # pylint: disable=unused-argument
         captured["year"] = year
         captured["month"] = month
         captured["dest"] = dest
