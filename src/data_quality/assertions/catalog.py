@@ -1386,6 +1386,75 @@ ASSERTIONS: list[Assertion] = [
         "authority resolution (name_clean/apoc.text.clean agreement or "
         "the country guard) broke for the most ordinary case there is.",
     ),
+
+    # ---- TED value-scale + NUTS enrichment trackers ----------------------
+    # Guard + progress meters for the 2026-07 milli-euro (x1000) leak fix
+    # and the place-of-performance NUTS backfill. See scale_normalization
+    # and the ted-milli-euro-leak investigation.
+    Assertion(
+        "values.no_scale_stale_current_value", VALUES,
+        "No Contract's total-value copy is a x1000-stale derived field",
+        BLOCK, "cypher",
+        "MATCH (c:Contract) "
+        "WHERE c.value_eur IS NOT NULL AND c.current_value IS NOT NULL "
+        "  AND c.value_eur > 0 "
+        "  AND c.current_value / c.value_eur > 900 "
+        "  AND c.current_value / c.value_eur < 1100 "
+        "RETURN count(*) AS violations, "
+        "  toString(collect(c.ted_notice_id)[0]) AS detail",
+        zero_with_detail("contracts whose current_value is x1000 its value_eur"),
+        "trusted_value_sum aggregates coalesce(current_value, value_eur). A "
+        "current_value stuck at ~1000x value_eur means a scale correction "
+        "updated value_eur but not the derived current_value, so totals still "
+        "read x1000 even though the contract row looks fixed. This is exactly "
+        "the split that made a EUR 9.28M school total EUR 9.28B.",
+    ),
+    Assertion(
+        "values.no_implausible_trusted_pt_contract", VALUES,
+        "No trusted Portuguese contract exceeds EUR 1B", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.country = 'PRT' "
+        "  AND coalesce(c.is_current, (c.notice_type IS NULL "
+        "      OR c.notice_type <> 'can-modif')) "
+        "  AND NOT coalesce(c.value_low_confidence, false) "
+        "  AND coalesce(c.current_value, c.value_eur, 0) > 1000000000 "
+        "RETURN count(*) AS violations, "
+        "  toString(collect(c.ted_notice_id)[0]) AS detail",
+        zero_with_detail("trusted PT contracts over EUR 1B"),
+        "Portugal's entire annual public procurement is ~EUR 10-15B, so no "
+        "single trusted PT contract reaches EUR 1B — a survivor is an "
+        "uncorrected milli-euro (x1000) leak the scale normaliser missed. "
+        "PT-scoped on purpose: an absolute bar catches real framework "
+        "ceilings in larger member states (SWE/GBR/FIN), which are not this "
+        "bug. See the ted-milli-euro-leak investigation.",
+    ),
+    Assertion(
+        "coverage.contract_nuts_2026", COVERAGE,
+        "2026 contracts carry a NUTS place-of-performance (>=60%)",
+        WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= '2026-01-01' "
+        "RETURN count(*) AS total, count(c.nuts) AS covered",
+        min_coverage(0.60, "contract NUTS"),
+        "eForms carries the place-of-performance NUTS on almost every "
+        "notice (RealizedLocation/CountrySubentityCode). Low coverage means "
+        "the parser+loader nuts path or the historical reprocess has not "
+        "populated it yet — the class of gap that left NUTS filtering blind "
+        "to every contract before 2026-07.",
+    ),
+    Assertion(
+        "coverage.contract_nuts_events", COVERAGE,
+        "Recent contract events carry a nuts key (>=60%)", WARN, "sql",
+        "SELECT count(*) AS total, "
+        "  count(*) FILTER (WHERE payload ? 'nuts') AS covered "
+        "FROM events.entity_events "
+        "WHERE domain = 'contract' AND event_type = 'UpsertContract' "
+        "  AND seq > (SELECT max(seq) - 20000 FROM events.entity_events)",
+        min_coverage(0.60, "contract-event nuts key"),
+        "The event store is the source of truth every sink projects from. "
+        "If fresh UpsertContract events lack a nuts key, the loader/cron is "
+        "running an image that predates the nuts extraction (the daily cron "
+        "sat on a stale image while the fix shipped) — no downstream store "
+        "can show what the source never carried.",
+    ),
 ]
 
 
