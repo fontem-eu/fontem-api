@@ -38,6 +38,19 @@ virtuoso:
   dbaPasswordSecret: virtuoso-credentials
   dbaPasswordKey: VIRTUOSO_DBA_PASSWORD
 
+# Raw-XML store (the "store everything" backstop). When enabled, the TED
+# loader persists each notice's raw XML to object storage keyed by
+# publication-number, so a later field addition is a local re-parse
+# rather than a TED re-fetch. Disabled by default; prod enables it and
+# points at the in-cluster minio.
+tedRaw:
+  enabled: false
+  endpoint: ""
+  bucket: ted-raw
+  credentialsSecret: minio-credentials
+  accessKeyKey: MINIO_ROOT_USER
+  secretKeyKey: MINIO_ROOT_PASSWORD
+
 # Per-cronjob tuning. Today only the OpenFIGI loader exposes a runtime
 # knob (its --limit caps how many IDs each scheduled run consumes).
 # Default empty → loader uses its own internal default (10000/mode).
