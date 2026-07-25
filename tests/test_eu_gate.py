@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from src.data import eu_gate, geo_ip
 
 
@@ -64,5 +66,5 @@ def test_countries_env_override(monkeypatch):
 def test_real_mmdb_us_ip_denied():
     # Offline lookup against the vendored DB: 8.8.8.8 is US.
     if geo_ip.country_for("8.8.8.8") != "US":  # pragma: no cover
-        return  # vendored DB unavailable in this env — decision covered above
+        pytest.skip("vendored GeoIP DB unavailable in this environment")
     assert not eu_gate.is_allowed("8.8.8.8")
