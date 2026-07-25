@@ -89,6 +89,21 @@ ORDER BY coalesce(a.multilingual_updated_at, datetime("1970-01-01")) ASC
 LIMIT $limit
 """
 
+# Same population, but ranked by contract activity (most-awarded first) and
+# gated by a minimum contract count — used to translate the authorities people
+# actually see (a small, high-value head) instead of the long tail.
+_SELECT_PRIORITISED = """
+MATCH (a:Authority)
+WHERE a.name IS NOT NULL AND a.authority_id IS NOT NULL
+  AND any(code IN $langs WHERE a["name_" + code] IS NULL AND code <> coalesce(a.name_lang, ""))
+OPTIONAL MATCH (a)-[:AWARDED]-(c:Contract)
+WITH a, count(DISTINCT c) AS nc
+WHERE nc >= $min_contracts
+RETURN a.authority_id AS id, a.name AS name, a.country AS country, a.name_lang AS name_lang
+ORDER BY nc DESC
+LIMIT $limit
+"""
+
 _WRITE = """
 UNWIND $rows AS row
 MATCH (a:Authority {authority_id: row.id})
@@ -314,10 +329,16 @@ def _driver():
     )
 
 
-def _select(driver, limit: int) -> list:
+def _select(driver, limit: int, min_contracts: int = 0) -> list:
+    params = {"langs": list(EU_LANGS), "limit": limit}
+    query = _SELECT
+    if min_contracts > 0:
+        query = _SELECT_PRIORITISED
+        params["min_contracts"] = min_contracts
     with driver.session() as session:
-        recs = [dict(r) for r in session.run(_SELECT, langs=list(EU_LANGS), limit=limit)]
-    log.info("selected %d authorities needing translation", len(recs))
+        recs = [dict(r) for r in session.run(query, **params)]
+    log.info("selected %d authorities needing translation (min_contracts=%d)",
+             len(recs), min_contracts)
     return recs
 
 
@@ -357,7 +378,7 @@ def _submit_and_integrate(driver, records: list, args) -> dict:
 def run(args) -> dict:
     driver = _driver()
     try:
-        records = _select(driver, args.limit)
+        records = _select(driver, args.limit, args.min_contracts)
         if not records:
             return {"selected": 0}
         if not args.resume_job:
@@ -376,6 +397,9 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser(description="Batch-translate authority names via Mistral.")
     ap.add_argument("--limit", type=int, default=500)
+    ap.add_argument("--min-contracts", type=int, default=0,
+                    help="only authorities with >= N contracts, ranked by contract count "
+                         "(0 = stalest-first over all)")
     ap.add_argument("--model", default=os.environ.get(
         "MISTRAL_BATCH_MODEL", "mistral-medium-latest"))
     ap.add_argument("--dry-run", action="store_true",
