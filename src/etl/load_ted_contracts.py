@@ -40,6 +40,7 @@ from eforms.filters import awards_only
 from eforms.parser import parse as parse_notice_xml
 from eforms.stream import stream_notices
 
+from src.data.ted_raw_store import TedRawStore, TedPackageStore
 from ..services.currency.client import CurrencyClient
 from ..services.location_service import LocationService
 from ..services.ted_lookup import TedLookupError, resolve_publication_number
@@ -119,13 +120,23 @@ TED_MONTHLY_URL = "https://ted.europa.eu/packages/monthly/{year}-{month}"
 # aircraft ship at €7.27B.
 
 
-def _download_monthly(year: int, month: int, dest: Path) -> Path:
-    """Download a TED monthly package."""
+def _download_monthly(year: int, month: int, dest: Path,
+                      package_store=None) -> Path:
+    """Fetch a TED monthly package, preferring cached copies.
+
+    Resolution order: local disk (this pod) -> the durable package store
+    (in-cluster minio, shared across runs) -> TED's CDN. A CDN download
+    is uploaded to the store so the next re-parse never hits TED again.
+    """
     url = TED_MONTHLY_URL.format(year=year, month=month)
     out = dest / f"ted-{year}-{month:02d}.tar.gz"
     if out.exists():
-        logger.info("Using cached %s", out)
+        logger.info("Using local cached %s", out)
         return out
+    if package_store is not None and package_store.has(year, month):
+        if package_store.fetch_to(year, month, out):
+            logger.info("Fetched %d-%02d from package store", year, month)
+            return out
 
     def _do_download() -> Path:
         # Clear any partial bytes left by a previous attempt so each
@@ -154,7 +165,11 @@ def _download_monthly(year: int, month: int, dest: Path) -> Path:
         logger.info("Downloaded %s (%.0f MB)", out, out.stat().st_size / 1e6)
         return out
 
-    return call_with_retry(_do_download)
+    result = call_with_retry(_do_download)
+    if package_store is not None:
+        if package_store.save(year, month, result):
+            logger.info("Cached %d-%02d to package store", year, month)
+    return result
 
 
 def _already_loaded(session, ted_notice_id: str) -> bool:
@@ -813,7 +828,7 @@ def _advance_watermark(session, watermark_id: str, day_iso: str) -> None:
     )
 
 
-def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments,too-many-statements
     driver,
     log: EventLog,
     since: _date,
@@ -836,6 +851,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     without advancing, so we never silently skip a date.
     """
     totals = {"days": 0, "emitted": 0, "skipped": 0, "modifications": 0, "errors": 0}
+    raw_store = TedRawStore.from_env()
     http = httpx.Client(timeout=ted_search.SEARCH_TIMEOUT)
     try:
         with driver.session() as session:
@@ -863,7 +879,16 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                         continue
                     is_mod = rec.get("notice-type") == _MODIFICATION_NOTICE_TYPE
                     try:
-                        notice = parse_notice_xml(ted_search.fetch_xml(url, client=http))
+                        xml_bytes = ted_search.fetch_xml(url, client=http)
+                        # Persist raw XML (full-fidelity backstop) BEFORE
+                        # parsing, keyed by publication-number, so any
+                        # future field is a local re-parse, never a
+                        # TED re-fetch. No-op if the store is unconfigured.
+                        if raw_store is not None:
+                            raw_store.put(
+                                rec.get("publication-number") or nid, xml_bytes,
+                            )
+                        notice = parse_notice_xml(xml_bytes)
                         extra = {
                             "procedure_id": rec.get("procedure-identifier"),
                             "notice_type": rec.get("notice-type"),
@@ -926,7 +951,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     return totals
 
 
-def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals
+def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-many-branches
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Emit UpsertAuthority + UpsertContract events for TED awards",
@@ -934,6 +959,10 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals
     parser.add_argument("--file", help="Path to a local TED archive")
     parser.add_argument("--year", type=int)
     parser.add_argument("--month", type=int)
+    parser.add_argument("--from", dest="from_month",
+                        help="Bulk reprocess start month YYYY-MM (walks to --to)")
+    parser.add_argument("--to", dest="to_month",
+                        help="Bulk reprocess end month YYYY-MM (default: --from)")
     parser.add_argument(
         "--rescore", action="store_true",
         help="Re-ingest notices already in the graph (bypass the "
@@ -1020,22 +1049,46 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals
         from .load_cpv import load_cpv  # pylint: disable=import-outside-toplevel
         load_cpv(log, lang="en")
 
-        if args.file or args.year or args.month:
-            # Bulk path: a local archive or a specific monthly package
-            # (historical backfill of a COMPLETED month — TED only
-            # publishes a month's package after the month ends).
+        if args.file or args.year or args.month or args.from_month:
+            # Bulk path: a local archive, a single monthly package, or a
+            # month range (historical reprocess). TED only publishes a
+            # month's package after the month ends. Downloaded packages
+            # are cached to the durable package store so a re-parse never
+            # re-downloads from TED.
+            package_store = TedPackageStore.from_env()
             if args.file:
-                archive = Path(args.file)
+                months = [None]
+            elif args.from_month:
+                start = _date.fromisoformat(args.from_month + "-01")
+                end_s = args.to_month or args.from_month
+                end = _date.fromisoformat(end_s + "-01")
+                months = []
+                cur = start
+                while cur <= end:
+                    months.append((cur.year, cur.month))
+                    cur = (cur.replace(day=1) + timedelta(days=32)).replace(day=1)
             else:
                 today = datetime.now().astimezone()
-                archive = _download_monthly(
-                    args.year or today.year, args.month or today.month, Path("/tmp"),
+                months = [(args.year or today.year, args.month or today.month)]
+
+            for ym in months:
+                if args.file:
+                    archive = Path(args.file)
+                else:
+                    yr, mo = ym
+                    logger.info("=== reprocess month %d-%02d ===", yr, mo)
+                    archive = _download_monthly(
+                        yr, mo, Path("/tmp"), package_store=package_store,
+                    )
+                load_contracts(
+                    driver, log, archive, currency_svc=currency_svc,
+                    skip_pub_num_lookup=args.skip_pub_num_lookup,
+                    rescore=args.rescore,
                 )
-            load_contracts(
-                driver, log, archive, currency_svc=currency_svc,
-                skip_pub_num_lookup=args.skip_pub_num_lookup,
-                rescore=args.rescore,
-            )
+                # Free disk between months (packages are >1 GB); the
+                # durable copy lives in the package store.
+                if not args.file and archive.exists():
+                    archive.unlink()
         else:
             # Daily/incremental default: search-API by publication-date
             # from the watermark forward. Replaces the old current-month
