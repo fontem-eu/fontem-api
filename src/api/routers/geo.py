@@ -19,11 +19,42 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from src.analysis.geo_source import GeoSource
+from src.data import eu_gate as eu_gate_policy
 from src.data import geo_ip
 from src.services.location_service import LocationService
 
 
 router = APIRouter(prefix="/geo", tags=["geo"])
+
+_EU_GATE_DENY_HTML = """<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><title>Fontem — regional availability</title>
+<style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;
+min-height:100vh;margin:0;background:#0e1116;color:#e6e8eb}
+main{max-width:32rem;padding:2rem;text-align:center}
+h1{font-size:1.3rem}p{color:#9aa4b2;line-height:1.6}</style></head><body>
+<main><h1>Fontem is available from the European statistical space</h1>
+<p>This platform serves the EU, EEA/EFTA, enlargement countries and the
+UK. If you believe you are seeing this in error, your network may be
+routing traffic from outside the region.</p></main></body></html>"""
+
+
+@router.get("/eu-gate", include_in_schema=False)
+def eu_gate(request: Request) -> Response:
+    """Traefik forwardAuth target gating the public fontem.eu ingress.
+
+    204 admits the request; the 403 body is served to the visitor
+    verbatim by Traefik. Decision logic (and its fail-open stance)
+    lives in src.data.eu_gate.
+    """
+    ip = geo_ip.client_ip_from(
+        request.headers.get("x-forwarded-for"),
+        request.headers.get("x-real-ip"),
+        request.client.host if request.client else None,
+    )
+    if eu_gate_policy.is_allowed(ip):
+        return Response(status_code=204)
+    return Response(content=_EU_GATE_DENY_HTML, status_code=403,
+                    media_type="text/html")
 
 
 @router.get("/client-language")
