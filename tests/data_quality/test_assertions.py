@@ -847,7 +847,6 @@ def test_consolidator_runner_unwired_when_url_emptied(monkeypatch):
 
 
 def test_bidder_anomaly_evaluators():
-    from src.data_quality.assertions.catalog import by_id
     d = by_id()
     bound = d["coverage.bidder_count_within_sane_bound"]
     ok, obs = bound.evaluate({"violations": 0, "detail": ""})
