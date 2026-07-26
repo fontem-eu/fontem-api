@@ -38,6 +38,32 @@ def test_ids_unique():
     assert len(by_id()) == len(ASSERTIONS)
 
 
+def test_currency_iso_assertion_is_blocking_value_check():
+    a = by_id()["values.currency_iso"]
+    assert a.family == VALUES
+    assert a.severity == BLOCK
+    assert a.engine == "cypher"
+
+
+def test_currency_iso_allows_withdrawn_euro_predecessor_codes():
+    # Regression: historical TED awards from later euro adopters are
+    # denominated in the (now-withdrawn) national currency and are
+    # FX-convertible via the fixed euro rate, so the allowlist must accept
+    # them or their EUR-converted values falsely trip the BLOCK assertion.
+    query = by_id()["values.currency_iso"].query
+    for code in ("LTL", "LVL", "EEK", "SKK", "MTL", "CYP", "SIT"):
+        assert f"'{code}'" in query, code
+
+
+def test_currency_iso_still_rejects_ted_placeholders():
+    # UNPUBLISHED / OP_DATPRO are TED non-currency placeholders, not ISO
+    # codes; they must stay outside the allowlist (the loader nulls them,
+    # and any historical rows must remain visible to the assertion).
+    query = by_id()["values.currency_iso"].query
+    assert "UNPUBLISHED" not in query
+    assert "OP_DATPRO" not in query
+
+
 def test_families_and_severities_valid():
     fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE, ORACLE,
             CONSISTENCY, GRAIN, LINGUISTICS, RESOLUTION}
