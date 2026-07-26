@@ -1387,6 +1387,51 @@ ASSERTIONS: list[Assertion] = [
         "the country guard) broke for the most ordinary case there is.",
     ),
 
+    # ---- TED bidder-count (tenders_received) anomaly trackers -------------
+    # The parser reads the received-tenders total from a LotResult's
+    # ReceivedSubmissionsStatistics. Two failure modes have bitten it:
+    # a source/parse error injecting an impossible count (a 2026-03 award
+    # showed 2,416,436 "bidders"), and notices publishing only the
+    # "t-esubm" electronic-submission code going uncounted (fixed in
+    # eforms 0.9.1). These WARN monitors surface both without hard-gating.
+    Assertion(
+        "coverage.bidder_count_within_sane_bound", COVERAGE,
+        "No contract reports an impossible bidder count (>10000)",
+        WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.tenders_received > 10000 "
+        "RETURN count(*) AS violations, "
+        "toString(max(c.tenders_received)) AS detail",
+        zero_with_detail("contracts with an impossible bidder count"),
+        "No real EU procurement draws more than a few dozen tenders; a "
+        "count in the thousands+ is a parse/source error reading the wrong "
+        "ReceivedSubmissionsStatistics value as the bidder total (seen: "
+        "2,416,436). Non-zero => garbage counts are corrupting single-bidder "
+        "indicators and any average-competition analysis.",
+    ),
+    Assertion(
+        "coverage.bidder_mean_not_outlier_inflated", COVERAGE,
+        "No month's mean bidder count is >3x its median (outlier-inflated)",
+        WARN, "cypher",
+        "MATCH (c:Contract) "
+        "WHERE c.publication_date >= '2024-01-01' "
+        "  AND c.tenders_received IS NOT NULL AND c.tenders_received > 0 "
+        "WITH substring(c.publication_date,0,7) AS mon, "
+        "     avg(toFloat(c.tenders_received)) AS mavg, "
+        "     percentileCont(toFloat(c.tenders_received),0.5) AS mmed, "
+        "     count(*) AS n "
+        "WHERE n >= 500 AND mmed > 0 AND mavg > 3*mmed "
+        "WITH collect(mon) AS bad "
+        "RETURN size(bad) AS violations, "
+        "       reduce(s='', m IN bad | s + m + ' ') AS detail",
+        zero_with_detail("months whose mean bidder count is outlier-inflated"),
+        "A month whose average bidder count sits far above its median is "
+        "contaminated by impossible outliers (the parser mis-read a value) "
+        "or a sudden distribution break — the exact signature of the bidder "
+        "regression, whose symptom was the fleet-wide average lurching after "
+        "a point in time. Robust to normal month-to-month noise (median-"
+        "anchored). Lists the offending months.",
+    ),
+
     # ---- TED value-scale + NUTS enrichment trackers ----------------------
     # Guard + progress meters for the 2026-07 milli-euro (x1000) leak fix
     # and the place-of-performance NUTS backfill. See scale_normalization
