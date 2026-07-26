@@ -776,9 +776,17 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         # Tender-integrity fields (eForms) — inputs to the SMSB
         # single-bidder / non-open indicators + the CRI red flags.
         # tenders_received stays the notice's published bidder COUNT;
-        # parties[] (the named subset) must never redefine it.
+        # parties[] (the named subset) must never redefine it. A COUNT is
+        # >= 1 by definition; a 0/negative is corrupt parsing (some
+        # non-eForms notices carry it), so withhold it rather than emit a
+        # bidder count the graph must then reject
+        # (values.contract_bidder_count_positive).
         procedure_type=notice.procedure_type,
-        tenders_received=context_award.tenders_received,
+        tenders_received=(
+            context_award.tenders_received
+            if (context_award.tenders_received or 0) > 0
+            else None
+        ),
         award_criterion_type=notice.award_criterion_type,
         submission_deadline=notice.submission_deadline,
         is_framework=notice.is_framework,
