@@ -401,16 +401,27 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "refs.contract_has_company", REFS,
-        "Every Contract is AWARDED_TO a Company or InvestmentFund",
+        "Every awarded Contract is AWARDED_TO a Company or InvestmentFund",
         BLOCK, "cypher",
         "MATCH (c:Contract) WHERE NOT (c)-[:AWARDED_TO]->(:Company) "
         "AND NOT (c)-[:AWARDED_TO]->(:InvestmentFund) "
+        # Notices that published no awardee — named tenderers only, or no
+        # resolvable/published winner — legitimately have no AWARDED_TO
+        # edge. The loader keeps them (so their BID_ON tenderer provenance
+        # survives) and marks them value_quality_flag='no_awarded_value';
+        # they are excluded from every value aggregate. Treating them as a
+        # referential violation blocked the gate on real, correct upstream
+        # data, so exempt them. coalesce keeps a null-flag contract that is
+        # genuinely missing its winner as a violation.
+        "AND coalesce(c.value_quality_flag, '') <> 'no_awarded_value' "
         "RETURN count(*) AS violations",
-        zero_violations("contracts not awarded to a company or fund"),
+        zero_violations("awarded contracts not awarded to a company or fund"),
         "The awardee may be relabeled :InvestmentFund once GLEIF confirms "
         "its category is FUND (an :InvestmentFund can win a contract), so "
         "both labels are valid targets. Guarding only :Company made the "
-        "gate fail the moment a fund awardee was relabeled (#270).",
+        "gate fail the moment a fund awardee was relabeled (#270). "
+        "no_awarded_value contracts (no published winner) are exempt: they "
+        "carry no awardee by design and are out of every value aggregate.",
     ),
     Assertion(
         "refs.financialyear_has_company", REFS,

@@ -133,3 +133,46 @@ def test_key_falls_back_to_notice_id():
         modifies_publication_number=None,
         ted_publication_number="555-2026", ted_notice_id="uuid-4",
     ) == "uuid-4"
+
+
+def test_award_and_modification_converge_when_pubnum_known():
+    """An award and the modification that restates it MUST derive the same
+    contract_key, or the sink projects them onto two :Contract entities.
+    A modification references the award via modifies_publication_number =
+    the award's ted_publication_number, so once the award's pub-number is
+    known both sides land on it."""
+    award_key = collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type="can-standard",
+        modifies_publication_number=None,
+        ted_publication_number="734888-2023", ted_notice_id="award-uuid",
+    )
+    mod_key = collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type="can-modif",
+        modifies_publication_number="734888-2023",
+        ted_publication_number="900-2024", ted_notice_id="mod-uuid",
+    )
+    assert award_key == mod_key == "734888-2023"
+
+
+def test_award_key_diverges_from_its_modification_without_pubnum():
+    """Regression pin for the duplicate-contract root cause: when the
+    award is loaded with skip_pub_num_lookup its ted_publication_number is
+    null, so its key falls back to ted_notice_id — a key the modification
+    (which uses the award's publication-number) can NEVER reference. The
+    two derive different keys, which is exactly what splits one real
+    contract into a duplicate ted_notice_id pair. backfill_ted_publication
+    _numbers converges the award onto the pub-number key once it is
+    resolved; this test documents the divergence that convergence fixes."""
+    award_key = collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type="can-standard",
+        modifies_publication_number=None,
+        ted_publication_number=None, ted_notice_id="award-uuid",
+    )
+    mod_key = collapse_modifications.derive_contract_key(
+        procedure_id=None, notice_type="can-modif",
+        modifies_publication_number="734888-2023",
+        ted_publication_number=None, ted_notice_id="mod-uuid",
+    )
+    assert award_key == "award-uuid"
+    assert mod_key == "734888-2023"
+    assert award_key != mod_key

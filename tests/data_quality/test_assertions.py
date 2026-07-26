@@ -512,6 +512,23 @@ def test_contract_awardee_assertion_accepts_investmentfund():
     assert a.severity == BLOCK
 
 
+def test_contract_awardee_assertion_exempts_no_awarded_value():
+    """A notice that published no awardee (named tenderers only / no
+    resolvable winner) legitimately has no AWARDED_TO edge and is marked
+    value_quality_flag='no_awarded_value' by the loader. The guard must
+    exempt those, or it blocks the gate on correct upstream data (181
+    winner-less contracts). A genuinely awardee-less contract with no such
+    flag stays a violation (coalesce keeps null-flag rows counted)."""
+    a = by_id()["refs.contract_has_company"]
+    assert "no_awarded_value" in a.query
+    assert "coalesce(c.value_quality_flag" in a.query
+    # the assertion still fires when there IS a real violation
+    bad, _ = a.evaluate({"violations": 3})
+    assert not bad
+    ok, _ = a.evaluate({"violations": 0})
+    assert ok
+
+
 def test_270_label_authority_assertions_present():
     """GLEIF entity.category is the sole label authority — both
     directions are BLOCK guards, plus a WARN coverage for unsourced
