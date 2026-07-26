@@ -28,18 +28,66 @@ _LIST_FIELDS = (
     "p.answered_date AS answered_date, p.latest_update AS latest_update"
 )
 
+# Ordering variants. ``supporters`` (the default) keeps the original clause
+# verbatim; ``recent`` surfaces the most recently registered petition first,
+# tie-breaking on supporters so the order is deterministic.
+_ORDER_SUPPORTERS = (
+    "ORDER BY coalesce(p.total_supporters, 0) DESC, "
+    "         p.registration_date DESC"
+)
+_ORDER_RECENT = (
+    "ORDER BY coalesce(p.registration_date, '') DESC, "
+    "         coalesce(p.total_supporters, 0) DESC"
+)
+
+# Bounds on the comma-separated ``statuses`` filter: at most this many tokens,
+# each no longer than a single register status code.
+_MAX_STATUSES = 10
+_MAX_STATUS_LEN = 40
+
+
+def _parse_statuses(raw: str | None) -> list[str] | None:
+    """Split a comma-separated ``statuses`` value into exact status tokens.
+
+    Trims, upper-cases and drops empties; discards over-long tokens and caps
+    the list length. Returns ``None`` when nothing usable remains so the
+    caller can fall back to the single-``status`` filter.
+    """
+    if not raw:
+        return None
+    tokens = [
+        tok for tok in (part.strip().upper() for part in raw.split(","))
+        if tok and len(tok) <= _MAX_STATUS_LEN
+    ]
+    tokens = tokens[:_MAX_STATUSES]
+    return tokens or None
+
 
 @router.get("")
 @inject
-def list_petitions(
-    status: Annotated[str | None, Query(max_length=40)] = None,
+def list_petitions(  # pylint: disable=too-many-arguments
+    status: Annotated[str | None, Query(max_length=_MAX_STATUS_LEN)] = None,
+    statuses: Annotated[str | None, Query(max_length=500)] = None,
+    sort: Annotated[str, Query(pattern="^(supporters|recent)$")] = "supporters",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
     *,
     neo4j: FromDishka[Neo4jClient],
 ) -> dict[str, Any]:
-    """Petitions ordered by supporters, with per-status counts for the
-    filter chips. ``status`` filters exactly (register vocabulary)."""
+    """Petitions with per-status counts for the filter chips.
+
+    ``statuses`` (comma-separated, exact register vocabulary) filters on a set
+    and takes precedence over the single ``status``; ``sort`` picks the order
+    (``supporters`` by default, or ``recent`` for most-recently-registered).
+    """
+    status_list = _parse_statuses(statuses)
+    if status_list is not None:
+        where = "WHERE p.status IN $statuses"
+        params: dict[str, Any] = {"statuses": status_list}
+    else:
+        where = "WHERE $status IS NULL OR p.status = $status"
+        params = {"status": status}
+    order = _ORDER_RECENT if sort == "recent" else _ORDER_SUPPORTERS
     with neo4j.session() as session:
         counts = {
             r["status"]: r["n"] for r in session.run(
@@ -49,12 +97,11 @@ def list_petitions(
         }
         rows = session.run(
             "MATCH (p:Petition) "
-            "WHERE $status IS NULL OR p.status = $status "
+            f"{where} "
             f"RETURN {_LIST_FIELDS} "
-            "ORDER BY coalesce(p.total_supporters, 0) DESC, "
-            "         p.registration_date DESC "
+            f"{order} "
             "SKIP $offset LIMIT $limit",
-            status=status, offset=offset, limit=limit,
+            offset=offset, limit=limit, **params,
         ).data()
     return {
         "counts": counts,
