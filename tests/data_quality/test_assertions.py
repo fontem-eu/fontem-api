@@ -844,3 +844,17 @@ def test_consolidator_runner_flattens_candidates_taking_top(monkeypatch):
 def test_consolidator_runner_unwired_when_url_emptied(monkeypatch):
     monkeypatch.setenv("CONSOLIDATOR_URL", "")
     assert cli._build_consolidator_runner() is None
+
+
+def test_bidder_anomaly_evaluators():
+    d = by_id()
+    bound = d["coverage.bidder_count_within_sane_bound"]
+    ok, obs = bound.evaluate({"violations": 0, "detail": ""})
+    assert ok, obs
+    bad, obs = bound.evaluate({"violations": 5, "detail": "2416436"})
+    assert not bad and "2416436" in obs
+    infl = d["coverage.bidder_mean_not_outlier_inflated"]
+    ok, _ = infl.evaluate({"violations": 0, "detail": ""})
+    assert ok
+    bad, obs = infl.evaluate({"violations": 3, "detail": "2026-03 2026-04 2025-11 "})
+    assert not bad and "2026-03" in obs
