@@ -287,6 +287,29 @@ SET c.ted_publication_lookup_attempted_at = datetime(),
             WHEN new_state = 'transient_error' THEN err
             ELSE c.ted_publication_lookup_last_error
         END
+// Converge the contract_key onto the publication-number the moment we
+// learn it. An award loaded with skip_pub_num_lookup has no
+// ted_publication_number at emit time, so derive_contract_key falls back
+// to contract_key = ted_notice_id — a key NO modification can ever
+// reference (modifications key on modifies_publication_number = the
+// award's ted_publication_number). Left unreconciled, the award's
+// modifications MERGE a *second* :Contract entity under the pub-number
+// key, splitting one real contract into two nodes (the duplicate
+// ted_notice_id class). Re-stamping the award onto the pub-number key
+// here makes its modifications land on the same entity. Guarded so it
+// only fires for the un-referenceable ted_notice_id fallback (procedure
+// -less), and only when no other :Contract already holds the pub-number
+// key (that pre-existing split is resolved by the one-off dedup repair,
+// not here — blindly setting it would violate the contract_key uniqueness
+// constraint).
+WITH c, pub_num
+FOREACH (_ IN CASE
+            WHEN pub_num IS NOT NULL
+                 AND c.procedure_id IS NULL
+                 AND c.contract_key = c.ted_notice_id
+                 AND NOT EXISTS { MATCH (o:Contract {contract_key: pub_num}) }
+            THEN [1] ELSE [] END |
+    SET c.contract_key = pub_num)
 RETURN count(c) AS updated
 """
 

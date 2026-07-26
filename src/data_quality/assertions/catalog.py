@@ -218,6 +218,13 @@ _ISO_4217 = [
     "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH",
     "UGX", "USD", "UYU", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAF",
     "XCD", "XOF", "XPF", "YER", "ZAR", "ZMW", "ZWL",
+    # Withdrawn euro-predecessor codes of member states that adopted the euro
+    # during the TED electronic-data era (2007+). These are valid ISO-4217
+    # codes that legitimately appear on historical notices (a Lithuanian
+    # award published in 2013 was denominated in LTL) and are FX-convertible
+    # via the fixed euro conversion rate, so their values already flow into
+    # EUR aggregates. Same rationale as HRK (Croatia, withdrawn 2023) above.
+    "SIT", "CYP", "MTL", "SKK", "EEK", "LVL", "LTL",
 ]
 _ISO_LIST_CYPHER = "[" + ", ".join(f"'{c}'" for c in _ISO_4217) + "]"
 
@@ -394,16 +401,27 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "refs.contract_has_company", REFS,
-        "Every Contract is AWARDED_TO a Company or InvestmentFund",
+        "Every awarded Contract is AWARDED_TO a Company or InvestmentFund",
         BLOCK, "cypher",
         "MATCH (c:Contract) WHERE NOT (c)-[:AWARDED_TO]->(:Company) "
         "AND NOT (c)-[:AWARDED_TO]->(:InvestmentFund) "
+        # Notices that published no awardee — named tenderers only, or no
+        # resolvable/published winner — legitimately have no AWARDED_TO
+        # edge. The loader keeps them (so their BID_ON tenderer provenance
+        # survives) and marks them value_quality_flag='no_awarded_value';
+        # they are excluded from every value aggregate. Treating them as a
+        # referential violation blocked the gate on real, correct upstream
+        # data, so exempt them. coalesce keeps a null-flag contract that is
+        # genuinely missing its winner as a violation.
+        "AND coalesce(c.value_quality_flag, '') <> 'no_awarded_value' "
         "RETURN count(*) AS violations",
-        zero_violations("contracts not awarded to a company or fund"),
+        zero_violations("awarded contracts not awarded to a company or fund"),
         "The awardee may be relabeled :InvestmentFund once GLEIF confirms "
         "its category is FUND (an :InvestmentFund can win a contract), so "
         "both labels are valid targets. Guarding only :Company made the "
-        "gate fail the moment a fund awardee was relabeled (#270).",
+        "gate fail the moment a fund awardee was relabeled (#270). "
+        "no_awarded_value contracts (no published winner) are exempt: they "
+        "carry no awardee by design and are out of every value aggregate.",
     ),
     Assertion(
         "refs.financialyear_has_company", REFS,
