@@ -1255,6 +1255,47 @@ ASSERTIONS: list[Assertion] = [
         "linker.",
     ),
     Assertion(
+        "coverage.ted_bidder_disclosure_rate", COVERAGE,
+        "Recent contracts mostly carry a bidder count", WARN, "cypher",
+        "MATCH (c:Contract {is_current: true}) "
+        "WHERE c.publication_date >= '2025' "
+        "RETURN count(*) AS total, count(c.tenders_received) AS covered",
+        min_coverage(0.75, "recent contracts with a bidder count"),
+        "Guards the 2026-07-26 t-esubm fix. The extractor accepted only "
+        "statistics code 'tenders' while many notices publish only "
+        "'t-esubm' (electronic submissions); the count was dropped on the "
+        "floor and the missing rate sat at 38-55% for two years, wearing "
+        "a plausible disguise ('the record went dark after eForms'). "
+        "Post-fix the rate is ~8%. If this climbs back above 25% the "
+        "extractor has regressed or a new statistics code has appeared "
+        "upstream — check the raw notice XML before believing any "
+        "story about publication behaviour.",
+    ),
+    Assertion(
+        "coverage.sanctioned_persons_present", COVERAGE,
+        "Sanctioned persons are ingested, not filtered out", WARN, "cypher",
+        "MATCH (s:SanctionedEntity) WHERE s.subject_type = 'person' "
+        "RETURN count(s) AS found",
+        at_least("found", 1000, "sanctioned persons"),
+        "Persons were silently excluded from the sanctions feed until "
+        "2026-07-19 (backlog item 11); 4,422 are now present. A drop to "
+        "zero means the person path was filtered out again — the failure "
+        "is invisible in every entity-count panel because companies keep "
+        "flowing.",
+    ),
+    Assertion(
+        "freshness.no_zombie_etl_runs", FRESHNESS,
+        "No ETL run stuck in 'running'", WARN, "sql",
+        "SELECT count(*) AS violations FROM events.etl_run "
+        "WHERE status = 'running' AND started_at < now() - interval '1 day'",
+        zero_violations("runs stuck in 'running'"),
+        "A crashed job (OOM, SIGKILL, deadline) leaves its row at "
+        "'running' forever, and with concurrencyPolicy=Forbid that blocks "
+        "every later run of the same cron silently. 98 such rows had "
+        "accumulated by 2026-07-05 (backlog item 22); zero on 07-27. "
+        "This is the guard that turns a silent stall into a visible one.",
+    ),
+    Assertion(
         "consistency.cellar_ft_searchable", CONSISTENCY,
         "The mirror's full-text index is built and searchable", WARN,
         "consistency", "CellarFtIndex",
