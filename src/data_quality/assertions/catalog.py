@@ -218,6 +218,13 @@ _ISO_4217 = [
     "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH",
     "UGX", "USD", "UYU", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAF",
     "XCD", "XOF", "XPF", "YER", "ZAR", "ZMW", "ZWL",
+    # Withdrawn euro-predecessor codes of member states that adopted the euro
+    # during the TED electronic-data era (2007+). These are valid ISO-4217
+    # codes that legitimately appear on historical notices (a Lithuanian
+    # award published in 2013 was denominated in LTL) and are FX-convertible
+    # via the fixed euro conversion rate, so their values already flow into
+    # EUR aggregates. Same rationale as HRK (Croatia, withdrawn 2023) above.
+    "SIT", "CYP", "MTL", "SKK", "EEK", "LVL", "LTL",
 ]
 _ISO_LIST_CYPHER = "[" + ", ".join(f"'{c}'" for c in _ISO_4217) + "]"
 
@@ -394,16 +401,27 @@ ASSERTIONS: list[Assertion] = [
     ),
     Assertion(
         "refs.contract_has_company", REFS,
-        "Every Contract is AWARDED_TO a Company or InvestmentFund",
+        "Every awarded Contract is AWARDED_TO a Company or InvestmentFund",
         BLOCK, "cypher",
         "MATCH (c:Contract) WHERE NOT (c)-[:AWARDED_TO]->(:Company) "
         "AND NOT (c)-[:AWARDED_TO]->(:InvestmentFund) "
+        # Notices that published no awardee — named tenderers only, or no
+        # resolvable/published winner — legitimately have no AWARDED_TO
+        # edge. The loader keeps them (so their BID_ON tenderer provenance
+        # survives) and marks them value_quality_flag='no_awarded_value';
+        # they are excluded from every value aggregate. Treating them as a
+        # referential violation blocked the gate on real, correct upstream
+        # data, so exempt them. coalesce keeps a null-flag contract that is
+        # genuinely missing its winner as a violation.
+        "AND coalesce(c.value_quality_flag, '') <> 'no_awarded_value' "
         "RETURN count(*) AS violations",
-        zero_violations("contracts not awarded to a company or fund"),
+        zero_violations("awarded contracts not awarded to a company or fund"),
         "The awardee may be relabeled :InvestmentFund once GLEIF confirms "
         "its category is FUND (an :InvestmentFund can win a contract), so "
         "both labels are valid targets. Guarding only :Company made the "
-        "gate fail the moment a fund awardee was relabeled (#270).",
+        "gate fail the moment a fund awardee was relabeled (#270). "
+        "no_awarded_value contracts (no published winner) are exempt: they "
+        "carry no awardee by design and are out of every value aggregate.",
     ),
     Assertion(
         "refs.financialyear_has_company", REFS,
@@ -1237,6 +1255,47 @@ ASSERTIONS: list[Assertion] = [
         "linker.",
     ),
     Assertion(
+        "coverage.ted_bidder_disclosure_rate", COVERAGE,
+        "Recent contracts mostly carry a bidder count", WARN, "cypher",
+        "MATCH (c:Contract {is_current: true}) "
+        "WHERE c.publication_date >= '2025' "
+        "RETURN count(*) AS total, count(c.tenders_received) AS covered",
+        min_coverage(0.75, "recent contracts with a bidder count"),
+        "Guards the 2026-07-26 t-esubm fix. The extractor accepted only "
+        "statistics code 'tenders' while many notices publish only "
+        "'t-esubm' (electronic submissions); the count was dropped on the "
+        "floor and the missing rate sat at 38-55% for two years, wearing "
+        "a plausible disguise ('the record went dark after eForms'). "
+        "Post-fix the rate is ~8%. If this climbs back above 25% the "
+        "extractor has regressed or a new statistics code has appeared "
+        "upstream — check the raw notice XML before believing any "
+        "story about publication behaviour.",
+    ),
+    Assertion(
+        "coverage.sanctioned_persons_present", COVERAGE,
+        "Sanctioned persons are ingested, not filtered out", WARN, "cypher",
+        "MATCH (s:SanctionedEntity) WHERE s.subject_type = 'person' "
+        "RETURN count(s) AS found",
+        at_least("found", 1000, "sanctioned persons"),
+        "Persons were silently excluded from the sanctions feed until "
+        "2026-07-19 (backlog item 11); 4,422 are now present. A drop to "
+        "zero means the person path was filtered out again — the failure "
+        "is invisible in every entity-count panel because companies keep "
+        "flowing.",
+    ),
+    Assertion(
+        "freshness.no_zombie_etl_runs", FRESHNESS,
+        "No ETL run stuck in 'running'", WARN, "sql",
+        "SELECT count(*) AS violations FROM events.etl_run "
+        "WHERE status = 'running' AND started_at < now() - interval '1 day'",
+        zero_violations("runs stuck in 'running'"),
+        "A crashed job (OOM, SIGKILL, deadline) leaves its row at "
+        "'running' forever, and with concurrencyPolicy=Forbid that blocks "
+        "every later run of the same cron silently. 98 such rows had "
+        "accumulated by 2026-07-05 (backlog item 22); zero on 07-27. "
+        "This is the guard that turns a silent stall into a visible one.",
+    ),
+    Assertion(
         "consistency.cellar_ft_searchable", CONSISTENCY,
         "The mirror's full-text index is built and searchable", WARN,
         "consistency", "CellarFtIndex",
@@ -1385,6 +1444,105 @@ ASSERTIONS: list[Assertion] = [
         "Verified live: matched via name_country at 0.95. Failure means "
         "authority resolution (name_clean/apoc.text.clean agreement or "
         "the country guard) broke for the most ordinary case there is.",
+    ),
+
+    # ---- TED bidder-count (tenders_received) anomaly trackers -------------
+    # The parser reads the received-tenders total from a LotResult's
+    # ReceivedSubmissionsStatistics. Two failure modes have bitten it:
+    # a source/parse error injecting an impossible count (a 2026-03 award
+    # showed 2,416,436 "bidders"), and notices publishing only the
+    # "t-esubm" electronic-submission code going uncounted (fixed in
+    # eforms 0.9.1). These WARN monitors surface both without hard-gating.
+    Assertion(
+        "coverage.bidder_count_within_sane_bound", COVERAGE,
+        "No contract reports an impossible bidder count (>10000)",
+        WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.tenders_received > 10000 "
+        "RETURN count(*) AS violations, "
+        "toString(max(c.tenders_received)) AS detail",
+        zero_with_detail("contracts with an impossible bidder count"),
+        "No real EU procurement draws more than a few dozen tenders; a "
+        "count in the thousands+ is a parse/source error reading the wrong "
+        "ReceivedSubmissionsStatistics value as the bidder total (seen: "
+        "2,416,436). Non-zero => garbage counts are corrupting single-bidder "
+        "indicators and any average-competition analysis.",
+    ),
+    Assertion(
+        "coverage.bidder_mean_not_outlier_inflated", COVERAGE,
+        "No month's mean bidder count is >3x its median (outlier-inflated)",
+        WARN, "cypher",
+        "MATCH (c:Contract) "
+        "WHERE c.publication_date >= '2024-01-01' "
+        "  AND c.tenders_received IS NOT NULL AND c.tenders_received > 0 "
+        "WITH substring(c.publication_date,0,7) AS mon, "
+        "     avg(toFloat(c.tenders_received)) AS mavg, "
+        "     percentileCont(toFloat(c.tenders_received),0.5) AS mmed, "
+        "     count(*) AS n "
+        "WHERE n >= 500 AND mmed > 0 AND mavg > 3*mmed "
+        "WITH collect(mon) AS bad "
+        "RETURN size(bad) AS violations, "
+        "       reduce(s='', m IN bad | s + m + ' ') AS detail",
+        zero_with_detail("months whose mean bidder count is outlier-inflated"),
+        "A month whose average bidder count sits far above its median is "
+        "contaminated by impossible outliers (the parser mis-read a value) "
+        "or a sudden distribution break — the exact signature of the bidder "
+        "regression, whose symptom was the fleet-wide average lurching after "
+        "a point in time. Robust to normal month-to-month noise (median-"
+        "anchored). Lists the offending months.",
+    ),
+
+    # ---- TED value-scale + NUTS enrichment trackers ----------------------
+    # Guard + progress meters for the 2026-07 milli-euro (x1000) leak fix
+    # and the place-of-performance NUTS backfill. See scale_normalization
+    # and the ted-milli-euro-leak investigation.
+    Assertion(
+        "values.no_scale_stale_current_value", VALUES,
+        "No Contract's total-value copy is a x1000-stale derived field",
+        BLOCK, "cypher",
+        "MATCH (c:Contract) "
+        "WHERE c.value_eur IS NOT NULL AND c.current_value IS NOT NULL "
+        "  AND c.value_eur > 0 "
+        "  AND c.current_value / c.value_eur > 900 "
+        "  AND c.current_value / c.value_eur < 1100 "
+        "RETURN count(*) AS violations, "
+        "  toString(collect(c.ted_notice_id)[0]) AS detail",
+        zero_with_detail("contracts whose current_value is x1000 its value_eur"),
+        "trusted_value_sum aggregates coalesce(current_value, value_eur). A "
+        "current_value stuck at ~1000x value_eur means a scale correction "
+        "updated value_eur but not the derived current_value, so totals still "
+        "read x1000 even though the contract row looks fixed. This is exactly "
+        "the split that made a EUR 9.28M school total EUR 9.28B.",
+    ),
+    Assertion(
+        "values.no_implausible_trusted_pt_contract", VALUES,
+        "No trusted Portuguese contract exceeds EUR 1B", BLOCK, "cypher",
+        "MATCH (c:Contract) WHERE c.country = 'PRT' "
+        "  AND coalesce(c.is_current, (c.notice_type IS NULL "
+        "      OR c.notice_type <> 'can-modif')) "
+        "  AND NOT coalesce(c.value_low_confidence, false) "
+        "  AND coalesce(c.current_value, c.value_eur, 0) > 1000000000 "
+        "RETURN count(*) AS violations, "
+        "  toString(collect(c.ted_notice_id)[0]) AS detail",
+        zero_with_detail("trusted PT contracts over EUR 1B"),
+        "Portugal's entire annual public procurement is ~EUR 10-15B, so no "
+        "single trusted PT contract reaches EUR 1B — a survivor is an "
+        "uncorrected milli-euro (x1000) leak the scale normaliser missed. "
+        "PT-scoped on purpose: an absolute bar catches real framework "
+        "ceilings in larger member states (SWE/GBR/FIN), which are not this "
+        "bug. See the ted-milli-euro-leak investigation.",
+    ),
+    Assertion(
+        "coverage.contract_nuts_2026", COVERAGE,
+        "2026 contracts carry a NUTS place-of-performance (>=60%)",
+        WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= '2026-01-01' "
+        "RETURN count(*) AS total, count(c.nuts) AS covered",
+        min_coverage(0.60, "contract NUTS"),
+        "eForms carries the place-of-performance NUTS on almost every "
+        "notice (RealizedLocation/CountrySubentityCode). Low coverage means "
+        "the parser+loader nuts path or the historical reprocess has not "
+        "populated it yet — the class of gap that left NUTS filtering blind "
+        "to every contract before 2026-07.",
     ),
 ]
 

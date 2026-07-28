@@ -247,6 +247,41 @@ def test_contract_payload_carries_authority_and_company_links(
 
 @patch("src.etl.load_ted_contracts.stream_notices")
 @patch("src.etl.load_ted_contracts.TedMatcher")
+def test_nonpositive_tenders_received_is_withheld(
+    mock_matcher_cls, mock_stream,
+):
+    """A bidder COUNT is >= 1 by definition; a 0/negative is corrupt
+    parsing (some non-eForms notices carry it). The loader must NOT emit
+    it -- a stored 0 fails values.contract_bidder_count_positive."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1",
+        stub_company_gmr="company-1",
+    )
+    contractor = MagicMock()
+    contractor.name = "Adyen N.V."
+    contractor.country = "NL"
+    contractor.legal_id = None
+    award = _stub_award()
+    award.tenders_received = 0
+    mock_stream.return_value = iter([
+        _stub_notice(awards=[award], organizations={"O1": contractor}),
+    ])
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    load_contracts(driver, log, "/fake/path.tar.gz")
+
+    contract_call = next(
+        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
+    )
+    payload = contract_call.kwargs["payload"]
+    # builders.upsert_contract drops None-valued fields, so a withheld
+    # count never reaches the graph.
+    assert "tenders_received" not in payload
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
 def test_contract_iri_keyed_on_uuid_not_publication_number(
     mock_matcher_cls, mock_stream,
 ):
@@ -631,7 +666,7 @@ def test_main_overrides_year_month_when_explicit(monkeypatch):
     """
     captured: dict = {}
 
-    def _fake_download(year, month, dest):
+    def _fake_download(year, month, dest, package_store=None):  # pylint: disable=unused-argument
         captured["year"] = year
         captured["month"] = month
         captured["dest"] = dest

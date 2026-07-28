@@ -38,6 +38,32 @@ def test_ids_unique():
     assert len(by_id()) == len(ASSERTIONS)
 
 
+def test_currency_iso_assertion_is_blocking_value_check():
+    a = by_id()["values.currency_iso"]
+    assert a.family == VALUES
+    assert a.severity == BLOCK
+    assert a.engine == "cypher"
+
+
+def test_currency_iso_allows_withdrawn_euro_predecessor_codes():
+    # Regression: historical TED awards from later euro adopters are
+    # denominated in the (now-withdrawn) national currency and are
+    # FX-convertible via the fixed euro rate, so the allowlist must accept
+    # them or their EUR-converted values falsely trip the BLOCK assertion.
+    query = by_id()["values.currency_iso"].query
+    for code in ("LTL", "LVL", "EEK", "SKK", "MTL", "CYP", "SIT"):
+        assert f"'{code}'" in query, code
+
+
+def test_currency_iso_still_rejects_ted_placeholders():
+    # UNPUBLISHED / OP_DATPRO are TED non-currency placeholders, not ISO
+    # codes; they must stay outside the allowlist (the loader nulls them,
+    # and any historical rows must remain visible to the assertion).
+    query = by_id()["values.currency_iso"].query
+    assert "UNPUBLISHED" not in query
+    assert "OP_DATPRO" not in query
+
+
 def test_families_and_severities_valid():
     fams = {KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN, COVERAGE, ORACLE,
             CONSISTENCY, GRAIN, LINGUISTICS, RESOLUTION}
@@ -486,6 +512,23 @@ def test_contract_awardee_assertion_accepts_investmentfund():
     assert a.severity == BLOCK
 
 
+def test_contract_awardee_assertion_exempts_no_awarded_value():
+    """A notice that published no awardee (named tenderers only / no
+    resolvable winner) legitimately has no AWARDED_TO edge and is marked
+    value_quality_flag='no_awarded_value' by the loader. The guard must
+    exempt those, or it blocks the gate on correct upstream data (181
+    winner-less contracts). A genuinely awardee-less contract with no such
+    flag stays a violation (coalesce keeps null-flag rows counted)."""
+    a = by_id()["refs.contract_has_company"]
+    assert "no_awarded_value" in a.query
+    assert "coalesce(c.value_quality_flag" in a.query
+    # the assertion still fires when there IS a real violation
+    bad, _ = a.evaluate({"violations": 3})
+    assert not bad
+    ok, _ = a.evaluate({"violations": 0})
+    assert ok
+
+
 def test_270_label_authority_assertions_present():
     """GLEIF entity.category is the sole label authority — both
     directions are BLOCK guards, plus a WARN coverage for unsourced
@@ -844,3 +887,17 @@ def test_consolidator_runner_flattens_candidates_taking_top(monkeypatch):
 def test_consolidator_runner_unwired_when_url_emptied(monkeypatch):
     monkeypatch.setenv("CONSOLIDATOR_URL", "")
     assert cli._build_consolidator_runner() is None
+
+
+def test_bidder_anomaly_evaluators():
+    d = by_id()
+    bound = d["coverage.bidder_count_within_sane_bound"]
+    ok, obs = bound.evaluate({"violations": 0, "detail": ""})
+    assert ok, obs
+    bad, obs = bound.evaluate({"violations": 5, "detail": "2416436"})
+    assert not bad and "2416436" in obs
+    infl = d["coverage.bidder_mean_not_outlier_inflated"]
+    ok, _ = infl.evaluate({"violations": 0, "detail": ""})
+    assert ok
+    bad, obs = infl.evaluate({"violations": 3, "detail": "2026-03 2026-04 2025-11 "})
+    assert not bad and "2026-03" in obs

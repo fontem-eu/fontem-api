@@ -8,6 +8,15 @@ the shared `_etl_cronjob.tpl` does not provide — argparse received the
 literal token `$(date +%Y)` and aborted every run with
 `invalid int value`.
 */}}
+{{- $extra := list }}
+{{- with .Values.tedRaw }}
+{{- if .enabled }}
+{{- $extra = append $extra (dict "name" "TED_RAW_ENDPOINT" "value" .endpoint) }}
+{{- $extra = append $extra (dict "name" "TED_RAW_BUCKET" "value" (.bucket | default "ted-raw")) }}
+{{- $extra = append $extra (dict "name" "TED_RAW_ACCESS_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .credentialsSecret "key" .accessKeyKey))) }}
+{{- $extra = append $extra (dict "name" "TED_RAW_SECRET_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .credentialsSecret "key" .secretKeyKey))) }}
+{{- end }}
+{{- end }}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-ted-contracts"
       "schedule"        "0 5 * * *"
@@ -18,6 +27,6 @@ literal token `$(date +%Y)` and aborted every run with
       "cpuLimit"        "2"
       "memRequest"      "1Gi"
       "memLimit"        "4Gi"
-      "extraEnv"        (list)
+      "extraEnv"        $extra
       "Values"          .Values
       "Release"         .Release) -}}

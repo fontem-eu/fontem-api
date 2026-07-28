@@ -58,3 +58,4 @@ prometheus-fastapi-instrumentator
 prometheus-client>=0.20
 pycountry
 maxminddb
+minio>=7.2
