@@ -70,10 +70,10 @@ WITH lex AS (
   SELECT entity_type, entity_id, embed_text, country, event_date,
          nuts, sector, meta,
          ROW_NUMBER() OVER (
-           ORDER BY ts_rank(name_lex, plainto_tsquery('simple', %(q)s)) DESC
+           ORDER BY GREATEST(ts_rank(name_lex, plainto_tsquery('simple', %(q)s)), ts_rank(coalesce(name_lex_i18n, ''::tsvector), plainto_tsquery('simple', %(q)s))) DESC
          ) AS rk
   FROM search.entity_embeddings
-  WHERE name_lex @@ plainto_tsquery('simple', %(q)s)
+  WHERE (name_lex @@ plainto_tsquery('simple', %(q)s) OR name_lex_i18n @@ plainto_tsquery('simple', %(q)s))
     AND (%(country)s::text IS NULL OR country = %(country)s)
     AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
     AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
@@ -133,12 +133,12 @@ _SQL_LEXICAL_ONLY = """
 SELECT entity_type, entity_id, embed_text, country, event_date,
        nuts, sector, meta,
        ROW_NUMBER() OVER (
-         ORDER BY ts_rank(name_lex, plainto_tsquery('simple', %(q)s)) DESC
+         ORDER BY GREATEST(ts_rank(name_lex, plainto_tsquery('simple', %(q)s)), ts_rank(coalesce(name_lex_i18n, ''::tsvector), plainto_tsquery('simple', %(q)s))) DESC
        ) AS lex_rank,
        NULL::int AS vec_rank,
-       ts_rank(name_lex, plainto_tsquery('simple', %(q)s))::real AS rrf_score
+       GREATEST(ts_rank(name_lex, plainto_tsquery('simple', %(q)s)), ts_rank(coalesce(name_lex_i18n, ''::tsvector), plainto_tsquery('simple', %(q)s)))::real AS rrf_score
 FROM search.entity_embeddings
-WHERE name_lex @@ plainto_tsquery('simple', %(q)s)
+WHERE (name_lex @@ plainto_tsquery('simple', %(q)s) OR name_lex_i18n @@ plainto_tsquery('simple', %(q)s))
   AND (%(country)s::text IS NULL OR country = %(country)s)
   AND (%(types)s::text[] IS NULL OR entity_type = ANY(%(types)s))
     AND (%(date_from)s::date IS NULL OR event_date >= %(date_from)s::date)
