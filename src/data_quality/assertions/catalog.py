@@ -634,6 +634,19 @@ ASSERTIONS: list[Assertion] = [
         "is triaged history.",
     ),
     Assertion(
+        "pipeline.deadletter_empty", PIPELINE,
+        "No consumer has any dead-lettered events", WARN, "sql",
+        "SELECT (SELECT count(*) FROM events.dead_letter) AS violations, "
+        "coalesce((SELECT string_agg(consumer || '=' || n::text, ', ' "
+        "ORDER BY n DESC) FROM (SELECT consumer, count(*) AS n "
+        "FROM events.dead_letter GROUP BY consumer) s), '') AS detail",
+        zero_with_detail("dead-lettered events"),
+        "A dead-lettered event is a recorded-but-unapplied write the sink skipped after max "
+        "retries. Zero-tolerance: any entry is an unprojected fact or a live rendering bug. Unlike "
+        "deadletter_total's triaged-history cap, this holds the queue at empty; detail names the "
+        "offending consumer(s) and their backlog.",
+    ),
+    Assertion(
         "pipeline.stuck_runs", PIPELINE,
         "No etl_run stuck 'running' beyond 6h", WARN, "sql",
         "SELECT count(*) AS violations FROM events.etl_run "
