@@ -92,6 +92,27 @@ def test_two_tier_severity_mapping():
             assert a.severity == BLOCK, a.id
 
 
+def test_deadletter_empty_is_zero_tolerance_pipeline_warn():
+    # Zero-tolerance dead-letter gate: any parked event across ANY
+    # consumer trips it, with per-consumer detail. Distinct from
+    # deadletter_total's soft <=100 triaged-history cap.
+    a = by_id()["pipeline.deadletter_empty"]
+    assert a.family == PIPELINE
+    assert a.severity == WARN
+    assert a.engine == "sql"
+    assert "events.dead_letter" in a.query
+    # surfaces violations + detail so zero_with_detail can name the
+    # offending consumer(s).
+    assert "AS violations" in a.query and "AS detail" in a.query
+    # empty queue passes; a non-empty one fails and echoes the detail.
+    ok, obs = a.evaluate({"violations": 0, "detail": ""})
+    assert ok, obs
+    bad, obs = a.evaluate(
+        {"violations": 34, "detail": "virtuoso_sink=34"})
+    assert not bad
+    assert "virtuoso_sink=34" in obs
+
+
 def test_values_block_except_documented_warn():
     warn_values = {a.id for a in ASSERTIONS if a.family == VALUES and a.severity == WARN}
     # The only intentional warn in the value family is the accounting identity.
