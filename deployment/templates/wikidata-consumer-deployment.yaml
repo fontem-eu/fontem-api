@@ -115,8 +115,10 @@ spec:
               value: "5"
             - name: WIKIDATA_CONSUMER_SLEEP_IDLE_S
               value: "60"
-          # SIGTERM is handled cooperatively (we finish the current
-          # batch then exit), so allow up to ~one full BATCH
-          # duration for the loop to drain.
-          terminationGracePeriodSeconds: 300
+      # SIGTERM is handled cooperatively (we finish the current
+      # batch then exit), so allow up to ~one full BATCH
+      # duration for the loop to drain. Pod-spec field (6-space
+      # indent) — sibling of containers:, NOT a container field, or
+      # the API server silently drops it and ArgoCD wedges OutOfSync.
+      terminationGracePeriodSeconds: 300
 {{- end }}
