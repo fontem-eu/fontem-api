@@ -2,7 +2,7 @@
 
 The catalog table (`fontem_stats.dataset`) is the runtime source of
 truth, but bootstrapping a fresh database needs *something* to insert
-the first time. This module is that something: a curated 26-dataset
+the first time. This module is that something: a curated
 seed grouped by theme, mirroring the analysis in
 docs/eurostat-stats-store.md.
 """
@@ -47,7 +47,7 @@ def _ds(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     )
 
 
-# Curated set of 26 NUTS-keyed numeric datasets — see docs/eurostat-
+# Curated set of NUTS-keyed numeric datasets — see docs/eurostat-
 # stats-store.md for the rationale + sizing.
 SEED_DATASETS: list[Dataset] = [
     # ── Population & demography (NUTS-3) ────────────────────────
@@ -155,6 +155,30 @@ SEED_DATASETS: list[Dataset] = [
         "crime", [0]),
     _ds("crim_just_age", "Persons in criminal justice × age",
         "crime", [0]),
+
+    # ── Gender-based violence: SURVEY-measured (NUTS-0) ─────────
+    # The EU-GBV survey asks people what happened to them, so these
+    # count experience rather than police records. That makes them the
+    # missing counterpart to crim_off_cat, whose cross-country level is
+    # dominated by legal definitions and counting rules rather than by
+    # how much violence occurs: recorded offences measure the recording
+    # system, these measure the population.
+    #
+    # One wave (2021) and a subset of Member States, so they support
+    # cross-sectional comparison, NOT a trend. Cite the wave when using
+    # them; do not difference them against the 2014 FRA survey, whose
+    # instrument differs enough that the change is not interpretable.
+    _ds("gbv_vtp_perp",
+        "Persons who experienced physical/sexual violence × perpetrator (EU-GBV survey)",
+        "crime", [0],
+        notes="survey-measured prevalence, not police records; single 2021 wave, "
+              "subset of Member States — cross-sectional only, not a time series"),
+    _ds("gbv_vtp_rp",
+        "Violence victims × who the violence was reported to (EU-GBV survey)",
+        "crime", [0],
+        notes="share of victims who told police (pers_serv=POLC), a support service "
+              "or nobody — the reporting-propensity counterpart to crim_off_cat; "
+              "single 2021 wave, subset of Member States"),
 ]
 
 
