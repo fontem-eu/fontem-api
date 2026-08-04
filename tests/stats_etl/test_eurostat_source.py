@@ -245,3 +245,59 @@ def test_fetch_metadata_handles_missing_labels():
     meta = source.fetch_metadata("sparse_test")
 
     assert meta.dim_labels == {}  # pylint: disable=use-implicit-booleaness-not-comparison
+
+
+def test_413_on_incremental_fetch_falls_back_to_full_bulk_file(monkeypatch):
+    """Eurostat serves an unfiltered request from a pre-generated bulk file
+    but routes startPeriod through the size-limited query path, so the
+    widest datasets 413 on the incremental fetch and succeed on the whole
+    file. Falling back keeps them syncable at all."""
+    tsv = ("freq,unit,geo\\TIME_PERIOD\t2025\t2024\n"
+           "A,NR,BE\t10\t20\n")
+    payload = gzip.compress(tsv.encode())
+    calls = []
+
+    class _Resp:
+        def __init__(self, status, content=b""):
+            self.status_code, self.content = status, content
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    class _Http:
+        def get(self, url, params=None, timeout=None):  # pylint: disable=unused-argument
+            calls.append(dict(params or {}))
+            if "startPeriod" in (params or {}):
+                return _Resp(413)
+            return _Resp(200, payload)
+
+    src = EurostatSource()
+    monkeypatch.setattr(src, "_http", _Http())
+    batches = list(src.iter_observations("migr_asyappctzm", start_period=2025))
+
+    assert len(calls) == 2, "should retry once without the filter"
+    assert "startPeriod" in calls[0] and "startPeriod" not in calls[1]
+    assert sum(len(b) for b in batches) > 0, "full-file rows must still parse"
+
+
+def test_413_without_start_period_is_not_retried():
+    """No filter to drop — a 413 on the bulk file itself is a real error."""
+    calls = []
+
+    class _Resp:
+        status_code, content = 413, b""
+        def raise_for_status(self):
+            raise RuntimeError("HTTP 413")
+
+    class _Http:
+        def get(self, url, params=None, timeout=None):  # pylint: disable=unused-argument
+            calls.append(params)
+            return _Resp()
+
+    src = EurostatSource()
+    src._http = _Http()  # pylint: disable=protected-access
+    try:
+        list(src.iter_observations("migr_asyappctzm"))
+    except RuntimeError:
+        pass
+    assert len(calls) == 1
