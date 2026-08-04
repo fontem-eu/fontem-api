@@ -166,6 +166,34 @@ class EurostatSource:
             dim_labels=dim_labels,
         )
 
+    def _fetch_bulk(
+        self, code: str, url: str, params: dict, start_period: int | None,
+    ) -> tuple[bytes, bool]:
+        """GET the bulk TSV, retrying without the period filter on 413.
+
+        Counter-intuitive but load-bearing: an UNFILTERED request is served
+        from Eurostat's pre-generated bulk file, which has no size ceiling,
+        while adding startPeriod routes it through the filtered query path,
+        which enforces one. So for the widest datasets the incremental
+        fetch is the only form that CANNOT be served — migr_asyappctzm
+        returns 413 with startPeriod=2025 and 9.6 MB without it.
+
+        Returns (payload, fell_back). `fell_back` tells the caller it now
+        holds the whole history and must apply the window itself.
+        """
+        resp = self._http.get(url, params=params, timeout=300.0)
+        if resp.status_code == 413 and start_period is not None:
+            logger.warning(
+                "%s: startPeriod=%s got 413; refetching the full bulk file",
+                code, start_period,
+            )
+            params = {k: v for k, v in params.items() if k != "startPeriod"}
+            resp = self._http.get(url, params=params, timeout=300.0)
+            resp.raise_for_status()
+            return resp.content, True
+        resp.raise_for_status()
+        return resp.content, False
+
     # iter_observations() owns the bulk-TSV stream parse: header row,
     # dim-index lookup, per-row value-and-flag normalisation, NUTS-code
     # filter, batch buffer. All loop-locals of a single streaming parser.
@@ -210,25 +238,7 @@ class EurostatSource:
         # memory; nothing to gain from streaming.
         logger.info("%s: GET %s (startPeriod=%s)", code, url,
                     start_period if start_period is not None else "—")
-        resp = self._http.get(url, params=params, timeout=300.0)
-        if resp.status_code == 413 and start_period is not None:
-            # Counter-intuitive but load-bearing: an UNFILTERED request is
-            # served from Eurostat's pre-generated bulk file, while adding
-            # startPeriod routes it through the filtered query path, which
-            # enforces a response-size limit. So for the widest datasets the
-            # incremental fetch 413s while the whole file downloads fine —
-            # migr_asyappctzm returns 413 with startPeriod=2025 and 9.6 MB
-            # without it. Drop the filter and take the full file; the row
-            # upserts are idempotent, so re-reading old periods costs
-            # transfer and nothing else.
-            logger.warning(
-                "%s: startPeriod=%s got 413; refetching the full bulk file",
-                code, start_period,
-            )
-            params.pop("startPeriod", None)
-            resp = self._http.get(url, params=params, timeout=300.0)
-        resp.raise_for_status()
-        raw = resp.content
+        raw, fell_back = self._fetch_bulk(code, url, params, start_period)
         logger.info("%s: fetched %d bytes (gzip)", code, len(raw))
         text = gzip.decompress(raw).decode("utf-8")
 
@@ -248,6 +258,20 @@ class EurostatSource:
         except ValueError:
             geo_idx = -1
 
+        # Parse each period once for the whole file rather than once per
+        # cell. The header is shared by every row, so for a wide dataset
+        # this is the difference between parsing a few hundred strings and
+        # parsing a hundred million.
+        #
+        # When the incremental request 413'd we asked for a window and got
+        # the whole file, so apply that window here instead. Without this
+        # a stale wide dataset re-upserts its entire history — 103M rows
+        # for migr_asyappctzm — to write a couple of new months.
+        parsed_periods = _period_window(
+            code, time_periods,
+            start_period if fell_back else None,
+        )
+
         batch: list[Observation] = []
         for row in reader:
             if not row:
@@ -260,13 +284,13 @@ class EurostatSource:
                 if i != geo_idx and name != "freq"
             }
             for period_idx, raw_value in enumerate(row[1:]):
-                if period_idx >= len(time_periods):
+                if period_idx >= len(parsed_periods):
                     break
+                t = parsed_periods[period_idx]
+                if t is None:      # unparseable, or outside the window
+                    continue
                 value, flags = _parse_cell(raw_value)
                 if value is None and not flags:
-                    continue
-                t = _parse_period(time_periods[period_idx])
-                if t is None:
                     continue
                 batch.append(Observation(
                     time=t,
@@ -281,6 +305,39 @@ class EurostatSource:
         if batch:
             yield batch
 
+
+
+def _period_window(
+    code: str, time_periods: list[str], start_period: int | None,
+) -> list["datetime | None"]:
+    """Parse the header's periods once, optionally masking those before
+    `start_period`.
+
+    Parsing once per file rather than once per cell is the difference
+    between a few hundred parses and a hundred million on a wide dataset.
+
+    The mask exists for the 413 fallback: we asked the server for a window
+    and got the whole history back, so the window has to be applied here.
+    Without it a stale wide dataset re-upserts everything it has ever had —
+    103M rows for migr_asyappctzm — in order to write a couple of new
+    months. None means "skip this column".
+    """
+    parsed: list[datetime | None] = [_parse_period(t) for t in time_periods]
+    if start_period is None:
+        return parsed
+    kept = 0
+    for i, t in enumerate(parsed):
+        if t is None:
+            continue
+        if t.year < start_period:
+            parsed[i] = None
+        else:
+            kept += 1
+    logger.info(
+        "%s: full file fetched; applying startPeriod=%s client-side "
+        "(%d of %d periods kept)", code, start_period, kept, len(time_periods),
+    )
+    return parsed
 
 def _parse_cell(raw: str) -> tuple[float | None, list[str]]:
     """Eurostat TSV cell: '<number>[ <flags>]' or ':' for missing."""
