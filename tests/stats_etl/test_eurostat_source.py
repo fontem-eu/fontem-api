@@ -301,3 +301,54 @@ def test_413_without_start_period_is_not_retried():
     except RuntimeError:
         pass
     assert len(calls) == 1
+
+
+def test_bulk_fallback_applies_the_requested_window_client_side():
+    """We asked for a window and got the whole file. Writing all of it
+    would re-upsert the entire history (103M rows for migr_asyappctzm) to
+    land a couple of new months, so the window is applied while parsing."""
+    tsv = ("freq,unit,geo\\TIME_PERIOD\t2026\t2025\t2024\t2023\n"
+           "A,NR,BE\t40\t30\t20\t10\n")
+    payload = gzip.compress(tsv.encode())
+
+    class _Resp:
+        def __init__(self, status, content=b""):
+            self.status_code, self.content = status, content
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    class _Http:
+        def get(self, url, params=None, timeout=None):  # pylint: disable=unused-argument
+            if "startPeriod" in (params or {}):
+                return _Resp(413)
+            return _Resp(200, payload)
+
+    src = EurostatSource()
+    src._http = _Http()  # pylint: disable=protected-access
+    obs = [o for b in src.iter_observations("wide", start_period=2025) for o in b]
+    years = sorted({o.time.year for o in obs})
+    assert years == [2025, 2026], f"pre-window periods leaked in: {years}"
+
+
+def test_no_fallback_keeps_every_period_in_the_response():
+    """When the server honoured the filter, it already scoped the response;
+    we must not narrow it a second time."""
+    tsv = ("freq,unit,geo\\TIME_PERIOD\t2024\t2023\n"
+           "A,NR,BE\t20\t10\n")
+    payload = gzip.compress(tsv.encode())
+
+    class _Resp:
+        status_code = 200
+        content = payload
+        def raise_for_status(self):
+            return None
+
+    class _Http:
+        def get(self, url, params=None, timeout=None):  # pylint: disable=unused-argument
+            return _Resp()
+
+    src = EurostatSource()
+    src._http = _Http()  # pylint: disable=protected-access
+    obs = [o for b in src.iter_observations("narrow") for o in b]
+    assert sorted({o.time.year for o in obs}) == [2023, 2024]
