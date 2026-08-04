@@ -20,7 +20,7 @@ import io
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import httpx
 
@@ -31,6 +31,13 @@ API_BASE = (
 )
 BULK_BASE = (
     "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data"
+)
+# Bulk-download catalogue: one tab-separated listing of every Eurostat
+# dataset with its "last update of data" date. ~2 MB for all ~12k
+# datasets, so one fetch answers "is upstream newer?" for the whole
+# catalog at less cost than a single per-dataset probe.
+CATALOGUE_TOC = (
+    "https://ec.europa.eu/eurostat/api/dissemination/catalogue/toc/txt"
 )
 
 
@@ -70,8 +77,59 @@ class EurostatSource:
             headers={"User-Agent": "fontem-stats/0.1"},
         )
 
+    def fetch_catalogue_updates(self) -> dict[str, date]:
+        """Map dataset code -> "last update of data", for every Eurostat
+        dataset, in one request.
+
+        This exists because the per-dataset probe is not cheap for wide
+        datasets. `statistics/1.0/data?lastTimePeriod=1` still expands the
+        full dimension cross-product for the period it returns, so for
+        migr_asyappctzm (103M values across citizen x age x sex x
+        applicant x geo) it downloads ~3.7 MB to read one `updated`
+        field — and tips over Eurostat's response limit under load,
+        returning 413 and failing the whole nightly sync.
+
+        The catalogue is the interface Eurostat publishes for exactly
+        this: it is the listing behind their bulk-download facility, and
+        it carries the update date without a single observation.
+
+        Dates only (DD.MM.YYYY), no time — see the caller for how that
+        coarseness is handled safely.
+        """
+        resp = self._http.get(CATALOGUE_TOC, params={"lang": "en"})
+        resp.raise_for_status()
+        out: dict[str, date] = {}
+        reader = csv.reader(io.StringIO(resp.text), delimiter="\t", quotechar='"')
+        header = next(reader, None)
+        if not header:
+            return out
+        try:
+            i_code = header.index("code")
+            i_upd = header.index("last update of data")
+        except ValueError:
+            logger.warning("eurostat catalogue: unexpected header %s", header)
+            return out
+        for row in reader:
+            if len(row) <= max(i_code, i_upd):
+                continue
+            code = row[i_code].strip().lower()
+            raw = row[i_upd].strip()
+            if not code or not raw:
+                continue
+            try:
+                out[code] = datetime.strptime(raw, "%d.%m.%Y").date()
+            except ValueError:
+                continue
+        logger.info("eurostat catalogue: %d dataset update dates", len(out))
+        return out
+
     def fetch_metadata(self, code: str) -> DatasetMetadata:
-        """Cheap: fetch one cell and read the metadata sidecar.
+        """Fetch one period and read the metadata sidecar.
+
+        NOT cheap for wide datasets — the cross-product is returned in
+        full for the period requested. Callers should gate this behind
+        the catalogue freshness check and only pay it when they are about
+        to download the dataset anyway.
 
         Eurostat ships category labels in the sidecar under
         ``dimension.{name}.category.label``. We collect them so the UI

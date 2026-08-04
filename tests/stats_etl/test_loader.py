@@ -166,10 +166,16 @@ def test_sync_success_path_writes_rows_and_finishes_success():
 
 
 def test_sync_failure_path_logs_error_and_records_failed_run():
+    # Triggered via the data pull, not the metadata probe: a probe failure
+    # is deliberately non-fatal now (see
+    # test_probe_failure_still_syncs_the_data), so it no longer exercises
+    # this path.
     src = MagicMock()
-    src.fetch_metadata.side_effect = RuntimeError("API blew up")
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.side_effect = RuntimeError("API blew up")
     db = MagicMock()
     db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
 
     loader = EurostatLoader(src, db)
     result = loader.sync("demo_test")
@@ -342,3 +348,98 @@ def test_sync_many_swallows_level_universe_refresh_failure():
         results = sync_many(["a"])
     assert len(results) == 1
     assert results[0].status == "success"
+
+
+# ── catalogue-based freshness gate ───────────────────────────────────
+# The per-dataset probe is not cheap for wide datasets: migr_asyappctzm
+# (103M values) returns ~3.7 MB just to read `updated`, and 413s under
+# load — which used to fail the entire nightly sync. The catalogue
+# answers the same question for every dataset in one request.
+
+def _loader_with_catalogue(cat: dict, *, last_upstream: datetime | None):
+    src, db = MagicMock(), MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, last_upstream)
+    src.fetch_catalogue_updates.return_value = cat
+    return EurostatLoader(source=src, db=db), src, db
+
+
+def test_catalogue_older_than_watermark_skips_without_probing():
+    """The whole point: no per-dataset probe on the common path."""
+    from datetime import date
+    loader, src, db = _loader_with_catalogue(
+        {"demo_test": date(2026, 1, 1)},
+        last_upstream=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    res = loader.sync("demo_test")
+    assert res.status == "skipped"
+    src.fetch_metadata.assert_not_called()
+    src.iter_observations.assert_not_called()
+
+
+def test_same_day_catalogue_date_still_probes():
+    """The catalogue carries a date, our watermark a timestamp. A tie is
+    ambiguous — fall through rather than risk missing a same-day update."""
+    from datetime import date
+    loader, src, _ = _loader_with_catalogue(
+        {"demo_test": date(2026, 6, 1)},
+        last_upstream=datetime(2026, 6, 1, 9, tzinfo=timezone.utc))
+    src.fetch_metadata.return_value = _meta(
+        updated=datetime(2026, 6, 1, 11, tzinfo=timezone.utc))
+    src.iter_observations.return_value = iter([_obs(1)])
+    loader.sync("demo_test")
+    src.fetch_metadata.assert_called_once()
+
+
+def test_unknown_code_in_catalogue_never_counts_as_unchanged():
+    """Absence of information must not be read as 'nothing changed'."""
+    loader, src, _ = _loader_with_catalogue(
+        {}, last_upstream=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    src.fetch_metadata.return_value = _meta(
+        updated=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    src.iter_observations.return_value = iter([_obs(1)])
+    loader.sync("demo_test")
+    src.fetch_metadata.assert_called_once()
+
+
+def test_catalogue_fetched_once_and_reused_across_datasets():
+    from datetime import date
+    loader, src, db = _loader_with_catalogue(
+        {"demo_test": date(2026, 1, 1)},
+        last_upstream=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    for _ in range(3):
+        loader.sync("demo_test")
+    assert src.fetch_catalogue_updates.call_count == 1
+
+
+def test_catalogue_outage_falls_back_to_probing():
+    """A catalogue failure must not silently skip every dataset."""
+    src, db = MagicMock(), MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, datetime(2026, 6, 1, tzinfo=timezone.utc))
+    src.fetch_catalogue_updates.side_effect = RuntimeError("toc 503")
+    src.fetch_metadata.return_value = _meta(
+        updated=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    src.iter_observations.return_value = iter([_obs(1)])
+    loader = EurostatLoader(source=src, db=db)
+    res = loader.sync("demo_test")
+    src.fetch_metadata.assert_called_once()
+    assert res.status != "skipped"
+
+
+def test_probe_failure_still_syncs_the_data():
+    """A 413 on the label probe must not fail the dataset — the bulk TSV
+    is a different endpoint and handles these sizes fine."""
+    from datetime import date
+    src, db = MagicMock(), MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (None, None)
+    src.fetch_catalogue_updates.return_value = {"demo_test": date(2026, 7, 1)}
+    src.fetch_metadata.side_effect = RuntimeError("413 Request Entity Too Large")
+    src.iter_observations.return_value = iter([_obs(2)])
+    db.bulk_upsert_observations.side_effect = [(2, 0)]
+    loader = EurostatLoader(source=src, db=db)
+    res = loader.sync("demo_test")
+    assert res.status == "success", res.error
+    src.iter_observations.assert_called_once()
+    # stale labels are left alone rather than blanked
+    db.update_dataset_metadata.assert_not_called()
