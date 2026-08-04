@@ -211,6 +211,22 @@ class EurostatSource:
         logger.info("%s: GET %s (startPeriod=%s)", code, url,
                     start_period if start_period is not None else "—")
         resp = self._http.get(url, params=params, timeout=300.0)
+        if resp.status_code == 413 and start_period is not None:
+            # Counter-intuitive but load-bearing: an UNFILTERED request is
+            # served from Eurostat's pre-generated bulk file, while adding
+            # startPeriod routes it through the filtered query path, which
+            # enforces a response-size limit. So for the widest datasets the
+            # incremental fetch 413s while the whole file downloads fine —
+            # migr_asyappctzm returns 413 with startPeriod=2025 and 9.6 MB
+            # without it. Drop the filter and take the full file; the row
+            # upserts are idempotent, so re-reading old periods costs
+            # transfer and nothing else.
+            logger.warning(
+                "%s: startPeriod=%s got 413; refetching the full bulk file",
+                code, start_period,
+            )
+            params.pop("startPeriod", None)
+            resp = self._http.get(url, params=params, timeout=300.0)
         resp.raise_for_status()
         raw = resp.content
         logger.info("%s: fetched %d bytes (gzip)", code, len(raw))
