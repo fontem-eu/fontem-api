@@ -7,10 +7,11 @@ dataset code.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, time, timezone
 from dataclasses import dataclass
 
 from .db import StatsDatabase
-from .eurostat_source import EurostatSource
+from .eurostat_source import DatasetMetadata, EurostatSource
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,25 @@ class SyncResult:
     error: str | None = None
 
 
+def _fallback_metadata(code: str, cat_date: "date | None") -> DatasetMetadata:
+    """Minimal metadata for when the probe is unavailable.
+
+    upstream_modified drives the freshness watermark, so it must not be
+    invented as "now" — that would record a sync as covering data it
+    never saw. Use the catalogue date when we have one; otherwise epoch,
+    which simply means "no watermark advance" and leaves the dataset due
+    again next run.
+    """
+    stamp = (datetime.combine(cat_date, time.min, tzinfo=timezone.utc)
+             if cat_date is not None
+             else datetime.fromtimestamp(0, tz=timezone.utc))
+    return DatasetMetadata(
+        code=code, label="", upstream_modified=stamp,
+        dim_ids=[], dim_sizes=[], dim_labels={},
+    )
+
+
+
 class EurostatLoader:
     def __init__(
         self,
@@ -31,6 +51,69 @@ class EurostatLoader:
     ) -> None:
         self._source = source
         self._db = db
+        # Fetched at most once per Loader (i.e. once per sync run) and
+        # reused for every dataset. None until the first lookup; an empty
+        # dict after a failed fetch, so a catalogue outage degrades to the
+        # old per-dataset probe rather than skipping everything.
+        self._catalogue: dict[str, "date"] | None = None
+
+    def _catalogue_date(self, code: str) -> "date | None":
+        """Upstream 'last update of data' for `code`, from the cached
+        catalogue. Returns None when unknown — callers must treat that as
+        'no information', never as 'unchanged'."""
+        if self._catalogue is None:
+            try:
+                self._catalogue = self._source.fetch_catalogue_updates()
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "eurostat catalogue unavailable (%s); "
+                    "falling back to per-dataset probes", exc,
+                )
+                self._catalogue = {}
+        val = self._catalogue.get(code.lower())
+        # Only a genuine date may short-circuit a sync. A malformed or
+        # unparsed catalogue entry is missing information, and missing
+        # information must never be read as "upstream unchanged".
+        return val if isinstance(val, date) else None
+
+    def _catalogue_says_unchanged(
+        self, code: str, last_upstream: "datetime | None", *, force: bool,
+    ) -> bool:
+        """True only when the catalogue positively states upstream is older
+        than our watermark. Day granularity vs a timestamp watermark means a
+        same-day tie is ambiguous, so it returns False and lets the caller
+        fall through to the authoritative probe."""
+        if force or last_upstream is None:
+            return False
+        cat_date = self._catalogue_date(code)
+        if cat_date is None or cat_date >= last_upstream.date():
+            return False
+        logger.info(
+            "%s: upstream unchanged per catalogue (%s < %s); skipping",
+            code, cat_date, last_upstream.date(),
+        )
+        return True
+
+    def _metadata_or_fallback(self, code: str) -> DatasetMetadata:
+        """Dimension labels are a nice-to-have; the data comes from the bulk
+        TSV endpoint, which handles sizes this probe chokes on. Losing labels
+        for one dataset beats failing it — that asymmetry is what turned a
+        413 into a red nightly run. Existing labels are left in place rather
+        than blanked."""
+        try:
+            meta = self._source.fetch_metadata(code)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "%s: metadata probe failed (%s); syncing without refreshed "
+                "dimension labels", code, exc,
+            )
+            return _fallback_metadata(code, self._catalogue_date(code))
+        if meta.dim_ids:
+            self._db.update_dataset_metadata(
+                code, dim_ids=meta.dim_ids, dim_sizes=meta.dim_sizes,
+                dim_labels=meta.dim_labels,
+            )
+        return meta
 
     # sync() carries the full Eurostat → Postgres pipeline state inline
     # (run row, observation iterator, batch counters, freshness probes,
@@ -49,17 +132,25 @@ class EurostatLoader:
 
         run_id = self._db.start_run(code)
         try:
-            meta = self._source.fetch_metadata(code)
-            # Refresh dim_ids/sizes/labels on every metadata fetch (cheap)
-            # so the catalog stays current even when the data load itself
-            # gets skipped because upstream hasn't changed.
-            self._db.update_dataset_metadata(
-                code,
-                dim_ids=meta.dim_ids,
-                dim_sizes=meta.dim_sizes,
-                dim_labels=meta.dim_labels,
-            )
             _, last_upstream = self._db.last_successful_run(code)
+
+            # Cheap gate first. The catalogue answers "is upstream newer?"
+            # for every dataset in one request; the per-dataset probe below
+            # can cost megabytes for a wide dataset and 413s outright for
+            # migr_asyappctzm, which used to fail the whole nightly run.
+            #
+            # Only a STRICTLY older catalogue date short-circuits: the
+            # catalogue carries a date where our watermark is a timestamp,
+            # so a same-day tie is ambiguous and falls through to the
+            # authoritative probe rather than risking a missed update.
+            if self._catalogue_says_unchanged(code, last_upstream, force=force):
+                self._db.finish_run(
+                    run_id, status="skipped",
+                    upstream_modified=last_upstream,
+                )
+                return SyncResult(code=code, status="skipped")
+
+            meta = self._metadata_or_fallback(code)
             if (not force and last_upstream is not None
                     and meta.upstream_modified <= last_upstream):
                 self._db.finish_run(
