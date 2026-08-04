@@ -7,7 +7,7 @@ from __future__ import annotations
 
 # pylint: disable=missing-function-docstring
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from src.stats_etl.db import Dataset
@@ -366,8 +366,7 @@ def _loader_with_catalogue(cat: dict, *, last_upstream: datetime | None):
 
 def test_catalogue_older_than_watermark_skips_without_probing():
     """The whole point: no per-dataset probe on the common path."""
-    from datetime import date
-    loader, src, db = _loader_with_catalogue(
+    loader, src, _db = _loader_with_catalogue(
         {"demo_test": date(2026, 1, 1)},
         last_upstream=datetime(2026, 6, 1, tzinfo=timezone.utc))
     res = loader.sync("demo_test")
@@ -379,7 +378,6 @@ def test_catalogue_older_than_watermark_skips_without_probing():
 def test_same_day_catalogue_date_still_probes():
     """The catalogue carries a date, our watermark a timestamp. A tie is
     ambiguous — fall through rather than risk missing a same-day update."""
-    from datetime import date
     loader, src, _ = _loader_with_catalogue(
         {"demo_test": date(2026, 6, 1)},
         last_upstream=datetime(2026, 6, 1, 9, tzinfo=timezone.utc))
@@ -402,8 +400,7 @@ def test_unknown_code_in_catalogue_never_counts_as_unchanged():
 
 
 def test_catalogue_fetched_once_and_reused_across_datasets():
-    from datetime import date
-    loader, src, db = _loader_with_catalogue(
+    loader, src, _db = _loader_with_catalogue(
         {"demo_test": date(2026, 1, 1)},
         last_upstream=datetime(2026, 6, 1, tzinfo=timezone.utc))
     for _ in range(3):
@@ -429,7 +426,6 @@ def test_catalogue_outage_falls_back_to_probing():
 def test_probe_failure_still_syncs_the_data():
     """A 413 on the label probe must not fail the dataset — the bulk TSV
     is a different endpoint and handles these sizes fine."""
-    from datetime import date
     src, db = MagicMock(), MagicMock()
     db.get_dataset.return_value = _ds()
     db.last_successful_run.return_value = (None, None)

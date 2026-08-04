@@ -76,6 +76,45 @@ class EurostatLoader:
         # information must never be read as "upstream unchanged".
         return val if isinstance(val, date) else None
 
+    def _catalogue_says_unchanged(
+        self, code: str, last_upstream: "datetime | None", *, force: bool,
+    ) -> bool:
+        """True only when the catalogue positively states upstream is older
+        than our watermark. Day granularity vs a timestamp watermark means a
+        same-day tie is ambiguous, so it returns False and lets the caller
+        fall through to the authoritative probe."""
+        if force or last_upstream is None:
+            return False
+        cat_date = self._catalogue_date(code)
+        if cat_date is None or cat_date >= last_upstream.date():
+            return False
+        logger.info(
+            "%s: upstream unchanged per catalogue (%s < %s); skipping",
+            code, cat_date, last_upstream.date(),
+        )
+        return True
+
+    def _metadata_or_fallback(self, code: str) -> DatasetMetadata:
+        """Dimension labels are a nice-to-have; the data comes from the bulk
+        TSV endpoint, which handles sizes this probe chokes on. Losing labels
+        for one dataset beats failing it — that asymmetry is what turned a
+        413 into a red nightly run. Existing labels are left in place rather
+        than blanked."""
+        try:
+            meta = self._source.fetch_metadata(code)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "%s: metadata probe failed (%s); syncing without refreshed "
+                "dimension labels", code, exc,
+            )
+            return _fallback_metadata(code, self._catalogue_date(code))
+        if meta.dim_ids:
+            self._db.update_dataset_metadata(
+                code, dim_ids=meta.dim_ids, dim_sizes=meta.dim_sizes,
+                dim_labels=meta.dim_labels,
+            )
+        return meta
+
     # sync() carries the full Eurostat → Postgres pipeline state inline
     # (run row, observation iterator, batch counters, freshness probes,
     # error capture). Splitting it into 3 sub-methods would force shared
@@ -104,40 +143,14 @@ class EurostatLoader:
             # catalogue carries a date where our watermark is a timestamp,
             # so a same-day tie is ambiguous and falls through to the
             # authoritative probe rather than risking a missed update.
-            if not force and last_upstream is not None:
-                cat_date = self._catalogue_date(code)
-                if cat_date is not None and cat_date < last_upstream.date():
-                    self._db.finish_run(
-                        run_id, status="skipped",
-                        upstream_modified=last_upstream,
-                    )
-                    logger.info(
-                        "%s: upstream unchanged per catalogue (%s <= %s); skipping",
-                        code, cat_date, last_upstream.date(),
-                    )
-                    return SyncResult(code=code, status="skipped")
+            if self._catalogue_says_unchanged(code, last_upstream, force=force):
+                self._db.finish_run(
+                    run_id, status="skipped",
+                    upstream_modified=last_upstream,
+                )
+                return SyncResult(code=code, status="skipped")
 
-            try:
-                meta = self._source.fetch_metadata(code)
-            except Exception as exc:  # pylint: disable=broad-except
-                # The probe is a nice-to-have (dimension labels); the bulk
-                # TSV below is the actual data and is served by a different
-                # endpoint that handles these sizes fine. Losing labels for
-                # one dataset beats failing it — that asymmetry is exactly
-                # what turned a 413 into a red nightly run.
-                cat_date = self._catalogue_date(code)
-                logger.warning(
-                    "%s: metadata probe failed (%s); syncing without "
-                    "refreshed dimension labels", code, exc,
-                )
-                meta = _fallback_metadata(code, cat_date)
-            if meta.dim_ids:
-                self._db.update_dataset_metadata(
-                    code,
-                    dim_ids=meta.dim_ids,
-                    dim_sizes=meta.dim_sizes,
-                    dim_labels=meta.dim_labels,
-                )
+            meta = self._metadata_or_fallback(code)
             if (not force and last_upstream is not None
                     and meta.upstream_modified <= last_upstream):
                 self._db.finish_run(
