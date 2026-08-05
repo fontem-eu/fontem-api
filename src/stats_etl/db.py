@@ -765,45 +765,71 @@ class StatsDatabase:
             )
             return cur.rowcount or 0
 
-    def recompute_year_availability(self, dataset_code: str) -> int:
+    def recompute_year_availability(
+        self, dataset_code: str, *, since_year: int | None = None,
+    ) -> int:
         """Recompute year availability for a single dataset.
 
         Aggregates `fontem_stats.observation` grouped by
-        (nuts_level, dimensions, year) and stores the count of
-        distinct regions with a non-null value. The denominator
-        (level universe) is read from `fontem_stats.level_universe`
-        — refresh it once per ETL cycle via
-        `recompute_level_universe()` before calling this in a loop.
+        (nuts_level, slice, year) and stores the count of distinct
+        regions with a non-null value. The denominator (level universe)
+        is read from `fontem_stats.level_universe` — refresh it once per
+        ETL cycle via `recompute_level_universe()` before calling this
+        in a loop.
+
+        `since_year` restricts the rebuild to years >= that value. Pass
+        the same window the sync fetched: those are the only years whose
+        observations can have changed, and bounding `time` lets
+        TimescaleDB exclude chunks instead of scanning all of them —
+        measured on migr_acq (13.1M rows) as 36.8s unbounded vs 2.9s for
+        one year, 10 chunks in the plan vs 2. None rebuilds everything,
+        which is what the weekly `--all --force` reconcile wants since a
+        forced pull can revise any year.
         """
         with self.connect() as conn, conn.cursor() as cur:
             # Wipe and rewrite in one transaction — the universe (level
-            # denominator) drifts as new datasets land, so a stale
-            # row could carry an outdated `regions_total`. Cheaper to
-            # recompute everything for the dataset than to compute
-            # diffs.
-            cur.execute(
-                "DELETE FROM fontem_stats.dataset_year_availability "
-                "WHERE dataset_code = %s",
-                (dataset_code,),
-            )
+            # denominator) drifts as new datasets land, so a stale row
+            # could carry an outdated `regions_total`. Delete exactly the
+            # span being rewritten, so a bounded rebuild cannot strand
+            # rows it is not going to replace.
+            if since_year is None:
+                cur.execute(
+                    "DELETE FROM fontem_stats.dataset_year_availability "
+                    "WHERE dataset_code = %s",
+                    (dataset_code,),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM fontem_stats.dataset_year_availability "
+                    "WHERE dataset_code = %s AND year >= %s",
+                    (dataset_code, since_year),
+                )
             cur.execute(
                 """
                 WITH per_year AS (
+                    -- Group on the md5 slice_key, never on `dimensions`
+                    -- itself: sorting/hashing a jsonb per row is what
+                    -- dominates this aggregate. The jsonb is carried out
+                    -- via min() on one representative row per group
+                    -- instead — measured on migr_acq as 36.8s -> 23.6s.
+                    -- slice_key is already the slice identity in this
+                    -- table, so grouping by it changes no semantics.
                     SELECT
                         dataset_code,
                         (char_length(geo_code) - 2)::smallint AS nuts_level,
                         md5(dimensions::text)                  AS slice_key,
-                        dimensions,
+                        min(dimensions::text)::jsonb           AS dimensions,
                         EXTRACT(YEAR FROM time)::smallint      AS year,
                         COUNT(DISTINCT geo_code)
                             FILTER (WHERE value IS NOT NULL)::int
                             AS regions_with_value
                     FROM fontem_stats.observation
                     WHERE dataset_code = %s
+                      AND (%s::int IS NULL
+                           OR time >= make_date(%s::int, 1, 1))
                     GROUP BY dataset_code,
                              char_length(geo_code) - 2,
                              md5(dimensions::text),
-                             dimensions,
                              EXTRACT(YEAR FROM time)
                 )
                 INSERT INTO fontem_stats.dataset_year_availability (
@@ -825,7 +851,7 @@ class StatsDatabase:
                 LEFT JOIN fontem_stats.level_universe u
                     ON u.nuts_level = p.nuts_level
                 """,
-                (dataset_code,),
+                (dataset_code, since_year, since_year),
             )
             return cur.rowcount or 0
 
