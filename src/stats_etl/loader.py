@@ -248,7 +248,12 @@ class EurostatLoader:
             # recompute-availability` can patch up out-of-band.
             try:
                 self._db.migrate_year_availability()
-                avail_rows = self._db.recompute_year_availability(code)
+                # Only the years we actually fetched can have changed,
+                # and bounding them lets TimescaleDB skip chunks. A full
+                # pull (start_period None) rebuilds everything.
+                avail_rows = self._db.recompute_year_availability(
+                    code, since_year=start_period,
+                )
                 logger.info("%s: recomputed availability for %d (level,slice,year) row(s)",
                             code, avail_rows)
             except Exception as avail_exc:  # pylint: disable=broad-except

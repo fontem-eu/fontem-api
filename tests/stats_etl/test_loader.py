@@ -286,7 +286,9 @@ def test_sync_recomputes_year_availability_after_success():
     result = loader.sync("demo_test")
     assert result.status == "success"
     db.migrate_year_availability.assert_called_once()
-    db.recompute_year_availability.assert_called_once_with("demo_test")
+    # first-ever sync pulls all history, so the rebuild is unbounded
+    db.recompute_year_availability.assert_called_once_with(
+        "demo_test", since_year=None)
 
 
 def test_sync_success_survives_year_availability_recompute_failure():
@@ -439,3 +441,48 @@ def test_probe_failure_still_syncs_the_data():
     src.iter_observations.assert_called_once()
     # stale labels are left alone rather than blanked
     db.update_dataset_metadata.assert_not_called()
+
+
+# ── bounded availability rebuild ─────────────────────────────────────
+# Recomputing all history after every sync is what made the nightly run
+# long: unbounded, TimescaleDB scans every chunk (36.8s / 10 chunks on
+# migr_acq) where one year scans two (2.9s). Only the years we fetched
+# can have changed, so pass that same window through.
+
+def test_incremental_sync_bounds_the_availability_rebuild():
+    src, db = MagicMock(), MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (
+        None, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    db.max_observed_year.return_value = 2026
+    src.fetch_catalogue_updates.return_value = {}
+    src.fetch_metadata.return_value = _meta(
+        updated=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    src.iter_observations.return_value = iter([_obs(1)])
+    db.bulk_upsert_observations.return_value = (1, 0)
+
+    EurostatLoader(src, db).sync("demo_test")
+
+    # start_period is max_observed_year - 1, and the rebuild must use it
+    assert src.iter_observations.call_args.kwargs["start_period"] == 2025
+    db.recompute_year_availability.assert_called_once_with(
+        "demo_test", since_year=2025)
+
+
+def test_forced_sync_rebuilds_all_years():
+    """--force is the weekly reconcile that catches historical revisions,
+    so its rebuild must not be bounded or those years keep stale rows."""
+    src, db = MagicMock(), MagicMock()
+    db.get_dataset.return_value = _ds()
+    db.last_successful_run.return_value = (
+        None, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    db.max_observed_year.return_value = 2026
+    src.fetch_metadata.return_value = _meta()
+    src.iter_observations.return_value = iter([_obs(1)])
+    db.bulk_upsert_observations.return_value = (1, 0)
+
+    EurostatLoader(src, db).sync("demo_test", force=True)
+
+    assert src.iter_observations.call_args.kwargs["start_period"] is None
+    db.recompute_year_availability.assert_called_once_with(
+        "demo_test", since_year=None)
