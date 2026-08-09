@@ -198,7 +198,8 @@ def entity_aggregate(
     openapi_extra=agent_tool(
         name="list_nuts_regions",
         when="you need the NUTS code for a place before asking for regional statistics",
-        group="geography"),
+        group="geography",
+        core=True),
 )
 def nuts_regions():
     """Flat, geometry-free list of NUTS regions across all bundled levels.

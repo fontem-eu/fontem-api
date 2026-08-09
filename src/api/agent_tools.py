@@ -44,10 +44,17 @@ class AgentTool:
     #: route declares. Naming a subset keeps schemas small and stops the
     #: model tuning knobs it has no basis to set.
     params: tuple[str, ...] = field(default_factory=tuple)
+    #: Never scoped away. Core tools are the ones a turn cannot discover its
+    #: way out of without: you cannot ask for a statistic without first
+    #: finding its dataset code, so gating that discovery behind a group
+    #: guess would strand the model exactly where it already fails — telling
+    #: the user the data is not here. Keep this set small; every core tool is
+    #: schema in every prompt.
+    core: bool = False
 
 
 def agent_tool(name: str, when: str, group: str = "general",
-               params: tuple[str, ...] = ()) -> dict:
+               params: tuple[str, ...] = (), core: bool = False) -> dict:
     """Return the ``openapi_extra`` payload marking a route as a tool.
 
     Usage::
@@ -57,5 +64,5 @@ def agent_tool(name: str, when: str, group: str = "general",
             when="the user names a company, authority, person or lobbyist",
             group="entities", params=("q", "limit")))
     """
-    return {AGENT_TOOL_KEY: {"name": name, "when": when,
-                             "group": group, "params": list(params)}}
+    return {AGENT_TOOL_KEY: {"name": name, "when": when, "group": group,
+                             "params": list(params), "core": core}}

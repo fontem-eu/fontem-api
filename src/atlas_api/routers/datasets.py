@@ -24,7 +24,7 @@ def _stats_source(request: Request):
         name="list_datasets",
         when=("the user asks what statistics exist, or you need a dataset code before "
               "reading values"),
-        group="statistics"))
+        group="statistics", core=True))
 def list_datasets(request: Request) -> list[DatasetSummary]:
     """Every enabled dataset + its last successful sync.
 

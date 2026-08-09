@@ -28,7 +28,8 @@ def _stats_source(request: Request):
               "population, GDP, life expectancy, crime, migration"),
         group="statistics",
         params=("dataset", "geo", "nuts_level", "start", "end",
-                "dimensions")))
+                "dimensions"),
+        core=True))
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 def fetch_series(
     request: Request,
