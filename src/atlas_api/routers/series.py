@@ -26,8 +26,9 @@ def _stats_source(request: Request):
         name="get_series",
         when=("the user wants actual statistical values for regions or years — "
               "population, GDP, life expectancy, crime, migration"),
-        group="statistics", params=("dataset", "geo", "nuts_level", "start", "end", "dimensions",)),
-    response_model=SeriesResponse)
+        group="statistics",
+        params=("dataset", "geo", "nuts_level", "start", "end",
+                "dimensions")))
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 def fetch_series(
     request: Request,
