@@ -31,6 +31,21 @@ Usage::
     python -m src.etl.load_cpv --download      # refresh source data
 """
 
+from __future__ import annotations
+
+
+import argparse
+import gzip
+import logging
+import shutil
+import time
+import uuid
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+import httpx
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 from src.etl.data_description import DataDescription
 
 DESCRIPTION = DataDescription(
@@ -48,20 +63,7 @@ DESCRIPTION = DataDescription(
         "What category of goods or services a contract covers",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import gzip
-import logging
-import shutil
-import time
-import uuid
-from pathlib import Path
-from xml.etree import ElementTree as ET
-
-import httpx
-from fontem_event_schemas import builders
-from fontem_events import EventLog
 
 logger = logging.getLogger(__name__)
 

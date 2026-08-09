@@ -36,25 +36,11 @@ Usage::
 
 """
 
-from src.etl.data_description import DataDescription
-
-DESCRIPTION = DataDescription(
-    producer="load_openfigi",
-    label="OpenFIGI Enrichment",
-    theme="securities",
-    summary="Ticker and identifier enrichment for instruments already held.",
-    entities=(
-        "Listing",
-    ),
-    coverage="Enrichment only. It adds identifiers to existing records and introduces no new companies.",
-    upstream="OpenFIGI",
-    update_freq="weekly",
-    answers=(),
-)
 # pylint: disable=too-many-lines  # cohesive single-mode loader; the
 # concurrency path pushed it just over 1000 lines and splitting the
 # ISIN/LEI runners into separate modules isn't worth the indirection.
 from __future__ import annotations
+
 
 import argparse
 import logging
@@ -71,6 +57,22 @@ from fontem_events import EventLog
 from neo4j import GraphDatabase
 
 from src.etl._http import with_headers
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_openfigi",
+    label="OpenFIGI Enrichment",
+    theme="securities",
+    summary="Ticker and identifier enrichment for instruments already held.",
+    entities=(
+        "Listing",
+    ),
+    coverage="Enrichment only. It adds identifiers to existing records and introduces no new companies.",
+    upstream="OpenFIGI",
+    update_freq="weekly",
+    answers=(),
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +200,6 @@ RETURN c.lei AS lei, c.gmr_id AS company_gmr_id,
        [] AS witness_isins
 LIMIT $limit
 """
-
 
 
 # ── LEI-REEVAL mode ────────────────────────────────────────────────

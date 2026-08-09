@@ -13,7 +13,22 @@ Usage:
     python -m src.etl.load_us_companies --edgar-dir /edgar-data/full
 """
 
+from __future__ import annotations
+
+
+import argparse
+import json
+import logging
+import os
+import time
+import uuid
+from pathlib import Path
+
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 from src.etl.data_description import DataDescription
+
+from . import gmr_id
 
 DESCRIPTION = DataDescription(
     producer="load_us_companies",
@@ -31,20 +46,7 @@ DESCRIPTION = DataDescription(
         "Which ticker belongs to a US company",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import json
-import logging
-import os
-import time
-import uuid
-from pathlib import Path
-
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-
-from . import gmr_id
 
 logger = logging.getLogger(__name__)
 

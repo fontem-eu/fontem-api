@@ -21,6 +21,22 @@ Usage:
     python -m src.etl.load_nuts --file /tmp/NUTS2024.csv
 """
 
+from __future__ import annotations
+
+
+import argparse
+import csv
+import io
+import logging
+import pathlib
+import sys
+import time
+import uuid
+
+from fontem_event_schemas import builders
+from fontem_events import EventLog
+
+from src.services.location_service import LocationService
 from src.etl.data_description import DataDescription
 
 DESCRIPTION = DataDescription(
@@ -38,21 +54,7 @@ DESCRIPTION = DataDescription(
         "Which region a place belongs to, and what sits inside a region",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import csv
-import io
-import logging
-import pathlib
-import sys
-import time
-import uuid
-
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-
-from src.services.location_service import LocationService
 
 logger = logging.getLogger(__name__)
 

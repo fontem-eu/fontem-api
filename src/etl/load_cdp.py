@@ -16,6 +16,22 @@ Usage:
     python -m src.etl.load_cdp --year 2025
 """
 
+from __future__ import annotations
+
+
+import argparse
+import hashlib
+import logging
+import os
+import time
+import uuid
+
+import httpx
+from fontem_event_schemas import builders
+from fontem_events import EventLog
+from neo4j import GraphDatabase
+
+from src.etl._http import HTTP_HEADERS
 from src.etl.data_description import DataDescription
 
 DESCRIPTION = DataDescription(
@@ -33,21 +49,7 @@ DESCRIPTION = DataDescription(
         "How a company scores on climate disclosure",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import hashlib
-import logging
-import os
-import time
-import uuid
-
-import httpx
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-from neo4j import GraphDatabase
-
-from src.etl._http import HTTP_HEADERS
 
 logger = logging.getLogger(__name__)
 

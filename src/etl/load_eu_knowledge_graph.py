@@ -26,7 +26,26 @@ Usage:
     python -m src.etl.load_eu_knowledge_graph --since 2025-09-01
 """
 
+from __future__ import annotations
+
+
+import argparse
+import csv
+import io
+import logging
+import sys
+import time
+import uuid
+
+import httpx
+from fontem_event_schemas import builders
+from fontem_events import EventLog
+
+from src.etl._http import HTTP_HEADERS
+from src.services.location_service import LocationService
 from src.etl.data_description import DataDescription
+
+from . import gmr_id
 
 DESCRIPTION = DataDescription(
     producer="load_eu_knowledge_graph",
@@ -44,24 +63,7 @@ DESCRIPTION = DataDescription(
         "How much EU cohesion funding an organisation received",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import csv
-import io
-import logging
-import sys
-import time
-import uuid
-
-import httpx
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-
-from src.etl._http import HTTP_HEADERS
-from src.services.location_service import LocationService
-
-from . import gmr_id
 
 logger = logging.getLogger(__name__)
 

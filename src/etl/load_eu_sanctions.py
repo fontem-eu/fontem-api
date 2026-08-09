@@ -34,7 +34,26 @@ Usage:
         --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
 """
 
+from __future__ import annotations
+
+
+import argparse
+import logging
+import sys
+import time
+import uuid
+import xml.etree.ElementTree as ET
+
+import httpx
+from fontem_event_schemas import builders
+from fontem_events import EventLog
+
+from src.services.location_service import LocationService
 from src.etl.data_description import DataDescription
+
+from . import gmr_id
+from ._hooks import resolve_entity
+from ._http_retry import get_with_retry
 
 DESCRIPTION = DataDescription(
     producer="load_eu_sanctions",
@@ -51,24 +70,7 @@ DESCRIPTION = DataDescription(
         "Whether a person or entity is under EU sanctions, and since when",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import logging
-import sys
-import time
-import uuid
-import xml.etree.ElementTree as ET
-
-import httpx
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-
-from src.services.location_service import LocationService
-
-from . import gmr_id
-from ._hooks import resolve_entity
-from ._http_retry import get_with_retry
 
 logger = logging.getLogger(__name__)
 

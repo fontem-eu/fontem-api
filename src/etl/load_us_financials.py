@@ -26,6 +26,21 @@ Usage:
     python -m src.etl.load_us_financials --edgar-dir /edgar-data/full
 """
 
+from __future__ import annotations
+
+
+import argparse
+import json
+import datetime
+import logging
+import os
+import time
+import uuid
+from pathlib import Path
+
+from fontem_event_schemas import builders
+from fontem_event_schemas.validate import EventValidationError
+from fontem_events import EventLog
 from src.etl.data_description import DataDescription
 
 DESCRIPTION = DataDescription(
@@ -43,20 +58,7 @@ DESCRIPTION = DataDescription(
         "Revenue, assets or profit for a US company by year",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import json
-import datetime
-import logging
-import os
-import time
-import uuid
-from pathlib import Path
-
-from fontem_event_schemas import builders
-from fontem_event_schemas.validate import EventValidationError
-from fontem_events import EventLog
 
 logger = logging.getLogger(__name__)
 

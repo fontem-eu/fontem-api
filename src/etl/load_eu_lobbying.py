@@ -30,6 +30,24 @@ Usage:
     python -m src.etl.load_eu_lobbying
 """
 
+from __future__ import annotations
+
+
+import argparse
+import datetime
+import logging
+import os
+import uuid
+import xml.etree.ElementTree as ET
+from typing import Any
+
+import httpx
+import psycopg
+from fontem_event_schemas import builders
+from fontem_events import EventLog
+
+from src.etl._hooks import resolve_entity
+from src.etl._http import HTTP_HEADERS
 from src.etl.data_description import DataDescription
 
 DESCRIPTION = DataDescription(
@@ -48,23 +66,7 @@ DESCRIPTION = DataDescription(
         "Whether a company that wins public contracts also lobbies",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import datetime
-import logging
-import os
-import uuid
-import xml.etree.ElementTree as ET
-from typing import Any
-
-import httpx
-import psycopg
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-
-from src.etl._hooks import resolve_entity
-from src.etl._http import HTTP_HEADERS
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

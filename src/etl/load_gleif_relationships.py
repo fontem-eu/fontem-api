@@ -12,7 +12,25 @@ Usage:
     python -m src.etl.load_gleif_relationships --file /tmp/gleif-rr.zip
 """
 
+from __future__ import annotations
+
+
+import argparse
+import io
+import logging
+import sys
+import time
+import uuid
+import zipfile
+from xml.etree.ElementTree import iterparse
+
+import httpx
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 from src.etl.data_description import DataDescription
+
+from . import gmr_id
+from ._http import HTTP_HEADERS
 
 DESCRIPTION = DataDescription(
     producer="load_gleif_relationships",
@@ -30,23 +48,7 @@ DESCRIPTION = DataDescription(
         "Whether two companies share a corporate parent",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import io
-import logging
-import sys
-import time
-import uuid
-import zipfile
-from xml.etree.ElementTree import iterparse
-
-import httpx
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-
-from . import gmr_id
-from ._http import HTTP_HEADERS
 
 logger = logging.getLogger(__name__)
 

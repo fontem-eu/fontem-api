@@ -24,7 +24,23 @@ Usage:
     python -m src.etl.load_eu_listings --esef-dir /esef-data/esef
 """
 
+from __future__ import annotations
+
+
+import argparse
+import json
+import datetime
+import logging
+import os
+import time
+import uuid
+from pathlib import Path
+
+from fontem_event_schemas import builders
+from fontem_events import EventLog
 from src.etl.data_description import DataDescription
+
+from . import gmr_id
 
 DESCRIPTION = DataDescription(
     producer="load_eu_listings",
@@ -43,21 +59,7 @@ DESCRIPTION = DataDescription(
         "Financials for an EU listed company",
     ),
 )
-from __future__ import annotations
 
-import argparse
-import json
-import datetime
-import logging
-import os
-import time
-import uuid
-from pathlib import Path
-
-from fontem_event_schemas import builders
-from fontem_events import EventLog
-
-from . import gmr_id
 
 logger = logging.getLogger(__name__)
 
