@@ -138,8 +138,11 @@ def test_unexpected_error_is_not_swallowed():
 def test_description_rejects_unknown_fields():
     """The registry skips a malformed record rather than serving half of one."""
     try:
-        DataDescription(producer="x", label="X", theme="t", summary="s",
-                        nonsense="boom")
+        # pylint catches this statically, which is the same defect the
+        # registry catches at parse time — disabled here because passing the
+        # bad field IS the test.
+        DataDescription(  # pylint: disable=unexpected-keyword-arg
+            producer="x", label="X", theme="t", summary="s", nonsense="boom")
     except TypeError:
         return
     raise AssertionError("DataDescription accepted an unknown field")
