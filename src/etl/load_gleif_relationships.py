@@ -40,7 +40,10 @@ DESCRIPTION = DataDescription(
     entities=(
         "Company",
     ),
-    coverage="Ownership relationships that the parties reported to GLEIF. Undeclared or indirect control is not captured.",
+    coverage=(
+        "Ownership relationships that the parties reported to GLEIF. Undeclared or indirect "
+        "control is not captured."
+    ),
     upstream="GLEIF Level 2",
     update_freq="daily",
     answers=(

@@ -55,7 +55,10 @@ DESCRIPTION = DataDescription(
     entities=(
         "CohesionProject",
     ),
-    coverage="Projects published to Kohesio by managing authorities; national co-funded schemes outside it are absent.",
+    coverage=(
+        "Projects published to Kohesio by managing authorities; national co-funded schemes "
+        "outside it are absent."
+    ),
     upstream="Kohesio",
     update_freq="monthly",
     answers=(

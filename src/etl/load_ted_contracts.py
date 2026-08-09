@@ -66,7 +66,10 @@ DESCRIPTION = DataDescription(
         "Authority",
         "Company",
     ),
-    coverage="EU-threshold tenders only. National below-threshold procurement is not published to TED and is therefore absent here, which is a gap in the source, not in the world.",
+    coverage=(
+        "EU-threshold tenders only. National below-threshold procurement is not published to TED "
+        "and is therefore absent here, which is a gap in the source, not in the world."
+    ),
     upstream="TED (Tenders Electronic Daily)",
     update_freq="daily",
     answers=(

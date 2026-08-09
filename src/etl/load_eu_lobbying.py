@@ -58,7 +58,10 @@ DESCRIPTION = DataDescription(
     entities=(
         "Lobbyist",
     ),
-    coverage="Self-declared entries in the EU Transparency Register. Registration is not fully mandatory, and figures are as declared, not audited.",
+    coverage=(
+        "Self-declared entries in the EU Transparency Register. Registration is not fully "
+        "mandatory, and figures are as declared, not audited."
+    ),
     upstream="EU Transparency Register",
     update_freq="daily",
     answers=(

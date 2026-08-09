@@ -67,7 +67,10 @@ DESCRIPTION = DataDescription(
     entities=(
         "Listing",
     ),
-    coverage="Enrichment only. It adds identifiers to existing records and introduces no new companies.",
+    coverage=(
+        "Enrichment only. It adds identifiers to existing records and introduces no new "
+        "companies."
+    ),
     upstream="OpenFIGI",
     update_freq="weekly",
     answers=(),

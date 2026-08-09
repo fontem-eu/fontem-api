@@ -63,7 +63,10 @@ DESCRIPTION = DataDescription(
     entities=(
         "SanctionedEntity",
     ),
-    coverage="The EU consolidated list. Links from a sanctioned entity to a company in the graph are review candidates, never automatic assertions.",
+    coverage=(
+        "The EU consolidated list. Links from a sanctioned entity to a company in the graph are "
+        "review candidates, never automatic assertions."
+    ),
     upstream="EU Consolidated Financial Sanctions List",
     update_freq="daily",
     answers=(
