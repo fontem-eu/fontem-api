@@ -22,6 +22,24 @@ Usage:
     python -m src.etl.load_firds --since 2025-09-01
     python -m src.etl.load_firds --file /tmp/firds_delta.zip
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_firds",
+    label="FIRDS Instruments",
+    theme="securities",
+    summary="Reference data for financial instruments traded in the EU.",
+    entities=(
+        "Listing",
+    ),
+    coverage="Instruments admitted to trading on EU venues.",
+    upstream="ESMA FIRDS",
+    update_freq="daily",
+    answers=(
+        "Which venue an instrument trades on, and under which ISIN",
+    ),
+)
 from __future__ import annotations
 
 import argparse

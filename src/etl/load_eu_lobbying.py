@@ -29,6 +29,25 @@ sink does not retain "last seen" entries.
 Usage:
     python -m src.etl.load_eu_lobbying
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_eu_lobbying",
+    label="EU Lobbying",
+    theme="influence",
+    summary="Organisations registered to lobby the EU institutions, with declared spend.",
+    entities=(
+        "Lobbyist",
+    ),
+    coverage="Self-declared entries in the EU Transparency Register. Registration is not fully mandatory, and figures are as declared, not audited.",
+    upstream="EU Transparency Register",
+    update_freq="daily",
+    answers=(
+        "Who lobbies Brussels on a given interest, and what they declare spending",
+        "Whether a company that wins public contracts also lobbies",
+    ),
+)
 from __future__ import annotations
 
 import argparse

@@ -15,6 +15,25 @@ Usage:
     python -m src.etl.load_gleif
     python -m src.etl.load_gleif --file /tmp/gleif-lei2.zip
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_gleif",
+    label="GLEIF Entities",
+    theme="corporate",
+    summary="Legal entities worldwide with their official registered identity.",
+    entities=(
+        "Company",
+    ),
+    coverage="Only entities that hold an LEI. Small firms without one are absent.",
+    upstream="GLEIF Level 1",
+    update_freq="daily",
+    answers=(
+        "The registered name, country and status of a company",
+        "Whether two similarly named companies are the same legal entity",
+    ),
+)
 from __future__ import annotations
 
 import argparse

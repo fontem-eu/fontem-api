@@ -15,6 +15,24 @@ silently skipped (silently miss > silently corrupt). The full
 Usage:
     python -m src.etl.load_cdp --year 2025
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_cdp",
+    label="CDP Climate Disclosure",
+    theme="climate",
+    summary="Corporate climate disclosure scores.",
+    entities=(
+        "Disclosure",
+    ),
+    coverage="Companies that disclose to CDP; non-disclosers are absent rather than scored badly.",
+    upstream="CDP Open Data Portal",
+    update_freq="yearly",
+    answers=(
+        "How a company scores on climate disclosure",
+    ),
+)
 from __future__ import annotations
 
 import argparse

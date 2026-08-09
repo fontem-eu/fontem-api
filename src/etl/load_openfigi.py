@@ -35,6 +35,22 @@ Usage::
     python -m src.etl.load_openfigi --mode isin   # legacy FIRDS enrichment
 
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_openfigi",
+    label="OpenFIGI Enrichment",
+    theme="securities",
+    summary="Ticker and identifier enrichment for instruments already held.",
+    entities=(
+        "Listing",
+    ),
+    coverage="Enrichment only. It adds identifiers to existing records and introduces no new companies.",
+    upstream="OpenFIGI",
+    update_freq="weekly",
+    answers=(),
+)
 # pylint: disable=too-many-lines  # cohesive single-mode loader; the
 # concurrency path pushed it just over 1000 lines and splitting the
 # ISIN/LEI runners into separate modules isn't worth the indirection.

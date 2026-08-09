@@ -18,6 +18,28 @@ Usage:
     python -m src.etl.load_ted_contracts --from 2024-01 --to 2026-03
     python -m src.etl.load_ted_contracts --file /tmp/ted-2024-06.tar
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_ted_contracts",
+    label="TED Contracts",
+    theme="procurement",
+    summary="Public tenders and contract awards published by EU public bodies.",
+    entities=(
+        "Contract",
+        "Authority",
+        "Company",
+    ),
+    coverage="EU-threshold tenders only. National below-threshold procurement is not published to TED and is therefore absent here, which is a gap in the source, not in the world.",
+    upstream="TED (Tenders Electronic Daily)",
+    update_freq="daily",
+    answers=(
+        "Which companies won public contracts, and for how much",
+        "What a public authority bought and from whom",
+        "How often a tender attracted only one bidder",
+    ),
+)
 from __future__ import annotations
 
 import argparse

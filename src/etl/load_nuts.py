@@ -20,6 +20,24 @@ Usage:
     python -m src.etl.load_nuts
     python -m src.etl.load_nuts --file /tmp/NUTS2024.csv
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_nuts",
+    label="NUTS Regions",
+    theme="geography",
+    summary="The EU's official regional hierarchy, from country down to small region.",
+    entities=(
+        "NUTSRegion",
+    ),
+    coverage="NUTS levels 0-3.",
+    upstream="Eurostat NUTS",
+    update_freq="one-off",
+    answers=(
+        "Which region a place belongs to, and what sits inside a region",
+    ),
+)
 from __future__ import annotations
 
 import argparse

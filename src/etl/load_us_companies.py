@@ -12,6 +12,25 @@ through the Listing node, not through a property fan-out on Company.
 Usage:
     python -m src.etl.load_us_companies --edgar-dir /edgar-data/full
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_us_companies",
+    label="US Companies (EDGAR)",
+    theme="corporate",
+    summary="US public companies and their stock listings.",
+    entities=(
+        "Company",
+        "Listing",
+    ),
+    coverage="US SEC registrants only.",
+    upstream="SEC EDGAR",
+    update_freq="weekly",
+    answers=(
+        "Which ticker belongs to a US company",
+    ),
+)
 from __future__ import annotations
 
 import argparse

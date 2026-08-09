@@ -23,6 +23,26 @@ cleaned up by a follow-up sweep if it ever becomes a problem.
 Usage:
     python -m src.etl.load_eu_listings --esef-dir /esef-data/esef
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_eu_listings",
+    label="EU Filings (ESEF)",
+    theme="corporate",
+    summary="EU listed companies and the financials in their annual reports.",
+    entities=(
+        "Company",
+        "Listing",
+        "FinancialYear",
+    ),
+    coverage="Issuers filing under the EU single electronic format. Private companies are absent.",
+    upstream="ESEF filings",
+    update_freq="weekly",
+    answers=(
+        "Financials for an EU listed company",
+    ),
+)
 from __future__ import annotations
 
 import argparse

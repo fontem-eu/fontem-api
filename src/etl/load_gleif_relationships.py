@@ -11,6 +11,25 @@ Usage:
     python -m src.etl.load_gleif_relationships
     python -m src.etl.load_gleif_relationships --file /tmp/gleif-rr.zip
 """
+
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_gleif_relationships",
+    label="GLEIF Relationships",
+    theme="corporate",
+    summary="Parent-subsidiary ownership links between legal entities.",
+    entities=(
+        "Company",
+    ),
+    coverage="Ownership relationships that the parties reported to GLEIF. Undeclared or indirect control is not captured.",
+    upstream="GLEIF Level 2",
+    update_freq="daily",
+    answers=(
+        "Who owns a company, and what it owns",
+        "Whether two companies share a corporate parent",
+    ),
+)
 from __future__ import annotations
 
 import argparse
