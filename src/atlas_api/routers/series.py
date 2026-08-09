@@ -6,6 +6,7 @@ import json
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.atlas_api.schemas import SeriesResponse
+from src.api.agent_tools import agent_tool
 
 router = APIRouter(tags=["atlas"])
 
@@ -20,7 +21,15 @@ def _stats_source(request: Request):
     return src
 
 
-@router.get("/series", response_model=SeriesResponse)
+@router.get("/series",
+    openapi_extra=agent_tool(
+        name="get_series",
+        when=("the user wants actual statistical values for regions or years — "
+              "population, GDP, life expectancy, crime, migration"),
+        group="statistics",
+        params=("dataset", "geo", "nuts_level", "start", "end",
+                "dimensions"),
+        core=True))
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 def fetch_series(
     request: Request,

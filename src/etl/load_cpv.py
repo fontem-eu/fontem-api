@@ -30,7 +30,9 @@ Usage::
     python -m src.etl.load_cpv --lang en       # English only
     python -m src.etl.load_cpv --download      # refresh source data
 """
+
 from __future__ import annotations
+
 
 import argparse
 import gzip
@@ -44,6 +46,24 @@ from xml.etree import ElementTree as ET
 import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_cpv",
+    label="CPV Vocabulary",
+    theme="reference",
+    summary="The EU's classification of what public contracts are buying.",
+    entities=(
+        "CPV",
+    ),
+    coverage="Reference taxonomy used to categorise tenders by subject.",
+    upstream="EU CPV",
+    update_freq="one-off",
+    answers=(
+        "What category of goods or services a contract covers",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

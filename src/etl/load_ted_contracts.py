@@ -18,7 +18,9 @@ Usage:
     python -m src.etl.load_ted_contracts --from 2024-01 --to 2026-03
     python -m src.etl.load_ted_contracts --file /tmp/ted-2024-06.tar
 """
+
 from __future__ import annotations
+
 
 import argparse
 import logging
@@ -41,6 +43,7 @@ from eforms.parser import parse as parse_notice_xml
 from eforms.stream import stream_notices
 
 from src.data.ted_raw_store import TedRawStore, TedPackageStore
+from src.etl.data_description import DataDescription
 from ..services.currency.client import CurrencyClient
 from ..services.location_service import LocationService
 from ..services.ted_lookup import TedLookupError, resolve_publication_number
@@ -52,6 +55,30 @@ from .scale_normalization import normalize_scale
 from . import value_review_queue
 from .ted_matcher import TedMatcher
 from . import ted_search
+
+DESCRIPTION = DataDescription(
+    producer="load_ted_contracts",
+    label="TED Contracts",
+    theme="procurement",
+    summary="Public tenders and contract awards published by EU public bodies.",
+    entities=(
+        "Contract",
+        "Authority",
+        "Company",
+    ),
+    coverage=(
+        "EU-threshold tenders only. National below-threshold procurement is not published to TED "
+        "and is therefore absent here, which is a gap in the source, not in the world."
+    ),
+    upstream="TED (Tenders Electronic Daily)",
+    update_freq="daily",
+    answers=(
+        "Which companies won public contracts, and for how much",
+        "What a public authority bought and from whom",
+        "How often a tender attracted only one bidder",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

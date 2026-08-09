@@ -21,6 +21,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.api.di import make_container
 
+from src.api.routers.catalogue import router as catalogue_router
 from src.api.routers.fundamentals import router as fundamentals_router
 from src.api.routers.gmr import router
 from src.api.routers.health import router as health_router
@@ -106,6 +107,7 @@ app.include_router(prices_router)
 app.include_router(health_router)
 app.include_router(contracts_router)
 app.include_router(data_quality_router)
+app.include_router(catalogue_router)
 app.include_router(legislative_dq_router)
 app.include_router(petitions_router)
 app.include_router(dq_assertions_router)

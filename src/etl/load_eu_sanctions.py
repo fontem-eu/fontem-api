@@ -33,7 +33,9 @@ Usage:
     python -m src.etl.load_eu_sanctions --file /tmp/sanctions.xml \\
         --virtuoso-sparql-endpoint http://virtuoso.gmr.svc.cluster.local:8890/sparql
 """
+
 from __future__ import annotations
+
 
 import argparse
 import logging
@@ -47,10 +49,31 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 
 from src.services.location_service import LocationService
+from src.etl.data_description import DataDescription
 
 from . import gmr_id
 from ._hooks import resolve_entity
 from ._http_retry import get_with_retry
+
+DESCRIPTION = DataDescription(
+    producer="load_eu_sanctions",
+    label="EU Sanctions",
+    theme="influence",
+    summary="Persons and entities under EU financial sanctions.",
+    entities=(
+        "SanctionedEntity",
+    ),
+    coverage=(
+        "The EU consolidated list. Links from a sanctioned entity to a company in the graph are "
+        "review candidates, never automatic assertions."
+    ),
+    upstream="EU Consolidated Financial Sanctions List",
+    update_freq="daily",
+    answers=(
+        "Whether a person or entity is under EU sanctions, and since when",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

@@ -25,7 +25,9 @@ prune stale (gmr_id, year, source) rows.
 Usage:
     python -m src.etl.load_us_financials --edgar-dir /edgar-data/full
 """
+
 from __future__ import annotations
+
 
 import argparse
 import json
@@ -39,6 +41,24 @@ from pathlib import Path
 from fontem_event_schemas import builders
 from fontem_event_schemas.validate import EventValidationError
 from fontem_events import EventLog
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_us_financials",
+    label="US Financials (EDGAR)",
+    theme="corporate",
+    summary="Reported annual financials for US public companies.",
+    entities=(
+        "FinancialYear",
+    ),
+    coverage="Figures as filed with the SEC; no restatement reconciliation.",
+    upstream="SEC EDGAR companyfacts",
+    update_freq="weekly",
+    answers=(
+        "Revenue, assets or profit for a US company by year",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

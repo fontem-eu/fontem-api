@@ -20,7 +20,9 @@ Usage:
     python -m src.etl.load_eu_petitions            # live fetch + emit
     python -m src.etl.load_eu_petitions --file X   # replay an artifact
 """
+
 from __future__ import annotations
+
 
 import argparse
 import datetime
@@ -37,8 +39,26 @@ import uuid
 import psycopg
 from fontem_event_schemas import builders
 from fontem_events import EventLog
+from src.etl.data_description import DataDescription
 
 from ._http_retry import get_with_retry
+
+DESCRIPTION = DataDescription(
+    producer="load_eu_petitions",
+    label="European Citizens' Initiatives",
+    theme="influence",
+    summary="European Citizens' Initiatives, their signature counts and outcomes.",
+    entities=(
+        "Initiative",
+    ),
+    coverage="The official ECI register.",
+    upstream="ECI register",
+    update_freq="weekly",
+    answers=(
+        "Which citizens' initiatives reached the Commission, and how many signatures they gathered",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

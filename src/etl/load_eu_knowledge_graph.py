@@ -25,7 +25,9 @@ Usage:
     python -m src.etl.load_eu_knowledge_graph --file /tmp/PT-pp21-27-latest.csv
     python -m src.etl.load_eu_knowledge_graph --since 2025-09-01
 """
+
 from __future__ import annotations
+
 
 import argparse
 import csv
@@ -41,8 +43,30 @@ from fontem_events import EventLog
 
 from src.etl._http import HTTP_HEADERS
 from src.services.location_service import LocationService
+from src.etl.data_description import DataDescription
 
 from . import gmr_id
+
+DESCRIPTION = DataDescription(
+    producer="load_eu_knowledge_graph",
+    label="EU Cohesion (Kohesio)",
+    theme="influence",
+    summary="EU cohesion-policy funded projects and who received the money.",
+    entities=(
+        "CohesionProject",
+    ),
+    coverage=(
+        "Projects published to Kohesio by managing authorities; national co-funded schemes "
+        "outside it are absent."
+    ),
+    upstream="Kohesio",
+    update_freq="monthly",
+    answers=(
+        "Which EU-funded projects ran in a region, and who benefited",
+        "How much EU cohesion funding an organisation received",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

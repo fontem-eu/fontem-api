@@ -15,7 +15,9 @@ Usage:
     python -m src.etl.load_gleif
     python -m src.etl.load_gleif --file /tmp/gleif-lei2.zip
 """
+
 from __future__ import annotations
+
 
 import argparse
 import io
@@ -31,9 +33,28 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 
 from src.services.location_service import LocationService
+from src.etl.data_description import DataDescription
 
 from . import gmr_id
 from ._http import HTTP_HEADERS
+
+DESCRIPTION = DataDescription(
+    producer="load_gleif",
+    label="GLEIF Entities",
+    theme="corporate",
+    summary="Legal entities worldwide with their official registered identity.",
+    entities=(
+        "Company",
+    ),
+    coverage="Only entities that hold an LEI. Small firms without one are absent.",
+    upstream="GLEIF Level 1",
+    update_freq="daily",
+    answers=(
+        "The registered name, country and status of a company",
+        "Whether two similarly named companies are the same legal entity",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

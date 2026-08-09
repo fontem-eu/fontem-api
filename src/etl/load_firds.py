@@ -22,7 +22,9 @@ Usage:
     python -m src.etl.load_firds --since 2025-09-01
     python -m src.etl.load_firds --file /tmp/firds_delta.zip
 """
+
 from __future__ import annotations
+
 
 import argparse
 import io
@@ -41,6 +43,24 @@ from fontem_events import EventLog
 from neo4j import GraphDatabase
 
 from src.etl._http_retry import RateLimiter, get_with_retry
+from src.etl.data_description import DataDescription
+
+DESCRIPTION = DataDescription(
+    producer="load_firds",
+    label="FIRDS Instruments",
+    theme="securities",
+    summary="Reference data for financial instruments traded in the EU.",
+    entities=(
+        "Listing",
+    ),
+    coverage="Instruments admitted to trading on EU venues.",
+    upstream="ESMA FIRDS",
+    update_freq="daily",
+    answers=(
+        "Which venue an instrument trades on, and under which ISIN",
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 

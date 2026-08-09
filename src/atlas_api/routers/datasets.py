@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from src.atlas_api.schemas import DatasetSummary, SliceStats, YearAvailability
+from src.api.agent_tools import agent_tool
 
 router = APIRouter(tags=["atlas"])
 
@@ -18,7 +19,12 @@ def _stats_source(request: Request):
     return src
 
 
-@router.get("/datasets", response_model=list[DatasetSummary])
+@router.get("/datasets",
+    openapi_extra=agent_tool(
+        name="list_datasets",
+        when=("the user asks what statistics exist, or you need a dataset code before "
+              "reading values"),
+        group="statistics", core=True))
 def list_datasets(request: Request) -> list[DatasetSummary]:
     """Every enabled dataset + its last successful sync.
 
@@ -44,6 +50,12 @@ def list_slice_stats(code: str, request: Request) -> list[SliceStats]:
 
 @router.get(
     "/datasets/{code}/availability",
+
+    openapi_extra=agent_tool(
+        name="dataset_year_coverage",
+        when=("you need to know which years and regions a dataset actually covers before "
+              "quoting a trend"),
+        group="statistics"),
     response_model=list[YearAvailability],
 )
 def list_year_availability(code: str, request: Request) -> list[YearAvailability]:

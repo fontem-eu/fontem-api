@@ -25,10 +25,18 @@ from src.services.ted_lookup import (
 )
 
 
+from src.api.agent_tools import agent_tool
+
 router = APIRouter(tags=["contracts"])
 
 
-@router.get("/companies/{gmr_id}/contracts")
+@router.get(
+    "/companies/{gmr_id}/contracts",
+    openapi_extra=agent_tool(
+        name="company_contracts",
+        when="the user asks what a specific company won, after you have its id",
+        group="contracts"),
+)
 @inject
 def company_contracts(
     gmr_id: str,
@@ -46,7 +54,13 @@ def company_contracts(
     )
 
 
-@router.get("/companies/{gmr_id}/cohesion-grants")
+@router.get(
+    "/companies/{gmr_id}/cohesion-grants",
+    openapi_extra=agent_tool(
+        name="company_cohesion_grants",
+        when="the user asks about EU cohesion or structural funding a company received",
+        group="contracts"),
+)
 @inject
 def company_cohesion_grants(
     gmr_id: str,
@@ -124,7 +138,13 @@ def company_profile(
     }
 
 
-@router.get("/authorities/{authority_id}/contracts")
+@router.get(
+    "/authorities/{authority_id}/contracts",
+    openapi_extra=agent_tool(
+        name="authority_contracts",
+        when="the user asks what a public buyer purchased, after you have its id",
+        group="contracts"),
+)
 @inject
 def authority_contracts(
     authority_id: str,
@@ -162,7 +182,13 @@ def authority_profile(
     }
 
 
-@router.get("/contracts/sectors")
+@router.get(
+    "/contracts/sectors",
+    openapi_extra=agent_tool(
+        name="contract_sectors",
+        when="the user asks which sectors or categories public money went to",
+        group="contracts"),
+)
 @inject
 def sector_summary(
     country: str | None = Query(None),
@@ -174,7 +200,13 @@ def sector_summary(
     return source.get_sector_summary(country=country, year=year)
 
 
-@router.get("/contracts/single-bidder-rate")
+@router.get(
+    "/contracts/single-bidder-rate",
+    openapi_extra=agent_tool(
+        name="single_bidder_rate",
+        when="the user asks about competition, uncontested tenders or procurement red flags",
+        group="contracts"),
+)
 @inject
 def single_bidder_rate(
     country: Annotated[str | None, Query()] = None,
@@ -188,7 +220,13 @@ def single_bidder_rate(
     return source.get_single_bidder_stats(country=country, cpv=cpv)
 
 
-@router.get("/contracts/single-bidder-by-country")
+@router.get(
+    "/contracts/single-bidder-by-country",
+    openapi_extra=agent_tool(
+        name="single_bidder_by_country",
+        when="the user compares competition levels between countries",
+        group="contracts"),
+)
 @inject
 def single_bidder_by_country(
     min_sample: Annotated[int, Query(ge=1)] = 20,
