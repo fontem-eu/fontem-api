@@ -19,9 +19,17 @@ endpoint exists to prevent.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Request
 
 from src.etl.registry import discover, undescribed
+
+# What a stats-store read can legitimately fail with, named rather than
+# swallowed. psycopg raises OSError subclasses on connection trouble and
+# psycopg.Error on query trouble; the latter is imported lazily below so this
+# router does not add a hard import to a process that may not use it.
+_SHAPE_ERRORS = (AttributeError, TypeError, ValueError, KeyError)
 
 router = APIRouter(prefix="/catalogue", tags=["catalogue"])
 
@@ -33,9 +41,11 @@ def _datasets(request: Request) -> list[dict]:
         return []
     try:
         rows = src.list_datasets()
-    except Exception:  # pylint: disable=broad-except
+    except (*_SHAPE_ERRORS, OSError) as exc:
         # Never let a dashboard dependency turn "what do you hold" into an
         # error. Half a catalogue is a useful answer; a 500 is not.
+        logging.getLogger(__name__).warning(
+            "catalogue: stats source unavailable (%s)", type(exc).__name__)
         return []
     out = []
     for row in rows:
