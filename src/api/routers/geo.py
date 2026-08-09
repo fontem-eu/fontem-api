@@ -24,6 +24,8 @@ from src.data import geo_ip
 from src.services.location_service import LocationService
 
 
+from src.api.agent_tools import agent_tool
+
 router = APIRouter(prefix="/geo", tags=["geo"])
 
 _EU_GATE_DENY_HTML = """<!doctype html><html lang="en"><head>
@@ -103,7 +105,13 @@ def client_region(request: Request, response: Response) -> dict:
 _BOUNDARIES_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 
-@router.get("/aggregate")
+@router.get(
+    "/aggregate",
+    openapi_extra=agent_tool(
+        name="regional_aggregate",
+        when="the user asks how much activity sits in a region rather than in one entity",
+        group="geography"),
+)
 @inject
 def aggregate(
     level: int = Query(0, ge=0, le=3, description="NUTS level (0–3)"),
@@ -185,7 +193,13 @@ def entity_aggregate(
     }
 
 
-@router.get("/nuts-regions")
+@router.get(
+    "/nuts-regions",
+    openapi_extra=agent_tool(
+        name="list_nuts_regions",
+        when="you need the NUTS code for a place before asking for regional statistics",
+        group="geography"),
+)
 def nuts_regions():
     """Flat, geometry-free list of NUTS regions across all bundled levels.
 
