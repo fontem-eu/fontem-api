@@ -1,0 +1,32 @@
+<h1>The RDF store (SPARQL)</h1>
+<p>Virtuoso, queried with SPARQL. It holds the same entities as the graph,
+expressed as RDF against the Fontem ontology, plus links out to Wikidata.</p>
+<h2>Prefixes</h2>
+<pre><code>PREFIX f:    &lt;http://data.fontem.eu/ontology#&gt;
+PREFIX wdt:  &lt;http://www.wikidata.org/prop/direct/&gt;
+PREFIX rdfs: &lt;http://www.w3.org/2000/01/rdf-schema#&gt;</code></pre>
+<h2>When to prefer it over Cypher</h2>
+<p>For chains of unknown depth. A property path such as
+<code>f:subsidiaryOf*</code> walks an ownership chain to its top in one
+expression, and <code>FILTER NOT EXISTS</code> then keeps only the ultimate
+parent. Expressing the same rollup in Cypher means a variable-length match
+and a good deal more care.</p>
+<p>It is also the store to use when a query needs Wikidata properties —
+country of registration, industry classification — that live on the RDF side
+of the mirror.</p>
+<pre><code>SELECT ?parent (SUM(?value) AS ?totalEur) (COUNT(?contract) AS ?contracts)
+WHERE {
+  ?contract a f:Contract ;
+            f:awardedBy ?authority ;
+            f:awardedTo ?supplier ;
+            f:valueEur ?value .
+  ?authority wdt:P17 "DEU" .
+  ?supplier f:subsidiaryOf* ?top .
+  FILTER NOT EXISTS { ?top f:subsidiaryOf ?any }
+  ?top rdfs:label ?parent .
+}
+GROUP BY ?parent
+ORDER BY DESC(?totalEur)
+LIMIT 20</code></pre>
+<p>Results come back as bindings and are flattened to columns and rows
+before a plot sees them, so a SPARQL source is used exactly like any other.</p>

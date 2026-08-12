@@ -1,0 +1,27 @@
+<h1>What the Data Studio is</h1>
+<p>The Data Studio is where an analysis is built and kept. It has three
+levels, and everything else follows from them.</p>
+<dl>
+  <dt>Project</dt>
+  <dd>The container. Holds source queries and the plots built from them, and
+  can be attached to an investigation so it sits alongside the articles that
+  cite it.</dd>
+  <dt>Source query</dt>
+  <dd>One query against one data store, producing a table of rows. A project
+  usually has several. Sources are named, and plots refer to them by name.</dd>
+  <dt>Plot</dt>
+  <dd>One or more sources, optionally combined by a SQL transform that runs
+  in the browser, rendered as a chart.</dd>
+</dl>
+<p>The split matters: a source is <em>where the numbers come from</em> and is
+re-run against the live store; a plot is <em>how they are shaped and shown</em>
+and costs nothing to change. Reshaping a chart never re-queries the database.</p>
+<h2>The usual order</h2>
+<ol>
+  <li>Create a project and name it after the question.</li>
+  <li>Add one source query per store you need. Run it and check the columns.</li>
+  <li>Add a plot: pick the sources, write a transform if they need joining or
+  aggregating, choose a chart type and the columns for each axis.</li>
+</ol>
+<p>Plots can be inserted into a data story, which is how an analysis becomes
+an article.</p>

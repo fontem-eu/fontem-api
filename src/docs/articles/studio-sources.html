@@ -1,0 +1,29 @@
+<h1>Adding a source query</h1>
+<p>A source is one query against one store. Choosing the store is the first
+decision, and the three are not interchangeable — each holds different data
+and speaks a different language.</p>
+<table>
+  <tr><th>Language</th><th>Store</th><th>Holds</th></tr>
+  <tr><td><code>cypher</code></td><td>Neo4j graph</td>
+      <td>Companies, contracts, authorities, ownership, sanctions, lobbying</td></tr>
+  <tr><td><code>sql</code></td><td>Statistics warehouse</td>
+      <td>Eurostat observations by region and year — 200M+ rows</td></tr>
+  <tr><td><code>sparql</code></td><td>Virtuoso RDF</td>
+      <td>The same entities as RDF, for ontology and transitive queries</td></tr>
+</table>
+<p>A rough rule: <strong>who did what with whom</strong> is the graph;
+<strong>how much, where, over time</strong> is the warehouse; <strong>chains
+of relationships to an unknown depth</strong> are RDF, where a property path
+does in one line what Cypher needs a variable-length match for.</p>
+<h2>Limits</h2>
+<p>Every source runs through a read-only proxy with a row cap and a timeout.
+Queries are for shaping a result set, not for exporting the database: filter
+and aggregate in the query rather than pulling rows to count them later.
+Query text is capped at 8000 characters.</p>
+<h2>What a source returns</h2>
+<p>All three engines return the same shape — a list of column names and a
+list of rows — so a plot does not need to know which store produced its
+input. SPARQL bindings are flattened to that shape automatically.</p>
+<p>Run a source before building a plot on it. The column names it returns are
+what the plot's axes refer to, and they are not always what the query
+appears to name them.</p>
