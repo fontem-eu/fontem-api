@@ -59,6 +59,11 @@ async def list_docs() -> dict:
 
 @router.get(
     "/{article_id}",
+    # Declared rather than left implicit: this spec is what generates the
+    # agent tool, so an undocumented failure mode is one the model cannot
+    # be told about either.
+    responses={404: {"description": "No article with that id; the detail "
+                                    "lists the ids that do exist."}},
     openapi_extra=agent_tool(
         name="get_doc",
         when=(
