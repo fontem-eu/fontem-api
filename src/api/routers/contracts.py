@@ -323,6 +323,13 @@ def _fulltext_query(q: str) -> str:
     so "siemens mob" finds "Siemens Mobility" while "siemens" alone does
     not drag in every company sharing one word.
 
+    Tokens are lowercased. AND, OR and NOT are reserved words to the query
+    parser in uppercase only, and one in a non-final position is a hard
+    parse failure — searching for `") OR (1=1` raised
+    ProcedureCallFailed rather than returning nothing. The index analyzer
+    lowercases what it stores, so this changes no result: "+Siemens*" and
+    "+siemens*" both match 722 companies.
+
     The index is only a candidate generator: the CONTAINS predicate
     downstream still decides what matches, so a slightly wide net costs
     nothing but a few rows.
@@ -330,7 +337,7 @@ def _fulltext_query(q: str) -> str:
     Returns "" for input with no usable tokens (all punctuation). Callers
     skip the branch rather than run an empty query.
     """
-    tokens = [t for t in _SPLIT_ON.split(q.strip()) if t]
+    tokens = [t.lower() for t in _SPLIT_ON.split(q.strip()) if t]
     if not tokens:
         return ""
     return " ".join("+" + t for t in tokens[:-1]) + (
