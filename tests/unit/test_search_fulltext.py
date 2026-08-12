@@ -11,6 +11,8 @@ Measured on production across ten terms: 28.3s -> 0.3s, identical top-5.
 """
 import pathlib
 
+from src.api import graph_schema
+from src.api.routers import contracts
 from src.api.routers.contracts import _fulltext_query
 
 
@@ -59,3 +61,26 @@ def test_the_slow_shape_is_gone_from_both_branches():
         "a branch still scans contracts to find companies"
     assert body.count("db.index.fulltext.queryNodes('company_name_ft'") == 2, \
         "both the procurement and cohesion branches should use the index"
+
+
+def test_the_index_the_search_depends_on_is_declared_in_code():
+    """It existed in production and nowhere else.
+
+    Created by hand at some point and guaranteed by nothing, so the first
+    deploy that used it returned zero results in testing while every health
+    check stayed green — a missing index is silent here, not loud. An index
+    a query depends on belongs next to the query.
+    """
+    declared = graph_schema.COMPANY_NAME_FULLTEXT
+    used = pathlib.Path(contracts.__file__).read_text("utf-8")
+    assert f"'{declared}'" in used, "search reads an index nothing declares"
+
+
+def test_ensuring_indexes_never_takes_the_api_down():
+    """An API that refuses to start because it could not create an index is
+    worse than one that starts and logs."""
+    class Broken:
+        def session(self):
+            raise RuntimeError("neo4j unreachable")
+
+    assert graph_schema.ensure_indexes(Broken()) == []

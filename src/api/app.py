@@ -21,6 +21,8 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.api.di import make_container
 
+from src.data.graph.neo4j_client import Neo4jClient
+from src.api import graph_schema
 from src.api.routers.catalogue import router as catalogue_router
 from src.api.routers.docs import router as docs_router
 from src.api.routers.fundamentals import router as fundamentals_router
@@ -54,6 +56,16 @@ from src.atlas_api.app import _attach_state as attach_atlas_state
 @asynccontextmanager
 async def _lifespan(application: FastAPI):  # pylint: disable=unused-argument
     logger.info("GMR Stock Analysis API starting up…")
+    # The full-text index /search depends on. Idempotent, and a no-op where
+    # it already exists — it existed only in production until now, which is
+    # why a deploy that used it returned zero results everywhere else.
+    try:
+        container = application.state.dishka_container
+        async with container() as request_container:
+            neo4j = await request_container.get(Neo4jClient)
+            graph_schema.ensure_indexes(neo4j)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("graph index check skipped: {}", exc)
     yield
     logger.info("GMR Stock Analysis API shutting down…")
 
