@@ -32,12 +32,9 @@ router = APIRouter(prefix="/help", tags=["docs"])
     openapi_extra=agent_tool(
         name="list_docs",
         when=(
-            "List the platform's documentation articles — ids, titles and "
-            "one-line summaries, grouped by section. Call this when the user "
-            "asks how a feature works, or before answering a 'how do I' "
-            "question, then read the matching one with get_doc. Covers the "
-            "Data Studio and the query language and schema of each data "
-            "store."
+            "Lists the platform's documentation articles — ids, titles "
+            "and one-line summaries, grouped by section. Covers the Data "
+            "Studio and the query language and schema of each data store."
         ),
         group="docs",
         core=True,
@@ -67,10 +64,7 @@ async def list_docs() -> dict:
     openapi_extra=agent_tool(
         name="get_doc",
         when=(
-            "Read one documentation article in full, by an id from "
-            "list_docs. Use it before explaining how to build a query or a "
-            "plot, and before writing a query against a store whose schema "
-            "you have not read this turn."
+            "Returns one documentation article in full, by its id."
         ),
         group="docs",
         params=("article_id",),
