@@ -1,0 +1,28 @@
+{
+  "articles": [
+    {"id": "studio-overview", "section": "Data Studio", "title": "What the Data Studio is",
+     "summary": "Projects hold source queries and plots. Sources fetch from a store; plots shape and chart them.",
+     "tags": ["studio", "projects", "plots", "queries", "overview"]},
+    {"id": "studio-project", "section": "Data Studio", "title": "Creating a Data Studio project",
+     "summary": "Creating, naming, attaching to an investigation, sharing at viewer or editor level, deleting.",
+     "tags": ["studio", "project", "investigation", "sharing", "access"]},
+    {"id": "studio-sources", "section": "Data Studio", "title": "Adding a source query",
+     "summary": "Choosing between cypher, sql and sparql, what each store holds, row caps, and the shape a source returns.",
+     "tags": ["studio", "query", "cypher", "sql", "sparql", "sources"]},
+    {"id": "studio-plots", "section": "Data Studio", "title": "Building a plot",
+     "summary": "Pick sources, optionally transform them with DuckDB SQL in the browser, choose a chart type and axes.",
+     "tags": ["studio", "plot", "chart", "transform", "duckdb", "axes"]},
+    {"id": "store-graph", "section": "Data stores", "title": "The knowledge graph (Cypher)",
+     "summary": "Neo4j node labels and relationship types, plus the duplicate-entity and direction traps before counting.",
+     "tags": ["neo4j", "cypher", "graph", "schema", "contracts", "ownership"]},
+    {"id": "store-stats", "section": "Data stores", "title": "The statistics warehouse (SQL)",
+     "summary": "observation, dataset and nuts_region columns, the search path, and why unfiltered dimensions double count.",
+     "tags": ["sql", "postgres", "eurostat", "schema", "observation", "nuts"]},
+    {"id": "store-rdf", "section": "Data stores", "title": "The RDF store (SPARQL)",
+     "summary": "Virtuoso, the Fontem ontology prefixes, and when a property path beats a Cypher variable-length match.",
+     "tags": ["sparql", "rdf", "virtuoso", "ontology", "wikidata", "ownership"]},
+    {"id": "store-duckdb", "section": "Data stores", "title": "The browser transform (DuckDB)",
+     "summary": "DuckDB-WASM over already-fetched source rows: always SQL, cannot reach the databases, cannot widen a result.",
+     "tags": ["duckdb", "transform", "browser", "join", "plots"]}
+  ]
+}

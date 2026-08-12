@@ -1,0 +1,50 @@
+<h1>The statistics warehouse (SQL)</h1>
+<p>PostgreSQL with TimescaleDB, queried with SQL. This is the store for
+regional statistics — Eurostat observations by NUTS region and time. Over
+200 million rows.</p>
+<p>The search path is <code>fontem_stats, public</code>, so table names need
+no schema prefix.</p>
+<h2>The three tables an analysis needs</h2>
+<h3><code>observation</code></h3>
+<p>The measurements. One row per dataset, region, time and dimension
+combination.</p>
+<ul>
+  <li><code>dataset_code</code> text — which dataset</li>
+  <li><code>geo_code</code> text — NUTS region code</li>
+  <li><code>time</code> timestamptz — the period</li>
+  <li><code>value</code> double precision — the measurement</li>
+  <li><code>dimensions</code> jsonb — the slice (sex, age, unit, …)</li>
+  <li><code>flags</code> array — Eurostat quality flags</li>
+</ul>
+<h3><code>dataset</code></h3>
+<p>The catalogue. <code>code</code>, <code>label</code>, <code>theme</code>,
+<code>source</code>, <code>source_url</code>, <code>nuts_levels</code>,
+<code>dim_ids</code>, <code>dim_labels</code> (jsonb),
+<code>time_unit</code>, <code>update_freq</code>.</p>
+<p>Query this first when you do not know a dataset code. Guessing codes
+wastes a round trip; they are not memorable.</p>
+<h3><code>nuts_region</code></h3>
+<p><code>code</code>, <code>level</code> (0 country … 3 sub-region),
+<code>name</code>, <code>name_native</code>, <code>parent_code</code>,
+<code>country_code</code>, <code>geometry</code>, <code>area_km2</code>,
+<code>nuts_version</code>.</p>
+<h2>Filter by dimension, or you will double count</h2>
+<p>Most datasets are sliced. A crime dataset carries offence categories; a
+population dataset carries sex and age. Selecting without constraining
+<code>dimensions</code> sums every slice together, including totals that are
+themselves sums of the others. Check <code>dataset.dim_ids</code> and filter
+explicitly.</p>
+<pre><code>SELECT r.name AS region, o.value AS offences
+FROM observation o
+JOIN nuts_region r ON r.code = o.geo_code
+WHERE o.dataset_code = 'crim_off_cat'
+  AND r.level = 2
+ORDER BY o.time DESC, o.value DESC
+LIMIT 50</code></pre>
+<h2>Coverage helpers</h2>
+<p><code>dataset_year_availability</code> gives, per dataset and NUTS level,
+how many regions actually have a value in a given year. Use it before
+charting a time series: a line that drops to zero is usually missing data
+rather than a real fall. <code>dataset_stats</code> and
+<code>dataset_slice_stats</code> carry min/median/max ranges, useful for
+choosing sensible axis bounds.</p>

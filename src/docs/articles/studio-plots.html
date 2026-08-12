@@ -1,0 +1,30 @@
+<h1>Building a plot</h1>
+<p>A plot turns one or more sources into a chart, in three steps.</p>
+<h2>1. Pick the sources</h2>
+<p>A plot names the sources it loads. Each becomes a table available to the
+transform, named after the source.</p>
+<h2>2. Transform (optional)</h2>
+<p>The transform is <strong>DuckDB SQL, running in your browser</strong>,
+over the rows the sources already returned. This is where sources get
+joined, filtered, pivoted or aggregated together.</p>
+<p>Two things about it surprise people:</p>
+<ul>
+  <li>It is always SQL, whatever produced the sources. A Cypher source and a
+  SPARQL source are both just tables here.</li>
+  <li>It runs locally on the rows already fetched. It cannot reach the
+  database, so it cannot widen a result the source narrowed — if a row is
+  not in the source, no transform will bring it back.</li>
+</ul>
+<h2>3. Chart it</h2>
+<p>Choose a chart type — <code>line</code>, <code>bar</code>,
+<code>area</code>, <code>scatter</code>, <code>map</code> or
+<code>table</code> — and the columns for each axis. <code>x</code> and
+<code>y</code> name columns in the transformed result; <code>series</code>
+optionally splits the data into one line or bar group per distinct value.</p>
+<p><code>map</code> expects a column of NUTS region codes and renders a
+choropleth; the region level is taken from the codes themselves.</p>
+<h2>Saving</h2>
+<p>Saving stores the specification, not the data: the sources, the transform
+and the chart settings. Opening the plot re-runs the sources, so a plot
+tracks the data as it changes. That is usually what you want, and it is worth
+knowing when a number in an article moves without anyone editing it.</p>

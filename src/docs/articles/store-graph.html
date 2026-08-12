@@ -1,0 +1,43 @@
+<h1>The knowledge graph (Cypher)</h1>
+<p>Neo4j, queried with Cypher. This is the store for entities and the
+relationships between them: who was awarded what, who owns whom, who lobbied
+for which act.</p>
+<h2>Node labels</h2>
+<p>The ones an analysis normally starts from:</p>
+<ul>
+  <li><code>Company</code>, <code>Authority</code>, <code>Lobbyist</code>,
+      <code>SanctionedEntity</code> — the parties.</li>
+  <li><code>Contract</code>, <code>Notice</code>, <code>Cpv</code> — public
+      procurement and its sector codes.</li>
+  <li><code>CohesionProject</code>, <code>Programme</code>,
+      <code>Fund</code> — EU cohesion funding.</li>
+  <li><code>InvestmentFund</code>, <code>Listing</code>,
+      <code>FinancialYear</code> — corporate and market data.</li>
+  <li><code>NUTSRegion</code>, <code>Nuts</code> — geography.</li>
+  <li><code>LegalAct</code>, <code>Petition</code>, <code>Disclosure</code> —
+      the legislative record.</li>
+</ul>
+<p>Labels such as <code>BackfillCheckpoint</code>,
+<code>ConsolidationRun</code>, <code>MergeEvent</code> and
+<code>TedWatermark</code> are pipeline bookkeeping. They are not analysis
+data and should not appear in a chart.</p>
+<h2>Relationship types</h2>
+<p><code>AWARDED</code>, <code>AWARDED_TO</code>, <code>BID_ON</code>,
+<code>SUBSIDIARY_OF</code>, <code>SAME_AS</code>, <code>SANCTIONED</code>,
+<code>UNDER_PROGRAMME</code>, <code>FINANCED_BY</code>,
+<code>LOCATED_IN</code>, <code>PART_OF</code>, <code>CHILD_OF</code>,
+<code>MODIFIES</code>, <code>NOTICE_OF</code>, <code>LISTED_AS</code>,
+<code>REGISTERED_BY</code>, <code>FILED_BY</code>, <code>REPORTED</code>,
+<code>ANSWERED_BY</code>, <code>PRODUCED</code>, <code>APPLIED</code>.</p>
+<h2>Two things to know before counting</h2>
+<p><strong>The graph holds duplicates.</strong> The same company can appear
+as several nodes — country subsidiaries, spelling variants, punctuation.
+<code>SAME_AS</code> links some of them, and it is <em>reviewed</em>: an
+unreviewed link is a candidate, not a fact. A <code>count(DISTINCT c)</code>
+over name matches will overcount.</p>
+<p><strong>Direction is not always what it reads like.</strong> Match
+relationships without a direction arrow unless you have checked which way
+round they are stored.</p>
+<pre><code>MATCH (c:Company)-[:AWARDED_TO]-(ct:Contract)
+RETURN c.name AS company, count(ct) AS contracts
+ORDER BY contracts DESC LIMIT 20</code></pre>

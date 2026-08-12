@@ -1,0 +1,28 @@
+<h1>The browser transform (DuckDB)</h1>
+<p>A plot's transform step is DuckDB-WASM running inside the browser tab,
+over the rows the sources already returned. It is not a fourth data store
+and it has no connection to the databases.</p>
+<h2>What that means in practice</h2>
+<ul>
+  <li><strong>Always SQL.</strong> Whatever language produced a source —
+  Cypher, SQL or SPARQL — it arrives here as a table. Writing Cypher in a
+  transform produces a syntax error from an engine the author never
+  chose.</li>
+  <li><strong>Each source is a table</strong> named after the source, with
+  the column names the source actually returned.</li>
+  <li><strong>It cannot widen a result.</strong> The transform sees only the
+  rows the sources fetched, already subject to their row caps. If a row was
+  filtered out upstream, no join here will recover it.</li>
+  <li><strong>It is free to change.</strong> Editing a transform re-runs it
+  locally; it does not re-query anything.</li>
+</ul>
+<h2>What it is good for</h2>
+<p>Joining across stores — a Cypher source of contract counts against a SQL
+source of regional population, keyed on NUTS code. Pivoting long rows into
+the wide shape a chart wants. Aggregating a detailed source into the
+granularity you actually plot, so the source stays reusable for other
+plots.</p>
+<pre><code>SELECT c.region, c.contracts, p.value AS population,
+       c.contracts * 100000.0 / p.value AS per_100k
+FROM contracts_by_region c
+JOIN population_by_region p ON p.geo_code = c.region</code></pre>
