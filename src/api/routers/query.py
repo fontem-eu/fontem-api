@@ -1,17 +1,29 @@
-"""Read-only query proxies for the Data Studio.
+"""Read-only query proxies.
 
 Cypher (Neo4j) and SQL (stats Postgres). SPARQL keeps its own /sparql router.
-All three are strictly read-only, size- and row-capped: the studio lets users
-explore and plot the graph/stores, never mutate them.
+All three are strictly read-only, size- and row-capped: callers explore and plot
+the graph/stores, never mutate them.
 
 Read-only is enforced at the engine (Neo4j read transaction / Postgres read-only
 transaction) AND by a write-keyword allow-list as defense-in-depth, mirroring the
 SPARQL proxy.
+
+BIND PARAMETERS. Both endpoints accept an optional ``params`` object alongside
+``query``. Values are handed to the driver as real binds — psycopg's
+``%(name)s`` for SQL, ``$name`` for Cypher — never spliced into the query text,
+so a parameter can never change the shape of the statement. Placeholder syntax
+stays engine-native: we do not rewrite the query, because rewriting is exactly
+the step that reintroduces injection.
+
+This exists for the feed-query catalogue, where one curated query serves many
+subscriptions by varying its binds (region, watermark) rather than being forked
+per subscriber. The Data Studio benefits too.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import decimal
+import json
 import re
 import logging
 import os
@@ -21,6 +33,7 @@ from typing import Annotated
 import psycopg
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Body, HTTPException
+from neo4j import READ_ACCESS
 
 from src.data.graph.neo4j_client import Neo4jClient
 from src.data.sparql.virtuoso_client import VirtuosoClient
@@ -67,6 +80,83 @@ def _validate(query: str, forbidden: tuple, lang: str) -> str:
     return query.strip()
 
 
+# ── Bind parameters ─────────────────────────────────────────────────
+# Deliberately narrow. A bind carries a VALUE, so scalars and flat lists of
+# scalars are the whole vocabulary — a list covers the region filter
+# (`geo_code = ANY(%(nuts)s)` / `IN $nuts`), which is the case that motivated
+# this. Nested structures are rejected rather than flattened: silently
+# reshaping a caller's input is how surprises get built.
+_MAX_PARAMS = 32
+_MAX_PARAM_ITEMS = 512
+_MAX_PARAM_BYTES = 16384
+# re.ASCII matters: without it \w also matches Unicode letters, and a bind
+# name is an identifier in someone else's query language, not free text.
+_PARAM_NAME_RE = re.compile(r"^[A-Za-z_]\w{0,63}$", re.ASCII)
+_PARAM_SCALARS = (str, int, float, bool)
+
+
+def _validate_param_value(name: str, value):
+    """Accept a scalar, None, or a flat list of those. Reject anything else."""
+    if value is None or isinstance(value, _PARAM_SCALARS):
+        return value
+    if isinstance(value, list):
+        if len(value) > _MAX_PARAM_ITEMS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Parameter '{name}' exceeds {_MAX_PARAM_ITEMS} items",
+            )
+        for item in value:
+            if item is not None and not isinstance(item, _PARAM_SCALARS):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Parameter '{name}' may only contain strings, numbers, "
+                           "booleans or null",
+                )
+        return value
+    raise HTTPException(
+        status_code=400,
+        detail=f"Parameter '{name}' must be a string, number, boolean, null, or a "
+               "flat list of those",
+    )
+
+
+def _validate_params(raw) -> dict:
+    """Validate the optional ``params`` payload into a driver-ready dict.
+
+    Returns {} when absent, which callers treat as "pass no parameters at all"
+    — not "pass an empty mapping" — because psycopg changes its handling of a
+    literal ``%`` the moment any parameter mapping is supplied.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="`params` must be an object mapping parameter names to values",
+        )
+    if len(raw) > _MAX_PARAMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At most {_MAX_PARAMS} parameters are allowed",
+        )
+    out: dict = {}
+    for name, value in raw.items():
+        if not isinstance(name, str) or not _PARAM_NAME_RE.match(name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid parameter name {name!r}: must start with a letter or "
+                       "underscore and contain only letters, digits and underscores",
+            )
+        out[name] = _validate_param_value(name, value)
+    encoded = len(json.dumps(out, default=str).encode("utf-8"))
+    if encoded > _MAX_PARAM_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Parameters exceed the {_MAX_PARAM_BYTES}-byte limit",
+        )
+    return out
+
+
 def _jsonable(v):
     if isinstance(v, (str, int, float, bool)) or v is None:
         return v
@@ -87,8 +177,13 @@ def _jsonable(v):
 )
 @inject
 def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient]) -> dict:
-    """Run a read-only Cypher query against Neo4j. Returns { columns, rows }."""
-    query = _validate((body or {}).get("query") or "", _CYPHER_FORBIDDEN, "Cypher")
+    """Run a read-only Cypher query against Neo4j. Returns { columns, rows }.
+
+    Optional ``params`` are bound as Cypher ``$name`` parameters.
+    """
+    body = body or {}
+    query = _validate(body.get("query") or "", _CYPHER_FORBIDDEN, "Cypher")
+    params = _validate_params(body.get("params"))
     if _CYPHER_PROC_DENY.search(query):
         raise HTTPException(
             status_code=400,
@@ -96,7 +191,9 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
         )
 
     def _run(tx):
-        res = tx.run(query, timeout=_TIMEOUT_MS / 1000)
+        # `parameters=` (not **kwargs) so a caller-supplied bind can never
+        # collide with a driver keyword.
+        res = tx.run(query, parameters=params)
         cols = list(res.keys())
         out = []
         for i, rec in enumerate(res):
@@ -106,8 +203,19 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
         return cols, out, False
 
     try:
-        with neo4j.session() as session:
-            cols, rows, truncated = session.execute_read(_run)  # read tx rejects writes
+        # An explicit transaction, because the timeout has to be set when the
+        # transaction BEGINS. The previous `tx.run(query, timeout=...)` did
+        # nothing of the sort: Transaction.run's signature is
+        # (query, parameters=None, **kwparameters), so `timeout` was silently
+        # accepted as a Cypher parameter named $timeout and no limit was ever
+        # applied. READ_ACCESS is kept on the session — the server rejects
+        # writes inside a read transaction — and the transaction is never
+        # committed, so it rolls back on exit either way.
+        with neo4j.session(default_access_mode=READ_ACCESS) as session:
+            with session.begin_transaction(timeout=_TIMEOUT_MS / 1000) as tx:
+                cols, rows, truncated = _run(tx)
+    except HTTPException:
+        raise
     except Exception as exc:  # pylint: disable=broad-exception-caught
         # surface engine/driver errors to the editor rather than 500-ing
         msg = str(exc)
@@ -133,8 +241,15 @@ def _stats_dsn() -> str | None:
     },
 )
 def sql_query(body: Annotated[dict, Body(...)]) -> dict:
-    """Run a read-only SQL query against the stats Postgres. Returns { columns, rows }."""
-    query = _validate((body or {}).get("query") or "", _SQL_FORBIDDEN, "SQL")
+    """Run a read-only SQL query against the stats Postgres. Returns { columns, rows }.
+
+    Optional ``params`` are bound as psycopg ``%(name)s`` placeholders. Note
+    that supplying any parameter puts psycopg into interpolation mode, so a
+    literal percent sign in such a query must be written ``%%``.
+    """
+    body = body or {}
+    query = _validate(body.get("query") or "", _SQL_FORBIDDEN, "SQL")
+    params = _validate_params(body.get("params"))
     dsn = _stats_dsn()
     if not dsn:
         raise HTTPException(
@@ -146,7 +261,9 @@ def sql_query(body: Annotated[dict, Body(...)]) -> dict:
             conn.read_only = True  # engine-enforced: any write raises
             with conn.cursor() as cur:
                 cur.execute(f"SET statement_timeout = {_TIMEOUT_MS}")
-                cur.execute(query)
+                # `or None`, never `params` — an empty dict would still switch
+                # psycopg into interpolation mode and break a bare `%`.
+                cur.execute(query, params or None)
                 cols = [d.name for d in cur.description] if cur.description else []
                 rows = [[_jsonable(v) for v in r] for r in cur.fetchmany(_ROW_CAP)]
                 truncated = cur.fetchone() is not None

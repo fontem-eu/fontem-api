@@ -28,9 +28,14 @@ class Neo4jClient:
         )
         logger.info("Neo4jClient connected to %s", self._uri)
 
-    def session(self):
-        """Return a new session (use as context manager)."""
-        return self._driver.session()
+    def session(self, **config):
+        """Return a new session (use as context manager).
+
+        ``config`` is forwarded verbatim to the driver, so callers can ask
+        for e.g. ``default_access_mode=READ_ACCESS`` — which the server
+        enforces, rejecting any write attempted inside the transaction.
+        """
+        return self._driver.session(**config)
 
     def close(self):
         """Close the driver."""
