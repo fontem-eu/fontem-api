@@ -172,3 +172,14 @@ def test_ensuring_indexes_never_takes_the_api_down():
 def test_the_index_statement_is_idempotent():
     """It runs on every start, in environments that already have it."""
     assert all("IF NOT EXISTS" in s for s in graph_schema._STATEMENTS)  # noqa: SLF001
+
+
+def test_the_feed_query_indexes_are_declared_too():
+    """A feed asks "what was published since my last visit, in my regions".
+    Both halves were unindexed: Contract carried indexes on its identifiers
+    only, and Authority none on nuts. An EU-wide seven-day window measured 51
+    seconds on prod before these existed — a full scan of 1.65M nodes, past
+    the proxy's statement timeout, so the query would simply fail."""
+    statements = " ".join(graph_schema._STATEMENTS)  # noqa: SLF001
+    assert "(c:Contract) ON (c.publication_date)" in statements
+    assert "(a:Authority) ON (a.nuts)" in statements
