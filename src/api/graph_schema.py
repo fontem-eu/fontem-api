@@ -22,9 +22,29 @@ from loguru import logger
 #: blocking startup.
 COMPANY_NAME_FULLTEXT = "company_name_ft"
 
+#: The two indexes a feed query over procurement needs.
+#:
+#: A feed asks "what was published since my last visit, in my regions". Both
+#: halves of that were unindexed: Contract had indexes on its identifiers only,
+#: and Authority none on nuts. Measured on prod before adding these, an
+#: EU-wide seven-day window took 51 seconds — a full scan of 1.65M Contract
+#: nodes, which is well past the proxy's statement timeout and would simply
+#: fail. A region-scoped window took 2-3 seconds by scanning just as much and
+#: throwing most of it away.
+#:
+#: publication_date is stored as an ISO 'YYYY-MM-DD' string, so a range index
+#: gives ordered seeks on `>` for free — lexicographic and chronological order
+#: coincide for that format.
+CONTRACT_PUBLICATION_DATE = "contract_publication_date"
+AUTHORITY_NUTS = "authority_nuts"
+
 _STATEMENTS = (
     f"CREATE FULLTEXT INDEX {COMPANY_NAME_FULLTEXT} IF NOT EXISTS "
     "FOR (c:Company) ON EACH [c.name]",
+    f"CREATE INDEX {CONTRACT_PUBLICATION_DATE} IF NOT EXISTS "
+    "FOR (c:Contract) ON (c.publication_date)",
+    f"CREATE INDEX {AUTHORITY_NUTS} IF NOT EXISTS "
+    "FOR (a:Authority) ON (a.nuts)",
 )
 
 
