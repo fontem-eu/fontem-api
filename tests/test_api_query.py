@@ -461,7 +461,9 @@ def test_unicode_lookalike_param_names_are_rejected():
     Unicode homoglyph must not pass for the ASCII name a query declares."""
     c = _client()
     try:
-        for name in ("café", "nuts​", "ｎuts"):
+        # Written as escapes: a literal zero-width space in source is
+        # invisible to the next reader (and pylint rejects it outright).
+        for name in ("caf\u00e9", "nuts\u200b", "\uff4euts"):
             r = c.post("/query/cypher",
                        json={"query": "MATCH (n) RETURN n", "params": {name: 1}})
             assert r.status_code == 400, f"{name!r} -> {r.status_code}"
