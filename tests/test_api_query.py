@@ -453,3 +453,17 @@ def test_sql_binds_params_and_omits_them_when_absent(monkeypatch):
         assert calls[-1][1] is None
     finally:
         cleanup_dishka()
+
+
+def test_unicode_lookalike_param_names_are_rejected():
+    """The name pattern is ASCII-only on purpose: a bind name is an
+    identifier in someone else's query language, not free text, and a
+    Unicode homoglyph must not pass for the ASCII name a query declares."""
+    c = _client()
+    try:
+        for name in ("café", "nuts​", "ｎuts"):
+            r = c.post("/query/cypher",
+                       json={"query": "MATCH (n) RETURN n", "params": {name: 1}})
+            assert r.status_code == 400, f"{name!r} -> {r.status_code}"
+    finally:
+        cleanup_dishka()

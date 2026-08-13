@@ -89,7 +89,9 @@ def _validate(query: str, forbidden: tuple, lang: str) -> str:
 _MAX_PARAMS = 32
 _MAX_PARAM_ITEMS = 512
 _MAX_PARAM_BYTES = 16384
-_PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# re.ASCII matters: without it \w also matches Unicode letters, and a bind
+# name is an identifier in someone else's query language, not free text.
+_PARAM_NAME_RE = re.compile(r"^[A-Za-z_]\w{0,63}$", re.ASCII)
 _PARAM_SCALARS = (str, int, float, bool)
 
 
