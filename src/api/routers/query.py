@@ -157,6 +157,50 @@ def _validate_params(raw) -> dict:
     return out
 
 
+def _notifications(result) -> list[dict]:
+    """What Neo4j warns about, alongside what it returns.
+
+    A misspelled label is valid Cypher: `MATCH (c:Compnay)` parses, plans,
+    runs, and matches nothing — forever. The engine says so, as a
+    notification on the result summary (UnknownLabelWarning and friends),
+    and this endpoint used to throw them away. Nothing downstream could
+    then tell a typo from an honestly empty answer: not the Studio editor,
+    and not the assistant's check on a query before it saves one.
+
+    That is the difference from SQL, which rejects an unknown table or
+    column outright and needs no equivalent.
+
+    Best-effort: notifications are a driver convenience, and a driver that
+    does not offer them must not take the query results down with it.
+    """
+    try:
+        notes = result.consume().summary_notifications
+    except Exception:  # pylint: disable=broad-exception-caught
+        try:
+            notes = result.consume().notifications or []
+        except Exception:  # pylint: disable=broad-exception-caught
+            return []
+    out = []
+    for n in notes or []:
+        if isinstance(n, dict):
+            code, title = n.get("code"), n.get("title")
+            desc = n.get("description")
+            severity = n.get("severity") or n.get("severity_level")
+        else:
+            code = getattr(n, "code", None)
+            title = getattr(n, "title", None)
+            desc = getattr(n, "description", None)
+            severity = (getattr(n, "severity_level", None)
+                        or getattr(n, "severity", None))
+        out.append({
+            "code": str(code or ""),
+            "title": str(title or ""),
+            "description": str(desc or "")[:300],
+            "severity": str(severity or ""),
+        })
+    return out
+
+
 def _jsonable(v):
     if isinstance(v, (str, int, float, bool)) or v is None:
         return v
@@ -196,11 +240,15 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
         res = tx.run(query, parameters=params)
         cols = list(res.keys())
         out = []
+        truncated = False
         for i, rec in enumerate(res):
             if i >= _ROW_CAP:
-                return cols, out, True
+                truncated = True
+                break
             out.append([_jsonable(rec[c]) for c in cols])
-        return cols, out, False
+        # `break`, not an early return: the summary is only complete once
+        # the result is drained, and the notifications come off it below.
+        return cols, out, truncated, _notifications(res)
 
     try:
         # An explicit transaction, because the timeout has to be set when the
@@ -213,7 +261,7 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
         # committed, so it rolls back on exit either way.
         with neo4j.session(default_access_mode=READ_ACCESS) as session:
             with session.begin_transaction(timeout=_TIMEOUT_MS / 1000) as tx:
-                cols, rows, truncated = _run(tx)
+                cols, rows, truncated, notes = _run(tx)
     except HTTPException:
         raise
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -221,7 +269,8 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
         msg = str(exc)
         code = 504 if "timeout" in msg.lower() else 400
         raise HTTPException(status_code=code, detail=f"Cypher error: {msg[:300]}") from exc
-    return {"columns": cols, "rows": rows, "row_count": len(rows), "truncated": truncated}
+    return {"columns": cols, "rows": rows, "row_count": len(rows),
+            "truncated": truncated, "notifications": notes}
 
 
 def _stats_dsn() -> str | None:
