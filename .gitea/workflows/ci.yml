@@ -325,7 +325,6 @@ jobs:
           language: python
           project-name: edgar-gmr-etl
           project-version: ${{ github.sha }}
-          dtrack-key: ${{ secrets.DTRACK_API_KEY }}
 
       - name: Vendor internal Python deps for docker build
         # The Dockerfile pip-installs from vendor/gmr-event-schemas
