@@ -1,63 +1,36 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# edgar-gmr-etl  —  GMR Stock Analysis API
-# ──────────────────────────────────────────────────────────────────────────────
-# Build:   docker build -t edgar-gmr-etl:latest .
-# Run:     docker run -p 8000:8000 edgar-gmr-etl:latest
-# Swagger: http://localhost:8000/docs
-# ──────────────────────────────────────────────────────────────────────────────
-FROM python:3.14-slim
-
-COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
-
-# --- OS-level dependencies (minimal) ----------------------------------------
-RUN apt-get update -y \
- && apt-get install -y --no-install-recommends gcc ca-certificates \
- && update-ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-
+# ── build: venv + toolchain (C exts) + void42 CA + vendored deps ──────────────
+FROM cgr.void42.internal/chainguard/python:latest-dev AS build
+USER root
 ENV PIP_INDEX_URL=https://nexus.void42.internal/repository/pypi-proxy/simple/ \
     PIP_TRUSTED_HOST=nexus.void42.internal
-
-# --- Non-root user for security -----------------------------------------------
-RUN useradd --create-home --shell /bin/bash appuser
-WORKDIR /app
-
-# --- Python dependencies -------------------------------------------------------
+RUN apk add --no-cache build-base
+COPY void42-ca.crt /tmp/void42-ca.crt
+RUN cat /tmp/void42-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && rm requirements.txt
-
-# --- eforms-parser (TED contract loader dependency) ---------------------------
-COPY vendor/*.whl /tmp/
-
-# --- IP -> country database (DB-IP Country Lite, CC BY 4.0) -------------------
-# Powers /geo/client-language (first-visit language hint). See
-# vendor/geoip/README.md for licence + refresh notes.
-COPY vendor/geoip/dbip-country-lite.mmdb /app/vendor/geoip/dbip-country-lite.mmdb
-COPY vendor/crawler_ranges/ /app/vendor/crawler_ranges/
-RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
-
-# --- Event log libs (vendored at build time from internal Gitea) -------------
-# pip's isolated-build environment can't reach the internal Gitea, so
-# requirements.txt deliberately omits these. CI clones them into
-# vendor/ before docker build (see .gitea/workflows/ci.yml). For local
-# builds, run `make vendor-events` before `docker build`.
+RUN pip install --no-cache-dir -r requirements.txt
+COPY vendor/*.whl /tmp/wheels/
+RUN pip install --no-cache-dir /tmp/wheels/*.whl
 COPY vendor/gmr-event-schemas/ /tmp/gmr-event-schemas/
 COPY vendor/gmr-events/        /tmp/gmr-events/
-RUN pip install --no-cache-dir /tmp/gmr-event-schemas /tmp/gmr-events \
- && rm -rf /tmp/gmr-event-schemas /tmp/gmr-events
+RUN pip install --no-cache-dir /tmp/gmr-event-schemas /tmp/gmr-events
 
-# --- Application source -------------------------------------------------------
+# ── runtime: distroless; app runs from /app via `python -m src.api.run` ───────
+FROM cgr.void42.internal/chainguard/python:latest
+WORKDIR /app
+COPY --from=build /venv /venv
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV PATH="/venv/bin:$PATH" \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+COPY vendor/geoip/dbip-country-lite.mmdb /app/vendor/geoip/dbip-country-lite.mmdb
+COPY vendor/crawler_ranges/ /app/vendor/crawler_ranges/
 COPY src/ ./src/
 COPY data/ ./data/
 COPY scripts/ ./scripts/
 COPY main.py .
-
-# Switch to non-root
-USER appuser
-
-# --- Runtime ------------------------------------------------------------------
+USER 65532
 EXPOSE 8000
-
-# Workers=1 keeps memory predictable per pod; scale horizontally via replicas.
-# --verbosity 3 = INFO (default). Pass --verbosity 4 for DEBUG during debugging.
-CMD ["python", "-m", "src.api.run", "--verbosity", "3"]
+ENTRYPOINT ["/venv/bin/python", "-m", "src.api.run"]
+CMD ["--verbosity", "3"]
