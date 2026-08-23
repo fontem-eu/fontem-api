@@ -21,7 +21,7 @@ loguru
 # Revisit when prometheus-fastapi-instrumentator ships _IncludedRouter
 # support, then the upper bounds can lift.
 fastapi<0.137
-starlette<1.6
+starlette<1.7
 uvicorn[standard]
 httpx
 dishka>=1.3
