@@ -23,6 +23,7 @@ spec:
           labels:
             app: fontem-stats-sync
             cadence: weekly
+            component: etl
           annotations:
             linkerd.io/inject: disabled
         spec:
