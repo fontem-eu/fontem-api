@@ -100,6 +100,9 @@ def _stub_notice(*, awards, organizations):
     notice.description = "Procurement of stuff"
     notice.issue_date = "2025-09-01"
     notice.dispatch_date = "2025-09-01"
+    # TED published it three days after the buyer issued it — the gap
+    # this loader has to preserve rather than collapse.
+    notice.publication_date = "2025-09-04"
     notice.awards = awards
     notice.organizations = organizations
     notice.cpv_main = "45000000"
@@ -1672,3 +1675,88 @@ def test_milli_euro_leak_rescaled_at_emit(
     payload = by_type["UpsertContract"].kwargs["payload"]
     assert payload.get("value_scale_corrected") in ("ratio", "country_prior")
     assert payload.get("value_eur") == 9281922.79
+
+
+# ── Notice publication date ────────────────────────────────────────────────
+
+
+def _notice_with_contractor():
+    """A stub notice that actually resolves a winner, so a Contract is emitted."""
+    contractor = MagicMock()
+    contractor.name = "S.C. Fortat-House S.R.L."
+    contractor.country = "RO"
+    contractor.legal_id = None
+    return _stub_notice(awards=[_stub_award()], organizations={"O1": contractor})
+
+
+def test_as_day_strips_ted_timezone_offset():
+    """TED sends '2026-08-25+02:00'; the graph stores bare ISO days."""
+    as_day = load_ted_contracts._as_day  # pylint: disable=protected-access
+    assert as_day("2026-08-25+02:00") == "2026-08-25"
+    assert as_day("2026-08-25Z") == "2026-08-25"
+    assert as_day("2026-08-25") == "2026-08-25"
+
+
+def test_as_day_rejects_non_dates_and_sentinels():
+    """Anything that is not a real ISO day is dropped, not coerced.
+
+    A ten-character non-date (a Mock repr, a stray identifier) must not
+    become a publication date: it would sort into the middle of the range
+    index and silently corrupt every feed window reading this field.
+    """
+    as_day = load_ted_contracts._as_day  # pylint: disable=protected-access
+    assert as_day(None) is None
+    assert as_day("") is None
+    assert as_day("<MagicMock") is None
+    assert as_day("not-a-date") is None
+    assert as_day("2026-13-45") is None
+    assert as_day(20260825) is None
+    assert as_day("2000-01-01") is None  # TED's 'unknown' sentinel
+    assert as_day("1900-01-01") is None
+
+
+def test_emit_notice_prefers_search_record_publication_date():
+    """The search record is authoritative: it is what TED published on."""
+    notice = _notice_with_contractor()
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+        extra_props={"publication_date": "2026-08-25+02:00"},
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["publication_date"] == "2026-08-25"
+
+
+def test_emit_notice_falls_back_to_parsed_publication_date():
+    """No search record (bulk archive path): use efbc:PublicationDate."""
+    notice = _notice_with_contractor()
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["publication_date"] == "2025-09-04"
+
+
+def test_emit_notice_falls_back_to_issue_date_when_unpublished():
+    """Pre-eForms notices carry neither; issue_date is the last resort."""
+    notice = _notice_with_contractor()
+    notice.publication_date = None
+    emit = MagicMock()
+    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
+        notice, emit, _mock_matcher("auth-1", "company-1"),
+        set(), set(), None, skip_pub_num_lookup=True,
+    )
+    payload = next(
+        c for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertContract"
+    ).kwargs["payload"]
+    assert payload["publication_date"] == "2025-09-01"

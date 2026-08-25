@@ -203,7 +203,9 @@ class TestDateCoalescing:
         """The source field should always be one of the known values."""
         from src.etl.load_ted_contracts import _coalesce_date
 
-        valid_sources = {"award", "conclusion", "dispatch", "publication", "none"}
+        valid_sources = {
+            "award", "conclusion", "dispatch", "publication", "issue", "none",
+        }
         for notice in _parse_all_notices():
             for award in notice.awards:
                 _, source = _coalesce_date(award, notice)

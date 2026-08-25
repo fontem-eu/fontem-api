@@ -113,11 +113,40 @@ def _resolve_pub_num_or_none(notice_uuid: str) -> str | None:
         return None
 
 
+def _as_day(raw: str | None) -> str | None:
+    """Normalise a TED date to a bare ISO day.
+
+    TED stamps dates with an offset ('2026-08-25+02:00', sometimes 'Z').
+    The offset is the publishing timezone, not information we model, and
+    :Contract.publication_date is compared as a plain 'YYYY-MM-DD' string
+    everywhere (range index, era guards, feed windows), so a value that
+    kept its suffix would sort and filter wrongly. Sentinel dates TED uses
+    for 'unknown' are dropped rather than stored as fact.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    day = raw[:10]
+    # Must be a real ISO day, not merely ten characters: a malformed or
+    # non-string value silently coerced into a date would corrupt every
+    # window and index that reads this field.
+    try:
+        _date.fromisoformat(day)
+    except ValueError:
+        return None
+    if day.startswith(("2000-01-01", "1900-01-01")):
+        return None
+    return day
+
+
 def _coalesce_date(award, notice) -> tuple[str | None, str]:
     """Coalesce the best available date for a contract award.
 
     Returns (date_str, source) where source is one of:
-    'award', 'conclusion', 'dispatch', 'publication'.
+    'award', 'conclusion', 'dispatch', 'publication', 'issue', 'none'.
+
+    'publication' is when TED published the notice; 'issue' is when the
+    buyer wrote it. They are days apart, so they are reported separately
+    rather than both being called publication.
     """
     if award.award_date:
         return award.award_date, "award"
@@ -125,8 +154,10 @@ def _coalesce_date(award, notice) -> tuple[str | None, str]:
         return award.conclusion_date, "conclusion"
     if getattr(notice, "dispatch_date", None):
         return notice.dispatch_date, "dispatch"
+    if getattr(notice, "publication_date", None):
+        return notice.publication_date, "publication"
     if notice.issue_date:
-        return notice.issue_date, "publication"
+        return notice.issue_date, "issue"
     return None, "none"
 
 
@@ -744,6 +775,17 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     # publication-number backfill has run.)
     stamps = extra_props or {}
     procedure_id = stamps.get("procedure_id")
+    # When TED published the notice, in preference order: the search
+    # record (authoritative, already fetched), then efbc:PublicationDate
+    # off the notice XML, then cbc:IssueDate as a last resort. The first
+    # two mean "public on this date"; issue_date is when the buyer wrote
+    # it, which runs 1-3 days earlier and is the wrong answer for anything
+    # ordering or windowing by recency.
+    publication_date = (
+        _as_day(stamps.get("publication_date"))
+        or _as_day(getattr(notice, "publication_date", None))
+        or _as_day(notice.issue_date)
+    )
     notice_type = (
         stamps.get("notice_type") or getattr(notice, "notice_type", None)
     )
@@ -774,7 +816,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         match_tier=match_tier,
         match_confidence=match_confidence,
         match_layer=match_layer,
-        publication_date=notice.issue_date or None,
+        publication_date=publication_date,
         value_eur=value_eur_float,
         value_currency=resolved_currency,
         value_original=value_original_float,
@@ -927,6 +969,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                         extra = {
                             "procedure_id": rec.get("procedure-identifier"),
                             "notice_type": rec.get("notice-type"),
+                            "publication_date": rec.get("publication-date"),
                             "modifies_publication_number": (
                                 (ted_search.modifies_publication_number(rec)
                                  or getattr(

@@ -534,10 +534,16 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "values.contract_pubdate_not_future", VALUES,
         "Contract.publication_date is not in the future", BLOCK, "cypher",
+        # One day of slack: TED stamps publication dates in Brussels time
+        # (+01:00/+02:00), so notices legitimately carry tomorrow's date
+        # while this cluster is still on yesterday in UTC. Anything beyond
+        # that skew is a real parser artifact.
         "MATCH (c:Contract) WHERE c.publication_date IS NOT NULL "
-        "AND c.publication_date > toString(date()) RETURN count(*) AS violations",
+        "AND c.publication_date > toString(date() + duration({days: 1})) "
+        "RETURN count(*) AS violations",
         zero_violations("future-dated contracts"),
-        "A publication date in the future is a parser artifact and corrupts time-series panels.",
+        "A publication date more than a day ahead cannot be a timezone effect; it is a parser "
+        "artifact and corrupts time-series panels.",
     ),
     Assertion(
         "values.financialyear_year_range", VALUES,
