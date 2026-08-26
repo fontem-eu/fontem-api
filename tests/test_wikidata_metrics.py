@@ -242,3 +242,88 @@ def test_consumer_entities_total_label_set() -> None:
         assert REGISTRY.get_sample_value(
             "wikidata_consumer_entities_total",
             {"outcome": outcome}) == 0
+
+
+# ----- the polling thread ----- #
+# _refresh_loop and start() were the only untested part of this module.
+# Both carry a promise that is invisible when broken: the loop swallows
+# DB errors so a Postgres blip cannot kill the relay's metrics thread,
+# and start() marks the thread daemon so it cannot hold up pod shutdown.
+# If either regressed, metrics would quietly freeze — or SIGTERM would
+# hang — while the relay itself looked entirely healthy.
+
+class _StopLoop(Exception):
+    """Breaks out of _refresh_loop's `while True` from the sleep stub."""
+
+
+def test_refresh_loop_polls_then_sleeps_for_the_configured_interval(monkeypatch):
+    polled = []
+    slept = []
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(metrics.psycopg, "connect", lambda url: _Conn())
+    monkeypatch.setattr(metrics, "_poll_once", polled.append)
+
+    def _sleep(seconds):
+        slept.append(seconds)
+        raise _StopLoop
+
+    monkeypatch.setattr(metrics.time, "sleep", _sleep)
+    with pytest.raises(_StopLoop):
+        metrics._refresh_loop("postgresql://x")
+    assert len(polled) == 1
+    assert slept == [metrics.METRIC_REFRESH_SECONDS]
+
+
+def test_refresh_loop_survives_a_database_error_and_keeps_polling(monkeypatch, caplog):
+    """A Postgres blip must not kill the thread — if it did, every gauge
+    would freeze at its last value and still be scraped as if current."""
+    attempts = []
+    slept = []
+
+    def _connect(url):
+        attempts.append(url)
+        raise metrics.psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(metrics.psycopg, "connect", _connect)
+
+    def _sleep(seconds):
+        slept.append(seconds)
+        if len(slept) >= 2:
+            raise _StopLoop
+
+    monkeypatch.setattr(metrics.time, "sleep", _sleep)
+    with caplog.at_level("WARNING"):
+        with pytest.raises(_StopLoop):
+            metrics._refresh_loop("postgresql://x")
+    # Two attempts means the first failure did not break the loop.
+    assert len(attempts) == 2
+    assert any("metrics refresh failed" in r.message for r in caplog.records)
+
+
+def test_start_serves_metrics_and_runs_the_poller_as_a_daemon(monkeypatch):
+    """A non-daemon thread here would keep the pod alive past SIGTERM."""
+    served = []
+    made = {}
+
+    class _Thread:
+        def __init__(self, target=None, args=(), daemon=None, name=None):
+            made.update(target=target, args=args, daemon=daemon, name=name)
+
+        def start(self):
+            made["started"] = True
+
+    monkeypatch.setattr(metrics, "start_http_server", served.append)
+    monkeypatch.setattr(metrics.threading, "Thread", _Thread)
+    metrics.start("postgresql://x")
+    assert served == [metrics.METRICS_PORT]
+    assert made["target"] is metrics._refresh_loop
+    assert made["args"] == ("postgresql://x",)
+    assert made["daemon"] is True
+    assert made["started"] is True
