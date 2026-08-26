@@ -1,0 +1,17 @@
+# Dev/CI toolchain, pinned so Renovate proposes upgrades as PRs that have
+# to pass CI — rather than CI silently changing behaviour between two runs
+# of the same commit.
+#
+# This file exists because that happened: pylint was installed unpinned in
+# the workflow, a new release began enforcing checks the previous one did
+# not, and every pipeline in the repo went red at once with no commit to
+# blame. fontem-consolidator pins the same tools here and took the very
+# same pylint 4.0.7 upgrade through a reviewed PR without incident.
+#
+# Renovate's pip_requirements manager picks up requirements*.txt by
+# default, so these are bumped automatically.
+-r requirements.txt
+pytest==9.1.1
+pytest-cov==7.1.0
+pylint==4.0.7
+tzdata==2026.1
