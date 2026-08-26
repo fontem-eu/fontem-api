@@ -23,7 +23,14 @@ class _FakeMinio:
     def __init__(self):
         self.objects = {}
 
-    def put_object(self, bucket, key, stream, length, content_type=None):  # pylint: disable=unused-argument
+    # Signature mirrors minio.Minio.put_object exactly — this double is
+    # substituted for the real client, so its arity is fixed by the SDK
+    # rather than chosen here. `length` and `content_type` are accepted
+    # and ignored because the store passes them and the fake does not
+    # need them.
+    def put_object(  # pylint: disable=unused-argument,too-many-arguments,too-many-positional-arguments
+        self, bucket, key, stream, length, content_type=None,
+    ):
         self.objects[(bucket, key)] = stream.read()
 
     def get_object(self, bucket, key):
