@@ -20,7 +20,7 @@ loguru
 # starlette pin guards against a resolver picking 1.3 transitively.
 # Revisit when prometheus-fastapi-instrumentator ships _IncludedRouter
 # support, then the upper bounds can lift.
-fastapi<0.137
+fastapi<0.138
 starlette<1.7
 uvicorn[standard]
 httpx
