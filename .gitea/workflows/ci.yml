@@ -8,7 +8,7 @@ jobs:
   test:
     runs-on: python
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install deps
         env:
           PIP_INDEX_URL: https://nexus.void42.internal/repository/pypi-proxy/simple/
@@ -47,12 +47,12 @@ jobs:
     needs: test
     runs-on: python
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Full history so SonarQube can blame-diff new vs existing
           # code; a shallow clone makes it treat everything as new.
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: void42/ci-actions
           path: .ci-actions
@@ -88,7 +88,7 @@ jobs:
     runs-on: python
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Image-registry allowlist gate
         # Mirrors the cluster's Kyverno restrict-image-registries policy.
         # Walks every templates/*.yaml in deployment-stats/, extracts the
@@ -287,8 +287,8 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           repository: void42/ci-actions
           path: .ci-actions
@@ -311,8 +311,8 @@ jobs:
     # has to be installed below — neither image ships it.
     runs-on: python
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           repository: void42/ci-actions
           path: .ci-actions
