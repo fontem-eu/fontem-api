@@ -49,6 +49,7 @@ from src.api.routers.mentions import router as mentions_router
 from src.api.routers.euro_tracker import router as euro_tracker_router
 from src.api.routers.sparql import router as sparql_router
 from src.api.routers.search import router as search_router
+from src.api.routers.schema import router as schema_router
 from src.atlas_api import build_router as build_atlas_router
 from src.atlas_api.app import _attach_state as attach_atlas_state
 
@@ -138,6 +139,7 @@ app.include_router(mentions_router)
 app.include_router(euro_tracker_router)
 app.include_router(sparql_router)
 app.include_router(search_router)
+app.include_router(schema_router)
 
 # Atlas API — mounted under /atlas as a self-contained module.
 # `attach_atlas_state` stashes per-source connection state on `app.state`
