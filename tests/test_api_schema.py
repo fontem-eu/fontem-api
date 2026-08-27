@@ -74,10 +74,23 @@ def test_direction_is_explicit_in_every_relationship():
     cleanup_dishka()
     assert resp.status_code == 200
     rels = resp.json()["relationships"]
-    assert rels == [
-        {"type": "AWARDED_TO", "from": "Contract", "to": "Company",
-         "count": 188},
-    ]
+    assert rels == [{
+        "pattern": "(Contract)-[:AWARDED_TO]->(Company)",
+        "type": "AWARDED_TO", "from": "Contract", "to": "Company",
+        "count": 188,
+    }]
+
+
+def test_conventions_lead_the_payload():
+    # Order is prompt design: a 30B that received the conventions at the
+    # tail of the JSON ignored them and wrote 'RU'. What must be read
+    # first is serialised first.
+    _fresh_cache()
+    client = make_test_client(neo4j_client=FakeNeo4jClient())
+    body = client.get("/schema/graph").text
+    cleanup_dishka()
+    assert (body.index("conventions") < body.index("relationships")
+            < body.index("node_labels"))
 
 
 def test_labels_carry_counts_and_a_key_union():

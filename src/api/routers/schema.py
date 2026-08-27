@@ -82,8 +82,11 @@ def _derive(client: Neo4jClient) -> dict:
                     f"MATCH (n:`{label}`) RETURN keys(n) AS k "
                     f"LIMIT {_KEY_SAMPLE}"):
                 keys.update(row["k"])
+            # Capped: the inventory exists for orientation, and an
+            # exhaustive property list is bulk that pushes everything
+            # after it toward whatever cap a consumer applies.
             nodes.append({"label": label, "count": count,
-                          "keys": sorted(keys)})
+                          "keys": sorted(keys)[:12]})
 
         relationships = []
         for rel in rel_types:
@@ -97,13 +100,22 @@ def _derive(client: Neo4jClient) -> dict:
                     f"LIMIT {_ENDPOINT_SAMPLE}"):
                 pairs.add((row["f"], row["t"]))
             for f, t in sorted(pairs):
-                relationships.append(
-                    {"type": rel, "from": f, "to": t, "count": count})
+                relationships.append({
+                    "pattern": f"({f})-[:{rel}]->({t})",
+                    "type": rel, "from": f, "to": t, "count": count,
+                })
 
+    # Order is prompt design. Models weight what comes first, and the
+    # first contrast run proved it the hard way: a 30B called this tool,
+    # received the conventions at the tail of a JSON wall, and still wrote
+    # 'RU' with invented relationship types. Conventions lead; every
+    # relationship carries a copy-pastable pattern with the arrow in it;
+    # the label/property inventory comes last, where truncation — if a
+    # cap ever shrinks — eats the least load-bearing part.
     return {
-        "node_labels": nodes,
-        "relationships": relationships,
         "conventions": list(CONVENTIONS),
+        "relationships": relationships,
+        "node_labels": nodes,
     }
 
 
