@@ -89,7 +89,8 @@ def test_conventions_lead_the_payload():
     client = make_test_client(neo4j_client=FakeNeo4jClient())
     body = client.get("/schema/graph").text
     cleanup_dishka()
-    assert body.index("conventions") < body.index("relationships")         < body.index("node_labels")
+    assert (body.index("conventions") < body.index("relationships")
+            < body.index("node_labels"))
 
 
 def test_labels_carry_counts_and_a_key_union():
