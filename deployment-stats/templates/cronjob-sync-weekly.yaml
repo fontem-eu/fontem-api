@@ -58,6 +58,8 @@ spec:
                 - name: datasets
                   mountPath: /etc/fontem-stats
                   readOnly: true
+                - name: run-logs
+                  mountPath: /run-logs
               command: ["/bin/sh", "-c"]
               args:
                 - |
@@ -68,19 +70,41 @@ spec:
                     curl -fsS -m 10 "$KUMA_PUSH_URL?status=$KUMA_STATUS&msg=$KUMA_SUMMARY&ping=" || true
                   }
                   trap push_kuma EXIT
-                  # Re-register seeds with the env's dataset filter
-                  # before the full reconcile — if the daily has been
-                  # failing for a while, the weekly is the path that
-                  # picks up dataset-list changes from the ConfigMap.
-                  python -m src.stats_etl register-seed \
-                    --from-file /etc/fontem-stats/datasets.txt
-                  out=$(python -m src.stats_etl sync --all --force 2>&1); rc=$?
-                  echo "$out"
-                  KUMA_SUMMARY=$(echo "$out" | grep -oE '[0-9]+ synced|[0-9]+ skipped|[0-9]+ failed' \
+                  # Everything below streams through tee into a hostPath
+                  # file as it happens. The old form captured the whole
+                  # sync in a shell variable and echoed it at the END — so
+                  # when activeDeadlineSeconds killed the run (and the job
+                  # controller deleted the pod), there was no log
+                  # anywhere: not in kubectl, not on disk. Three weekly
+                  # runs died at the deadline with zero diagnostics before
+                  # this was noticed (2026-08 sweep). The node file
+                  # survives the pod; find it under
+                  # /var/log/fontem-stats-sync on the pinned nodes.
+                  LOG=/run-logs/weekly-$(date -u +%Y%m%dT%H%M%SZ).log
+                  {
+                    echo "run start $(date -u +%FT%TZ)"
+                    # Re-register seeds with the env's dataset filter
+                    # before the full reconcile — if the daily has been
+                    # failing for a while, the weekly is the path that
+                    # picks up dataset-list changes from the ConfigMap.
+                    python -m src.stats_etl register-seed \
+                      --from-file /etc/fontem-stats/datasets.txt 2>&1
+                    python -m src.stats_etl sync --all --force 2>&1
+                    echo "$?" > /tmp/rc
+                    echo "run end $(date -u +%FT%TZ) rc=$(cat /tmp/rc)"
+                  } | tee "$LOG"
+                  rc=$(cat /tmp/rc 2>/dev/null || echo 1)
+                  KUMA_SUMMARY=$(grep -oE '[0-9]+ synced|[0-9]+ skipped|[0-9]+ failed' "$LOG" \
                     | tr '\n' ' ' | sed 's/ $//' | tr ' ' '+')
                   KUMA_SUMMARY=${KUMA_SUMMARY:-unknown}
                   [ "$rc" -eq 0 ] && KUMA_STATUS=up
                   exit $rc
+          {{- with .Values.nodeSelector }}
+          # Pinned like the statefulset so the hostPath log lands on a
+          # known node set.
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumes:
             - name: datasets
               configMap:
@@ -88,3 +112,7 @@ spec:
                 items:
                   - key: datasets.txt
                     path: datasets.txt
+            - name: run-logs
+              hostPath:
+                path: /var/log/fontem-stats-sync
+                type: DirectoryOrCreate
