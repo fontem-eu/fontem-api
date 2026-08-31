@@ -573,3 +573,200 @@ def test_the_filter_does_not_over_block_ordinary_reads():
             assert c.post("/query/cypher", json={"query": q}).status_code == 200, q
     finally:
         cleanup_dishka()
+
+
+# ── Neo4j notifications: telling a typo from an empty answer ─────────────
+#
+# `MATCH (c:Compnay) RETURN c` is valid Cypher. It parses, plans, runs, and
+# matches nothing — forever. Neo4j says so on the result summary, and the
+# proxy forwards those notifications so the Studio editor and the
+# assistant's pre-save check can tell a misspelled label from an honestly
+# empty result. SQL needs no equivalent: it rejects an unknown column
+# outright.
+#
+# None of it was exercised. The shared _Result above has no `consume()`, so
+# every existing test lands in the best-effort `except` and gets [] — which
+# is also what a working extraction returns for a clean query, so the
+# feature could be entirely broken and the suite would not move.
+#
+# The driver has changed this API across versions, which is why the code
+# reads it four ways: `summary_notifications` then `notifications`, and
+# per-item either mapping keys or attributes, with severity under two
+# different names. Each shape gets a test because each is a real driver.
+
+class _Summary:
+    def __init__(self, summary_notifications=None, notifications=None):
+        if summary_notifications is not None:
+            self.summary_notifications = summary_notifications
+        if notifications is not None:
+            self.notifications = notifications
+
+
+class _NoteResult:
+    """A result that can be drained and then asked for its summary."""
+
+    def __init__(self, cols, records, summary):
+        self._cols, self._records, self._summary = cols, records, summary
+
+    def keys(self):
+        return self._cols
+
+    def __iter__(self):
+        return iter(self._records)
+
+    def consume(self):
+        return self._summary
+
+
+class _NoteTx:
+    def __init__(self, result):
+        self._result = result
+
+    def run(self, query, parameters=None, **kwargs):
+        return self._result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+
+class _NoteSession:
+    def __init__(self, result):
+        self._result = result
+
+    def begin_transaction(self, **config):
+        return _NoteTx(self._result)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+
+class _NoteNeo4j:
+    def __init__(self, result):
+        self._result = result
+
+    def session(self, **config):
+        return _NoteSession(self._result)
+
+    def close(self):
+        pass
+
+
+def _notes_client(summary, cols=("c",), records=()):
+    return make_test_client(
+        neo4j_client=_NoteNeo4j(_NoteResult(list(cols), list(records), summary)))
+
+
+class _ObjNote:
+    """A driver that hands back objects rather than mappings."""
+
+    def __init__(self, code, title, description, severity_level):
+        self.code = code
+        self.title = title
+        self.description = description
+        self.severity_level = severity_level
+
+
+def test_a_mapping_notification_reaches_the_caller():
+    """The typo case, end to end: no rows, but a warning explaining why."""
+    summary = _Summary(summary_notifications=[{
+        "code": "Neo.ClientNotification.Statement.UnknownLabelWarning",
+        "title": "The provided label is not in the database.",
+        "description": "One of the labels does not exist: (:Compnay)",
+        "severity": "WARNING",
+    }])
+    c = _notes_client(summary)
+    try:
+        r = c.post("/query/cypher", json={"query": "MATCH (c:Compnay) RETURN c"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["rows"] == []
+        assert len(body["notifications"]) == 1
+        note = body["notifications"][0]
+        assert note["code"].endswith("UnknownLabelWarning")
+        assert "not in the database" in note["title"]
+        assert "Compnay" in note["description"]
+        assert note["severity"] == "WARNING"
+    finally:
+        cleanup_dishka()
+
+
+def test_an_object_notification_reaches_the_caller_too():
+    """Newer drivers return objects with `severity_level`, not mappings.
+    Reading only one shape means warnings vanish on a driver bump — silently,
+    since an empty list is indistinguishable from a clean query."""
+    summary = _Summary(summary_notifications=[
+        _ObjNote("Neo.ClientNotification.Statement.UnknownLabelWarning",
+                 "Unknown label", "One of the labels does not exist", "WARNING"),
+    ])
+    c = _notes_client(summary)
+    try:
+        note = c.post("/query/cypher",
+                      json={"query": "MATCH (c:Compnay) RETURN c"}).json()["notifications"][0]
+        assert note["code"].endswith("UnknownLabelWarning")
+        assert note["title"] == "Unknown label"
+        assert note["severity"] == "WARNING"
+    finally:
+        cleanup_dishka()
+
+
+def test_the_older_notifications_attribute_is_still_read():
+    """`summary_notifications` is the newer name; a driver offering only
+    `notifications` must still have its warnings forwarded."""
+    summary = _Summary(notifications=[
+        {"code": "X", "title": "T", "description": "D", "severity": "INFORMATION"},
+    ])
+    c = _notes_client(summary)
+    try:
+        notes = c.post("/query/cypher",
+                       json={"query": "MATCH (n) RETURN n"}).json()["notifications"]
+        assert [n["code"] for n in notes] == ["X"]
+        assert notes[0]["severity"] == "INFORMATION"
+    finally:
+        cleanup_dishka()
+
+
+def test_a_driver_without_notifications_does_not_take_the_rows_down():
+    """Best-effort, and it has to stay that way: notifications are a
+    convenience, the rows are the answer."""
+    c = _notes_client(_Summary(), cols=("n",), records=({"n": 1},))
+    try:
+        r = c.post("/query/cypher", json={"query": "MATCH (n) RETURN n"})
+        assert r.status_code == 200
+        assert r.json()["rows"] == [[1]]
+        assert r.json()["notifications"] == []
+    finally:
+        cleanup_dishka()
+
+
+def test_a_long_description_is_truncated_before_it_reaches_the_editor():
+    """The panel renders these; an unbounded engine string does not belong
+    in a response the Studio puts on screen."""
+    summary = _Summary(summary_notifications=[
+        {"code": "X", "title": "T", "description": "d" * 900, "severity": "WARNING"},
+    ])
+    c = _notes_client(summary)
+    try:
+        note = c.post("/query/cypher",
+                      json={"query": "MATCH (n) RETURN n"}).json()["notifications"][0]
+        assert len(note["description"]) == 300
+    finally:
+        cleanup_dishka()
+
+
+def test_a_notification_missing_every_field_is_still_a_string_shape():
+    """Whatever the driver omits, the response keeps four string fields —
+    the editor renders them directly and a null there is a crash."""
+    summary = _Summary(summary_notifications=[{}])
+    c = _notes_client(summary)
+    try:
+        note = c.post("/query/cypher",
+                      json={"query": "MATCH (n) RETURN n"}).json()["notifications"][0]
+        assert note == {"code": "", "title": "", "description": "", "severity": ""}
+    finally:
+        cleanup_dishka()
