@@ -91,6 +91,19 @@ firds:
 nodeSelector: {}
 tolerations: []
 
+# ─── Stale-run finalizer ────────────────────────────────────────────
+# Closes events.etl_run rows left at 'running' by a killed pod (OOM,
+# activeDeadlineSeconds, eviction), which RunLog cannot do from inside
+# a process that no longer exists. Only touches rows past their own
+# recorded deadline, so it never closes a live run.
+runReaper:
+  schedule: "40 * * * *"
+  deadlineSeconds: 300
+  # Used only for rows predating the deadline_seconds column. Must stay
+  # >= the largest deadlineSeconds among the loaders below (14400).
+  defaultDeadlineSeconds: 14400
+  graceSeconds: 300
+
 # ─── On-demand data-quality assertion Job ───────────────────────────
 # Disabled by default: a normal chart sync must NOT run it. Render with
 # --set dqAssert.enabled=true (+ a fresh runId) and apply on demand to
