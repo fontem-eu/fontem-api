@@ -1,0 +1,88 @@
+{{/*
+Finalizer for ETL runs whose process died without closing its row.
+
+RunLog writes status='running' on entry and rewrites it on exit. A
+SIGKILL — OOM, activeDeadlineSeconds, node eviction — skips the exit
+path entirely, so the row stays 'running' with no process left that
+will ever close it. Those rows are indistinguishable from genuinely
+in-flight ones, which is what makes them harmful rather than merely
+untidy: every stale row hides the run an operator actually needs to
+see, and the dashboard's "currently running" count becomes noise.
+
+This runs hourly and closes only what is provably dead. It reads
+deadline_seconds off each row (mirrored from the job's own
+activeDeadlineSeconds by _etl_cronjob.tpl), so it never has to guess a
+timeout and never races a live job. Pure SQL against the events DB —
+no Kubernetes API access, hence no RBAC and no ServiceAccount here.
+*/}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etl-run-reaper
+  labels:
+    app: etl-run-reaper
+    component: etl
+spec:
+  suspend: {{ .Values.cronjobsSuspended | default false }}
+  # Hourly. The reaper only has to beat an operator's attention span:
+  # rows become reapable at their deadline whatever the schedule, so a
+  # tighter cron would buy nothing but connections.
+  schedule: {{ .Values.runReaper.schedule | default "40 * * * *" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.runReaper.deadlineSeconds | default 300 }}
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: etl-run-reaper
+            component: etl
+          annotations:
+            linkerd.io/inject: disabled
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: regcred
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: run-reaper
+              image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
+              imagePullPolicy: Always
+              env:
+                - name: EVENTS_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: fontem-postgres-credentials
+                      key: EVENTS_DATABASE_URL
+                # Fallback for rows written before deadline_seconds
+                # existed — the ~37 already sitting in prod. Long
+                # enough that it cannot outrun the slowest loader
+                # (etl-gleif, etl-eu-knowledge-graph: 4h).
+                - name: REAP_DEFAULT_DEADLINE_SECONDS
+                  value: {{ .Values.runReaper.defaultDeadlineSeconds | default 14400 | quote }}
+                # Slack between Kubernetes killing the pod and the
+                # kubelet's status write, so the reaper doesn't race a
+                # teardown already in progress.
+                - name: REAP_GRACE_SECONDS
+                  value: {{ .Values.runReaper.graceSeconds | default 300 | quote }}
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "250m"
+                  memory: "256Mi"
+              command:
+                - python
+                - -m
+                - fontem_events.reaper
