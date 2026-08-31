@@ -14,6 +14,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.api.dq_sources import BY_ID, DATA_SOURCES
+from src.api.helpers import events_source_or_503
 from src.atlas_api.schemas import ConsumerLag, SourcePipelineHealth
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
@@ -31,12 +32,7 @@ _STALE_AFTER_HOURS = 48.0
 )
 def pipeline_health(request: Request) -> list[SourcePipelineHealth]:
     """Per-source pipeline health for every registered DataSource."""
-    src = request.app.state.etl_runs_source
-    if not src.configured:
-        raise HTTPException(
-            status_code=503,
-            detail="events store unavailable (EVENTS_DATABASE_URL unset)",
-        )
+    src = events_source_or_503(request)
     metrics = src.pipeline_metrics()
     by_producer = metrics["by_producer"]
     by_cronjob = metrics["by_cronjob"]
@@ -101,12 +97,7 @@ def source_events_timeline(
     source = BY_ID.get(source_id)
     if source is None:
         raise HTTPException(status_code=404, detail=f"unknown source: {source_id}")
-    src = request.app.state.etl_runs_source
-    if not src.configured:
-        raise HTTPException(
-            status_code=503,
-            detail="events store unavailable (EVENTS_DATABASE_URL unset)",
-        )
+    src = events_source_or_503(request)
     rows = src.events_timeline(source.producer, days=days)
     return [
         {"day": r["day"].isoformat(), "events": r["events"]} for r in rows
@@ -127,10 +118,5 @@ def consumer_lag(request: Request) -> list[ConsumerLag]:
     show, because a source can be ingesting perfectly while the
     consumer writing it into Neo4j has stalled.
     """
-    src = request.app.state.etl_runs_source
-    if not src.configured:
-        raise HTTPException(
-            status_code=503,
-            detail="events store unavailable (EVENTS_DATABASE_URL unset)",
-        )
+    src = events_source_or_503(request)
     return [ConsumerLag(**row) for row in src.consumer_lag()]

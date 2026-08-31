@@ -21,21 +21,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 
+from src.api.helpers import events_source_or_503
 from src.atlas_api.schemas import CronjobRuns, EtlRun
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
 
 
 def _etl_runs_source(request: Request):
-    src = request.app.state.etl_runs_source
-    if not src.configured:
-        raise HTTPException(
-            status_code=503,
-            detail="events store unavailable (EVENTS_DATABASE_URL unset)",
-        )
-    return src
+    return events_source_or_503(request)
 
 
 @router.get(
