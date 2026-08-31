@@ -21,21 +21,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 
-from src.atlas_api.schemas import EtlRun
+from src.api.helpers import events_source_or_503
+from src.atlas_api.schemas import CronjobRuns, EtlRun
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
 
 
 def _etl_runs_source(request: Request):
-    src = request.app.state.etl_runs_source
-    if not src.configured:
-        raise HTTPException(
-            status_code=503,
-            detail="events store unavailable (EVENTS_DATABASE_URL unset)",
-        )
-    return src
+    return events_source_or_503(request)
 
 
 @router.get(
@@ -65,3 +60,33 @@ def list_etl_runs(
         limit=capped, cronjob_name=cronjob_name, status=status,
     )
     return [EtlRun(**row) for row in rows]
+
+
+@router.get(
+    "/etl-runs/by-cronjob",
+    responses={503: {"description": "events store unavailable"}},
+)
+def runs_by_cronjob(
+    request: Request,
+    per_job: Annotated[int, Query(
+        ge=1, le=20,
+        description="how many recent runs to return for each cronjob",
+    )] = 4,
+) -> list[CronjobRuns]:
+    """The last `per_job` runs of every cronjob, grouped by cronjob.
+
+    `/etl-runs` returns a flat newest-first window, which is the wrong
+    shape for "is each job healthy": a cronjob running every 4 hours
+    crowds out one running monthly, and the monthly job — the one whose
+    silence matters most — drops off the list. Partitioning per cronjob
+    gives every job the same visibility regardless of cadence.
+    """
+    src = _etl_runs_source(request)
+    rows = src.recent_runs_by_cronjob(per_job=per_job)
+    grouped: dict[str, list[EtlRun]] = {}
+    for row in rows:
+        grouped.setdefault(row["cronjob_name"], []).append(EtlRun(**row))
+    return [
+        CronjobRuns(cronjob_name=name, runs=runs)
+        for name, runs in sorted(grouped.items())
+    ]
