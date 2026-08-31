@@ -14,7 +14,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.api.dq_sources import BY_ID, DATA_SOURCES
-from src.atlas_api.schemas import SourcePipelineHealth
+from src.atlas_api.schemas import ConsumerLag, SourcePipelineHealth
 
 router = APIRouter(prefix="/data-quality", tags=["data-quality"])
 
@@ -111,3 +111,26 @@ def source_events_timeline(
     return [
         {"day": r["day"].isoformat(), "events": r["events"]} for r in rows
     ]
+
+
+@router.get(
+    "/consumer-lag",
+    responses={503: {"description": "events store unavailable"}},
+)
+def consumer_lag(request: Request) -> list[ConsumerLag]:
+    """How far each event consumer trails the head of the log.
+
+    The sinks and the consolidator trigger all read the same event
+    stream at their own pace, so a single number per consumer says
+    whether the graph, the triple store and the search index are
+    actually current — something no per-source freshness check can
+    show, because a source can be ingesting perfectly while the
+    consumer writing it into Neo4j has stalled.
+    """
+    src = request.app.state.etl_runs_source
+    if not src.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="events store unavailable (EVENTS_DATABASE_URL unset)",
+        )
+    return [ConsumerLag(**row) for row in src.consumer_lag()]

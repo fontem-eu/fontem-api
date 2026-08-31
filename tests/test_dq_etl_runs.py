@@ -144,3 +144,62 @@ def test_etl_runs_handles_running_status_without_finished_at():
     body = r.json()
     assert body[0]["finished_at"] is None
     assert body[0]["status"] == "running"
+
+
+# ── /data-quality/etl-runs/by-cronjob ─────────────────────────────────────
+# The flat window this file already covers is the wrong shape for judging
+# per-job health: a cronjob running every 4 hours crowds out one running
+# monthly, so the quiet job — the one whose silence matters most — falls
+# off the list entirely. These pin the grouped variant.
+
+def test_runs_by_cronjob_groups_and_sorts():
+    rows = [
+        _row(run_id=9, cronjob_name="etl-gleif", status="failed"),
+        _row(run_id=8, cronjob_name="etl-gleif", status="success"),
+        _row(run_id=7, cronjob_name="etl-firds", status="failed"),
+    ]
+    with patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.recent_runs_by_cronjob",
+        return_value=rows,
+    ):
+        r = _client().get("/data-quality/etl-runs/by-cronjob")
+    assert r.status_code == 200
+    body = r.json()
+    # Alphabetical by cronjob so the panel order is stable between polls.
+    assert [g["cronjob_name"] for g in body] == ["etl-firds", "etl-gleif"]
+    gleif = next(g for g in body if g["cronjob_name"] == "etl-gleif")
+    assert [run["run_id"] for run in gleif["runs"]] == [9, 8]
+
+
+def test_runs_by_cronjob_passes_per_job_through():
+    with patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.recent_runs_by_cronjob",
+        return_value=[],
+    ) as spy:
+        r = _client().get("/data-quality/etl-runs/by-cronjob?per_job=3")
+    assert r.status_code == 200
+    assert spy.call_args.kwargs["per_job"] == 3
+
+
+def test_runs_by_cronjob_rejects_an_out_of_range_per_job():
+    """Bounded so one request cannot pull the whole run table."""
+    c = _client()
+    assert c.get("/data-quality/etl-runs/by-cronjob?per_job=0").status_code == 422
+    assert c.get("/data-quality/etl-runs/by-cronjob?per_job=99").status_code == 422
+
+
+def test_runs_by_cronjob_503_when_unconfigured():
+    r = _client(events_dsn=None).get("/data-quality/etl-runs/by-cronjob")
+    assert r.status_code == 503
+
+
+def test_runs_by_cronjob_empty_before_bootstrap():
+    """Missing table returns [] from the source; the panel renders empty
+    rather than the dashboard 500-ing on a fresh cluster."""
+    with patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.recent_runs_by_cronjob",
+        return_value=[],
+    ):
+        r = _client().get("/data-quality/etl-runs/by-cronjob")
+    assert r.status_code == 200
+    assert r.json() == []

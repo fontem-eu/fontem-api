@@ -144,6 +144,24 @@ class Observation(BaseModel):
 # ── ETL run log ─────────────────────────────────────────────────────
 
 
+class ConsumerLag(BaseModel):
+    """How far one event consumer trails the log head.
+
+    Source: events.consumer_offsets against max(events.entity_events.seq).
+
+    `lag` is a queue depth, not a rate — a consumer that is merely slow
+    and one that has stopped both show a rising number. `updated_at` is
+    what separates them: a recent timestamp with a large lag means the
+    consumer is running and losing ground, which is the harder failure
+    to notice because nothing is red.
+    """
+    consumer_name: str
+    last_seq: int
+    head_seq: int
+    lag: int
+    updated_at: datetime | None = None
+
+
 class EtlRun(BaseModel):
     """One ETL CronJob invocation. Source: events.etl_run.
 
@@ -163,6 +181,17 @@ class EtlRun(BaseModel):
     summary: str | None = None
     error_message: str | None = None
 
+
+
+class CronjobRuns(BaseModel):
+    """One cronjob's recent invocations, newest first.
+
+    Grouped rather than a flat list because a chatty cronjob otherwise
+    fills any shared window and the quiet ones — the ones most likely
+    to have silently stopped — disappear from the dashboard entirely.
+    """
+    cronjob_name: str
+    runs: list[EtlRun]
 
 class SeriesResponse(BaseModel):
     dataset: str

@@ -138,6 +138,78 @@ class EtlRunsSource:
         except psycopg.errors.UndefinedTable:
             return []
 
+    def consumer_lag(self) -> list[dict[str, Any]]:
+        """Per-consumer offset lag against the head of the event log.
+
+        `lag` is the number of events a consumer has not yet handled.
+        It is the difference between the log head and the consumer's
+        committed offset, so it is a queue depth rather than a rate —
+        a consumer that is merely slow and one that has stopped both
+        show a rising number, and `updated_at` is what separates them.
+
+        Missing-table → empty list, same contract as recent_runs().
+        """
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                # One scan for the head rather than a correlated subquery
+                # per row: entity_events is ~65M rows and max(seq) is an
+                # index-only lookup on the primary key.
+                cur.execute("SELECT coalesce(max(seq), 0) FROM events.entity_events")
+                head = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT consumer_name, last_seq, updated_at
+                    FROM events.consumer_offsets
+                    ORDER BY consumer_name
+                    """
+                )
+                rows = []
+                for name, last_seq, updated_at in cur.fetchall():
+                    rows.append({
+                        "consumer_name": name,
+                        "last_seq": last_seq,
+                        "head_seq": head,
+                        "lag": max(head - last_seq, 0),
+                        "updated_at": updated_at,
+                    })
+                return rows
+        except psycopg.errors.UndefinedTable:
+            return []
+
+    def recent_runs_by_cronjob(
+        self, *, per_job: int = 4,
+    ) -> list[dict[str, Any]]:
+        """The last `per_job` runs for every cronjob, newest first.
+
+        Not expressible with recent_runs(limit=N): a chatty cronjob
+        fills the window and quiet ones vanish from it entirely, which
+        is precisely the case the dashboard needs to show. The window
+        function gives each cronjob its own slice.
+        """
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT run_id, cronjob_name, image_tag,
+                           started_at, finished_at,
+                           status, summary, error_message
+                    FROM (
+                        SELECT *, row_number() OVER (
+                                   PARTITION BY cronjob_name
+                                   ORDER BY started_at DESC
+                               ) AS rn
+                        FROM events.etl_run
+                    ) ranked
+                    WHERE rn <= %s
+                    ORDER BY cronjob_name, started_at DESC
+                    """,
+                    (per_job,),
+                )
+                cols = [c.name for c in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except psycopg.errors.UndefinedTable:
+            return []
+
     def pipeline_metrics(self) -> dict[str, dict]:
         """Raw per-producer and per-cronjob pipeline metrics for the
         data-quality source-health view.

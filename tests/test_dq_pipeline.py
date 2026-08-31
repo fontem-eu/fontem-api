@@ -188,3 +188,67 @@ def test_events_timeline_reader_shapes_rows():
         out = src.events_timeline("load_gleif", days=30)
     assert out == [{"day": date(2026, 6, 1), "events": 5},
                    {"day": date(2026, 6, 2), "events": 9}]
+
+
+# ── /data-quality/consumer-lag ────────────────────────────────────────────
+# Per-source freshness cannot show this: a source can be ingesting
+# perfectly while the consumer writing it into Neo4j has stalled. The lag
+# is a queue depth, so a consumer that is merely slow and one that has
+# stopped both show a rising number — updated_at is what separates them.
+
+def _lag(**overrides):
+    base = {
+        "consumer_name": "neo4j_sink",
+        "last_seq": 65_711_957,
+        "head_seq": 65_711_957,
+        "lag": 0,
+        "updated_at": datetime(2026, 8, 31, 5, 17, tzinfo=timezone.utc),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_consumer_lag_reports_each_consumer():
+    rows = [
+        _lag(),
+        _lag(consumer_name="consolidator_trigger",
+             last_seq=50_366_134, lag=15_345_823),
+    ]
+    with patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.consumer_lag",
+        return_value=rows,
+    ):
+        r = _client().get("/data-quality/consumer-lag")
+    assert r.status_code == 200
+    body = r.json()
+    assert {b["consumer_name"] for b in body} == {
+        "neo4j_sink", "consolidator_trigger"}
+    trigger = next(b for b in body if b["consumer_name"] == "consolidator_trigger")
+    assert trigger["lag"] == 15_345_823
+    assert trigger["head_seq"] == 65_711_957
+
+
+def test_consumer_lag_keeps_a_caught_up_consumer_at_zero():
+    """Zero is a real value here, not 'no data' — the panel must be able
+    to show green rather than blank."""
+    with patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.consumer_lag",
+        return_value=[_lag()],
+    ):
+        r = _client().get("/data-quality/consumer-lag")
+    assert r.json()[0]["lag"] == 0
+
+
+def test_consumer_lag_503_when_unconfigured():
+    r = _client(events_dsn=None).get("/data-quality/consumer-lag")
+    assert r.status_code == 503
+
+
+def test_consumer_lag_empty_before_bootstrap():
+    with patch(
+        "src.atlas_api.sources.etl_runs.EtlRunsSource.consumer_lag",
+        return_value=[],
+    ):
+        r = _client().get("/data-quality/consumer-lag")
+    assert r.status_code == 200
+    assert r.json() == []
