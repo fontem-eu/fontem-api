@@ -15,6 +15,20 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # The backup PVC is local-path, so its PV is pinned to the node
+          # Neo4j runs on (cluster-node-4), and that node carries the
+          # production role taint. Neo4j tolerates it; this job did not,
+          # so the pod stayed Pending with "didn't match PersistentVolume's
+          # node affinity" even once its Secret references were fixed.
+          # Matches the Neo4j deployment exactly — where the volume lives,
+          # the writer has to be able to run.
+          tolerations:
+            - key: void42.internal/role
+              operator: Equal
+              value: prod
+              effect: NoSchedule
+          nodeSelector:
+            node-role.kubernetes.io/production: ""
           containers:
             - name: backup
               image: neo4j:5-community
@@ -25,6 +39,18 @@ spec:
                     secretKeyRef:
                       name: neo4j-credentials
                       key: NEO4J_PASSWORD
+                # From the secret, not hard-coded. The address used to be
+                # written into the script as neo4j.gmr.svc.cluster.local;
+                # the gmr namespace was renamed to fontem-prod and no
+                # longer exists, so every scheduled backup connected to
+                # nothing. Every other job in this chart already reads
+                # NEO4J_URI from here, which is also why they survived
+                # the rename and this one did not.
+                - name: NEO4J_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_URI
                 # Kuma push URL lives in its own Secret so it isn't
                 # plaintext in git. The kuma_push_url key holds a full
                 # URL with the per-monitor token + ?status=up query.
@@ -33,6 +59,14 @@ spec:
                     secretKeyRef:
                       name: neo4j-backup-creds
                       key: kuma_push_url
+                      # Optional on purpose. This Secret does not exist in
+                      # fontem-prod, and a non-optional reference to a
+                      # missing Secret stops the pod being created at all —
+                      # so an absent *alerting* credential was preventing
+                      # the backup itself from ever running. The script
+                      # already treats the push as best-effort; the
+                      # dependency has to point the same way.
+                      optional: true
               command:
                 - /bin/sh
                 - -c
@@ -42,7 +76,7 @@ spec:
                   echo "Starting Neo4j backup ${DATE}..."
 
                   # Export via APOC (works on community edition)
-                  cypher-shell -a bolt://neo4j.gmr.svc.cluster.local:7687 \
+                  cypher-shell -a "$NEO4J_URI" \
                     -u neo4j -p "$NEO4J_PASSWORD" \
                     "CALL apoc.export.cypher.all(null, {streamStatements:true, format:'cypher-shell'})" \
                     > /backup/${DATE}-full.cypher
