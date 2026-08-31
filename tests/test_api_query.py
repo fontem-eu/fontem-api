@@ -1,5 +1,5 @@
 """Read-only Data Studio query proxies: /query/cypher + /query/sql."""
-# pylint: disable=missing-class-docstring,missing-function-docstring,unused-argument,too-few-public-methods
+# pylint: disable=missing-class-docstring,missing-function-docstring,unused-argument,too-few-public-methods,protected-access
 from __future__ import annotations
 
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
@@ -467,5 +467,109 @@ def test_unicode_lookalike_param_names_are_rejected():
             r = c.post("/query/cypher",
                        json={"query": "MATCH (n) RETURN n", "params": {name: 1}})
             assert r.status_code == 400, f"{name!r} -> {r.status_code}"
+    finally:
+        cleanup_dishka()
+
+
+# ── the write/DDL lists are the control, so pin them ─────────────────────
+#
+# These two tuples ARE the defense-in-depth layer. Both exist because of
+# real pentest findings — `CALL dbms.listConfig()` disclosed Neo4j config,
+# and `pg_read_file('/etc/passwd')` read server files under the old
+# superuser DSN — and the engine-level read-only enforcement behind them is
+# the other half, not a replacement.
+#
+# The existing rejection tests sample the lists: four of the eight Cypher
+# keywords, eight of the twenty-four SQL ones. An entry deleted from either
+# tuple would leave every one of them passing.
+#
+# The expected sets below are written out here on purpose rather than
+# imported from the module. A test that loops over the module's own tuple
+# and asserts each entry is rejected cannot fail when an entry is removed —
+# the loop just gets shorter. Holding the list in the test is what makes
+# deleting a keyword a failure instead of a silent weakening.
+
+EXPECTED_CYPHER_FORBIDDEN = {
+    "CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "DROP", "FOREACH",
+}
+
+EXPECTED_SQL_FORBIDDEN = {
+    # writes and DDL
+    "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE",
+    "GRANT", "REVOKE", "COPY", "MERGE", "VACUUM", "COMMENT", "REINDEX",
+    # filesystem / large-object reach (the DAST CRITICAL)
+    "PG_READ_FILE", "PG_READ_BINARY_FILE", "PG_LS_DIR", "PG_STAT_FILE",
+    "PG_LS_LOGDIR", "PG_LS_WALDIR", "PG_LS_TMPDIR",
+    "LO_IMPORT", "LO_EXPORT", "LO_GET",
+}
+
+
+def test_the_forbidden_keyword_lists_are_exactly_these():
+    """Removing an entry is a security change and has to be a deliberate
+    one — editing this test alongside it."""
+    # pylint: disable=import-outside-toplevel
+    from src.api.routers import query as query_router
+    assert set(query_router._CYPHER_FORBIDDEN) == EXPECTED_CYPHER_FORBIDDEN
+    assert set(query_router._SQL_FORBIDDEN) == EXPECTED_SQL_FORBIDDEN
+
+
+def test_every_forbidden_cypher_keyword_is_rejected_end_to_end():
+    """Being in the tuple is not the same as being enforced — the tokeniser
+    sits between them."""
+    c = _client()
+    try:
+        for kw in sorted(EXPECTED_CYPHER_FORBIDDEN):
+            r = c.post("/query/cypher", json={"query": f"MATCH (n) {kw} n"})
+            assert r.status_code == 400, f"{kw} was allowed through"
+    finally:
+        cleanup_dishka()
+
+
+def test_every_forbidden_sql_keyword_is_rejected_end_to_end():
+    c = _client()
+    try:
+        for kw in sorted(EXPECTED_SQL_FORBIDDEN):
+            r = c.post("/query/sql", json={"query": f"SELECT 1 {kw} x"})
+            assert r.status_code == 400, f"{kw} was allowed through"
+    finally:
+        cleanup_dishka()
+
+
+def test_the_keyword_filter_is_case_insensitive():
+    """A filter a caller escapes by typing lowercase is not a filter. The
+    tokeniser upper-cases first; nothing else pins that it does."""
+    c = _client()
+    try:
+        for q in ("MATCH (n) delete n", "MATCH (n) DeLeTe n"):
+            assert c.post("/query/cypher", json={"query": q}).status_code == 400, q
+        assert c.post(
+            "/query/sql",
+            json={"query": "select pg_read_file('/etc/passwd')"},
+        ).status_code == 400
+    finally:
+        cleanup_dishka()
+
+
+def test_punctuation_cannot_hide_a_keyword_from_the_tokeniser():
+    """Parens and semicolons are split on before the word check, which is
+    what stops `DELETE(n)` reading as one token the list never matches."""
+    c = _client()
+    try:
+        for q in ("MATCH (n) DELETE(n)", "MATCH (n) RETURN n;DROP x"):
+            assert c.post("/query/cypher", json={"query": q}).status_code == 400, q
+    finally:
+        cleanup_dishka()
+
+
+def test_the_filter_does_not_over_block_ordinary_reads():
+    """The other failure direction: a read-only studio that refuses reads.
+    Words merely CONTAINING a keyword must pass — `created_at` is a real
+    column name and `MERGE` living inside `MERGED` is not a write."""
+    c = _client()
+    try:
+        for q in ("MATCH (n) RETURN n.created_at",
+                  "MATCH (n:Merged) RETURN n",
+                  "MATCH (n) RETURN n LIMIT 10"):
+            assert c.post("/query/cypher", json={"query": q}).status_code == 200, q
     finally:
         cleanup_dishka()
