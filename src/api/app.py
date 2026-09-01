@@ -39,6 +39,7 @@ from src.api.routers.dq_assertions import router as dq_assertions_router
 from src.api.routers.value_review import router as value_review_router
 from src.api.routers.viz import router as viz_router
 from src.api.routers.query import router as query_router
+from src.api.routers.sitemap_entities import router as sitemap_entities_router
 from src.api.routers.dq_etl_runs import router as dq_etl_runs_router
 from src.api.routers.dq_pipeline import router as dq_pipeline_router
 from src.api.routers.entity_resolution import router as entity_resolution_router
@@ -129,6 +130,7 @@ app.include_router(dq_assertions_router)
 app.include_router(value_review_router)
 app.include_router(viz_router)
 app.include_router(query_router)
+app.include_router(sitemap_entities_router)
 app.include_router(dq_etl_runs_router)
 app.include_router(dq_pipeline_router)
 app.include_router(entity_resolution_router)
