@@ -84,7 +84,11 @@ def load_us_companies(log: EventLog, tickers_data: dict) -> int:  # pylint: disa
                 payload=builders.upsert_company(
                     gmr_id=company_gmr_id,
                     name=name,
-                    country="US",
+                    # alpha-3: the internal convention everywhere else in
+                    # the graph. Written as "US" this loader alone put
+                    # 8,078 companies on a code that no country join
+                    # matches.
+                    country="USA",
                     cik=cik,
                     active=True,
                 ),

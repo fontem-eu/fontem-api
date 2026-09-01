@@ -39,6 +39,7 @@ from pathlib import Path
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 from src.etl.data_description import DataDescription
+from src.services.location_service import LocationService
 
 from . import gmr_id
 
@@ -129,7 +130,12 @@ def emit_listings(emit, entities: dict) -> tuple[int, int]:
                 gmr_id=gid,
                 lei=lei if len(lei) == 20 else None,
                 name=meta.get("name") or None,
-                country=meta.get("country") or None,
+                # Upstream sends alpha-2; the graph's convention is
+                # alpha-3, and load_gleif already normalises here. Left
+                # raw, this loader was the live source of the alpha-2
+                # drift the backfill scripts keep being written to undo.
+                # to_alpha3 is idempotent, so alpha-3 input passes through.
+                country=LocationService.to_alpha3(meta.get("country")) or None,
                 active=True,
             ),
         )

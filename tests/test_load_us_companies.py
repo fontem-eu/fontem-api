@@ -39,7 +39,10 @@ def test_company_payload_carries_cik_and_country():
     load_us_companies(log, data)
     company_call = emit.upsert.call_args_list[0]
     payload = company_call.kwargs["payload"]
-    assert payload["country"] == "US"
+    # alpha-3, like every other country code in the graph. This
+    # asserted "US" before, which is what kept 8,078 US companies on a
+    # code no country join matches.
+    assert payload["country"] == "USA"
     assert payload["cik"] == "0000320193"
     assert payload["active"] is True
 
