@@ -46,6 +46,14 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      {{- /*
+        This deadline is load-bearing twice over: Kubernetes kills the
+        job here, and it is also handed to the run log below as
+        RUN_DEADLINE_SECONDS so the reaper can tell a crashed run from
+        a live one. Both read the same expression on purpose — if they
+        drifted, the reaper would either close live runs or leave dead
+        ones open.
+      */}}
       activeDeadlineSeconds: {{ .deadlineSeconds | default 3600 }}
       backoffLimit: 1
       template:
@@ -97,6 +105,14 @@ spec:
                   value: {{ .name | quote }}
                 - name: IMAGE_TAG
                   value: {{ .Values.version | quote }}
+                # Mirrors activeDeadlineSeconds above. RunLog stores it
+                # on the row so fontem_events.reaper can close runs
+                # whose pod was killed before __exit__ could: past
+                # started_at + this, Kubernetes has already stopped the
+                # pod, so a row still marked 'running' is provably dead
+                # rather than merely stale.
+                - name: RUN_DEADLINE_SECONDS
+                  value: {{ .deadlineSeconds | default 3600 | quote }}
                 {{- range .extraEnv }}
                 - {{ toYaml . | nindent 18 | trim }}
                 {{- end }}
@@ -140,8 +156,11 @@ spec:
               # `fontem_events.RunLog` context, so every run lands a
               # row in `events.etl_run` (status='running' on entry,
               # 'success'|'failed' on clean exit). SIGKILL / OOM /
-              # activeDeadlineSeconds leave the row at 'running' so
-              # the data-quality dashboard can flag the crash without
+              # activeDeadlineSeconds leave the row at 'running' with
+              # no process left to close it; the etl-run-reaper
+              # CronJob rewrites those to 'crashed' once
+              # RUN_DEADLINE_SECONDS has provably elapsed, so the
+              # data-quality dashboard can flag the crash without
               # scraping pod logs. Replaces the previous Uptime-Kuma
               # shell trap — same purpose, structured data instead of
               # a status ping with a stringly-typed summary.
