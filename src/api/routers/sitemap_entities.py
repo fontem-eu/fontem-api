@@ -122,7 +122,11 @@ def _read(neo4j: Neo4jClient, query: str, **params) -> list[str]:
             return [r["id"] for r in tx.run(query, parameters=params) if r["id"]]
 
 
-@router.get("/sitemap-authorities-{country}.xml", include_in_schema=False)
+@router.get(
+    "/sitemap-authorities-{country}.xml",
+    include_in_schema=False,
+    responses={404: {"description": "country not covered by the platform"}},
+)
 @inject
 def sitemap_authorities(country: str, neo4j: FromDishka[Neo4jClient]) -> Response:
     code = _country_or_404(country)
@@ -130,7 +134,11 @@ def sitemap_authorities(country: str, neo4j: FromDishka[Neo4jClient]) -> Respons
     return _xml(_urlset([f"/authority/{i}" for i in ids], "monthly"))
 
 
-@router.get("/sitemap-companies-{country}.xml", include_in_schema=False)
+@router.get(
+    "/sitemap-companies-{country}.xml",
+    include_in_schema=False,
+    responses={404: {"description": "country not covered by the platform"}},
+)
 @inject
 def sitemap_companies(country: str, neo4j: FromDishka[Neo4jClient]) -> Response:
     code = _country_or_404(country)
