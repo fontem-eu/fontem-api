@@ -76,7 +76,10 @@ def test_emit_listings_falls_back_to_name_country_when_no_lei():
     }
     emit_listings(emit, entities)
     payload = emit.upsert.call_args.kwargs["payload"]
-    assert payload["country"] == "FR"
+    # Normalised on the way out — this asserted "FR" before, which
+    # pinned the alpha-2 drift rather than the fallback this test is
+    # actually about.
+    assert payload["country"] == "FRA"
     assert "lei" not in payload  # builder drops Nones
     assert payload["gmr_id"]
 
@@ -226,3 +229,48 @@ def test_esef_plausible_filing_year_bounds():
     assert _plausible_filing_year(2021) is True
     assert _plausible_filing_year(now + 2) is False
     assert _plausible_filing_year(1989) is False
+
+
+# ── country codes are alpha-3 on the way out ─────────────────────────
+#
+# The graph's convention is alpha-3 everywhere — Authority, Contract,
+# Lobbyist and the NUTS links all use it, and load_gleif normalises on
+# write. This loader passed the upstream alpha-2 straight through, which
+# made it the live source of a drift that three separate backfill
+# scripts have been written to undo (backfill_country_alpha3,
+# normalize_countries, normalize_country_codes) and which was still
+# producing new alpha-2 rows the day this was fixed. A country code that
+# does not match the convention silently misses every country join.
+
+def _emitted_countries(entities):
+    _log, emit = _mock_log()
+    emit_listings(emit, entities)
+    return [
+        c.kwargs["payload"].get("country")
+        for c in emit.upsert.call_args_list
+        if c.args[0] == "UpsertCompany"
+    ]
+
+
+def test_alpha2_country_is_normalised_to_alpha3():
+    assert _emitted_countries({
+        "A": {"lei": "724500973ODKK3IFQ447", "name": "Adyen N.V.", "country": "NL"},
+    }) == ["NLD"]
+
+
+def test_alpha3_input_passes_through_unchanged():
+    """Idempotent: the upstream feed may already be normalised, and a
+    re-run must not mangle what it wrote last time."""
+    assert _emitted_countries({
+        "A": {"lei": "724500973ODKK3IFQ447", "name": "X", "country": "NLD"},
+    }) == ["NLD"]
+
+
+def test_an_unrecognised_country_becomes_null_not_junk():
+    """Better an absent country than a code no join will match."""
+    assert _emitted_countries({
+        "A": {"lei": "724500973ODKK3IFQ447", "name": "X", "country": "ZZ"},
+    }) == [None]
+    assert _emitted_countries({
+        "A": {"lei": "724500973ODKK3IFQ447", "name": "X"},
+    }) == [None]
