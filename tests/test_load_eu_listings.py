@@ -237,8 +237,8 @@ def test_esef_plausible_filing_year_bounds():
 # Lobbyist and the NUTS links all use it, and load_gleif normalises on
 # write. This loader passed the upstream alpha-2 straight through, which
 # made it the live source of a drift that three separate backfill
-# scripts have been written to undo (backfill_country_alpha3,
-# normalize_countries, normalize_country_codes) and which was still
+# scripts had been written to undo (since consolidated into
+# backfill_country_alpha3) and which was still
 # producing new alpha-2 rows the day this was fixed. A country code that
 # does not match the convention silently misses every country join.
 

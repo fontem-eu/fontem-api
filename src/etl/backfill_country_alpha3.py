@@ -1,6 +1,21 @@
 """
-One-shot backfill: Company / Authority / Lobbyist country → alpha-3
-====================================================================
+Backfill: Company / Authority / Lobbyist country → alpha-3
+==========================================================
+THE canonical country-normalisation backfill. Two others once existed —
+``normalize_countries`` and ``normalize_country_codes`` — doing the same
+job with a naive per-code ``MATCH {country: $a2} SET`` loop, no batching
+and no unknown-code accounting. Three scripts meant nobody was sure
+which had been run, and in fact none had finished: 14,888 Company rows
+were still alpha-2 on 2026-09-01. They are deleted; this is the one.
+
+Idempotent by construction — it only selects rows where
+``size(country) = 2``, so a second run finds nothing and re-running
+after a partial failure just picks up the remainder.
+
+Run it AFTER the loader fix (#405) is deployed. Before that,
+load_us_companies and load_eu_listings were still writing fresh alpha-2
+rows, and a backfill would have been refilled behind itself.
+
 Earlier versions of the GLEIF / sanctions / TED loaders wrote the
 ``country`` property raw from upstream — ISO 3166-1 alpha-2. The
 internal convention is alpha-3, so every downstream join (entity
