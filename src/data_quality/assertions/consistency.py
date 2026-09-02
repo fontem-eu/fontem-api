@@ -13,6 +13,28 @@ measures *sink* consistency, not load coverage.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
+
+
+# The virtuoso sink percent-encodes every IRI it writes, using exactly this
+# safe set (virtuoso_sink.triples._percent_encode_iri). We have to build the
+# subject IRI the same way for two separate reasons.
+#
+# It has to be VALID: a TED notice id looks like "2011/S 1-000181", and the
+# space inside <...> makes the SPARQL unparseable — Virtuoso answers 400 and
+# the assertion dies instead of evaluating. 1,598,916 Contract keys contain a
+# space or another character that is illegal in an IRI, so a random sample of
+# 12 hit one essentially every time. consistency.contract_neo4j_virtuoso has
+# therefore been reporting an HTTP error rather than a result, which means
+# cross-store contract consistency is currently UNMEASURED, not passing.
+#
+# It also has to MATCH: query a differently-encoded IRI and Virtuoso returns
+# no triples, which this module would read as "every field mismatches" — a
+# green-to-red flip that looks like real drift. Keeping the safe set identical
+# to the sink's is what makes the lookup address the subject the sink wrote.
+def _encode_iri_tail(value: str) -> str:
+    """Percent-encode an id for use inside <...>, matching the sink."""
+    return quote(str(value), safe="%:/?#[]@!$&\'()*+,;=._-~")
 
 # RDF namespace identifiers (not network endpoints) -- http:// is required to
 # match the predicates Virtuoso actually stores.
@@ -90,8 +112,8 @@ def check(neo4j_client, virtuoso, entity_type: str, n: int = 12) -> dict:
         sampled = [dict(r) for r in session.run(sample_q)]
     mismatches: list[str] = []
     for row in sampled:
-        triples = virtuoso.query(
-            "SELECT ?p ?o WHERE { <" + spec["iri"] + str(row["_key"]) + "> ?p ?o }")
+        subject = spec["iri"] + _encode_iri_tail(row["_key"])
+        triples = virtuoso.query(f"SELECT ?p ?o WHERE {{ <{subject}> ?p ?o }}")
         m = _first_mismatch(row["_key"], row, fields, _virtuoso_map(triples))
         if m:
             mismatches.append(m)
