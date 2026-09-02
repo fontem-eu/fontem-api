@@ -157,12 +157,27 @@ def resolve_mention(
         # back to `nuts_code` since regions historically did not get a
         # gmr_id stamped during the early loaders; the new loader does
         # both, so this fallback can be retired post-migration.
+        #
+        # Two queries, not one disjunction. `WHERE a = $x OR b = $x OR
+        # c = $x` across three DIFFERENT properties cannot be served by
+        # the gmr_id index alone: the planner seeks gmr_id and then
+        # ALSO label-scans the whole class twice for the other two legs
+        # (~3.5M Company rows each, ~7M db hits) even when the seek
+        # already matched. That is what made a side-panel label take
+        # 5-20s under load. Seeking the indexed, content-addressable id
+        # first costs 2 db hits and covers every current node; the
+        # legacy fallback below only runs when that misses.
         result = session.run(
-            f"MATCH (n:{cls}) "
-            "WHERE n.gmr_id = $uid OR n.id = $uid OR n.nuts_code = $uid "
-            "RETURN n LIMIT 1",
+            f"MATCH (n:{cls}) WHERE n.gmr_id = $uid RETURN n LIMIT 1",
             uid=uid,
         ).single()
+        if result is None:
+            result = session.run(
+                f"MATCH (n:{cls}) "
+                "WHERE n.id = $uid OR n.nuts_code = $uid "
+                "RETURN n LIMIT 1",
+                uid=uid,
+            ).single()
         if not result:
             raise HTTPException(status_code=404, detail="mention target not found")
         node = dict(result["n"])
