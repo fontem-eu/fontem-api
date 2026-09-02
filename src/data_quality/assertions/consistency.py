@@ -47,6 +47,8 @@ _P17 = "http://www.wikidata.org/prop/direct/P17"
 SPECS: dict[str, dict] = {
     "Contract": {
         "label": "Contract", "key": "ted_notice_id", "iri": _ID + "/Contract/",
+        # Both grains live in the corpus — see _merged_virtuoso_map.
+        "iri_forms": (_ID + "/Notice/", _ID + "/Contract/"),
         "fields": {
             "value_eur": _ONT + "valueEur",
             "value_currency": _ONT + "valueCurrency",
@@ -61,6 +63,40 @@ SPECS: dict[str, dict] = {
         "fields": {"name": _LABEL, "country": _P17},
     },
 }
+
+
+def _merged_virtuoso_map(virtuoso, iri_forms, key) -> dict:
+    """Collect a subject's (predicate -> object) map across its IRI forms.
+
+    A Contract key addresses two subjects, because the sink renders two
+    grains and both are live in the corpus:
+
+      legacy notice-id-keyed events put every fact on
+        .../Contract/<ted_notice_id>
+      notice-grain events (payload carries contract_key) split them:
+        .../Contract/<contract_key>  the entity — aggregates deliberately
+                                     kept OFF it
+        .../Notice/<ted_notice_id>   valueEur, valueCurrency,
+                                     tendersReceived, procedureType
+
+    Measured in prod: 2011/S 1-000181 has 9 triples on Contract and 0 on
+    Notice; 2020/S 090-214531 has 2 on Contract (rdf:type only) and 4 on
+    Notice. Querying only the Contract form finds nothing for every
+    notice-grain record, and the caller reads "no triples" as "every field
+    disagrees" — exactly what produced 12 of 12 inconsistent on the first
+    run after this assertion started evaluating at all.
+
+    Union rather than a grain guess: the two subjects are disjoint in
+    practice — whichever is not carrying the facts holds rdf:type or nothing
+    — so merging is unambiguous and this module never has to know which
+    producer wrote a given record.
+    """
+    tail = _encode_iri_tail(key)
+    vmap: dict = {}
+    for base in iri_forms:
+        triples = virtuoso.query(f"SELECT ?p ?o WHERE {{ <{base}{tail}> ?p ?o }}")
+        vmap.update(_virtuoso_map(triples))
+    return vmap
 
 
 def _norm(v: Any) -> str | None:
@@ -110,11 +146,12 @@ def check(neo4j_client, virtuoso, entity_type: str, n: int = 12) -> dict:
     )
     with neo4j_client.session() as session:
         sampled = [dict(r) for r in session.run(sample_q)]
+    # Entity types with a single subject form just wrap their `iri`.
+    iri_forms = spec.get("iri_forms") or (spec["iri"],)
     mismatches: list[str] = []
     for row in sampled:
-        subject = spec["iri"] + _encode_iri_tail(row["_key"])
-        triples = virtuoso.query(f"SELECT ?p ?o WHERE {{ <{subject}> ?p ?o }}")
-        m = _first_mismatch(row["_key"], row, fields, _virtuoso_map(triples))
+        vmap = _merged_virtuoso_map(virtuoso, iri_forms, row["_key"])
+        m = _first_mismatch(row["_key"], row, fields, vmap)
         if m:
             mismatches.append(m)
     return {"violations": len(mismatches), "total": len(sampled),
