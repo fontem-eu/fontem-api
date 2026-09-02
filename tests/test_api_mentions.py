@@ -42,6 +42,72 @@ class _StubNeo4j(_FakeNeo4jClient):
         return _StubNeo4jSession(self._node)
 
 
+class _PropertyAwareSession(_FakeNeo4jSession):
+    """A session that answers like the real store: a node is found only
+    if the query filters on a property that node actually carries.
+
+    The stub above returns its node for ANY query, so it cannot tell an
+    indexed `gmr_id` seek apart from the legacy `id`/`nuts_code`
+    fallback — it would stay green if either path were dropped.
+
+    No nuts_code case here on purpose: _IRI_RE only admits a UUID, so a
+    real NUTS code like "PT16" is rejected as a 400 long before the
+    query runs. That leg is unreachable in practice.
+    """
+
+    def __init__(self, node):
+        self._node = node
+
+    def run(self, query, **kwargs):  # type: ignore[override]
+        uid = kwargs.get("uid")
+        for prop in ("gmr_id", "id", "nuts_code"):  # nuts_code: see note below
+            if f"n.{prop} = $uid" in query and self._node.get(prop) == uid:
+                return _MatchOneResult(self._node)
+        return _MatchOneResult(None)
+
+
+class _PropertyAwareNeo4j(_FakeNeo4jClient):
+    def __init__(self, node):
+        self._node = node
+
+    def session(self):
+        return _PropertyAwareSession(self._node)
+
+
+# ── lookup keys ─────────────────────────────────────────────
+
+
+def test_resolve_finds_node_by_gmr_id():
+    uid = "11111111-2222-3333-4444-555555555555"
+    node = {"gmr_id": uid, "name": "Siemens AG", "country": "DEU"}
+    client = make_test_client(neo4j_client=_PropertyAwareNeo4j(node))
+    try:
+        r = client.get(
+            f"/mentions/resolve?iri=http://data.fontem.eu/id/Company/{uid}")
+        assert r.status_code == 200
+        assert r.json()["label"] == "Siemens AG"
+    finally:
+        cleanup_dishka()
+
+
+def test_resolve_still_finds_legacy_node_without_a_gmr_id():
+    """Nodes predating the gmr_id stamp are reachable only by `id`.
+
+    The fast path seeks gmr_id; this pins that the fallback still runs
+    when that misses, which is the whole reason the fallback exists.
+    """
+    uid = "22222222-3333-4444-5555-666666666666"
+    node = {"id": uid, "name": "Legacy Co", "country": "PRT"}
+    client = make_test_client(neo4j_client=_PropertyAwareNeo4j(node))
+    try:
+        r = client.get(
+            f"/mentions/resolve?iri=http://data.fontem.eu/id/Company/{uid}")
+        assert r.status_code == 200
+        assert r.json()["label"] == "Legacy Co"
+    finally:
+        cleanup_dishka()
+
+
 # ── happy path ──────────────────────────────────────────────
 
 

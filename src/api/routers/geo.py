@@ -97,7 +97,12 @@ def client_region(request: Request, response: Response) -> dict:
         request.headers.get("x-real-ip"),
         request.client.host if request.client else None,
     )
-    a3 = geo_ip.country_for(ip) if ip else None
+    # The MaxMind/db-ip database keys countries by ISO alpha-2
+    # (`country.iso_code`), so normalise before converting: feeding an
+    # alpha-2 straight to alpha3_to_alpha2() matches nothing and returns
+    # a null nuts0 for every visitor.
+    a2 = geo_ip.country_for(ip) if ip else None
+    a3 = LocationService.to_alpha3(a2) if a2 else None
     nuts0 = LocationService.alpha3_to_alpha2(a3) if a3 else None
     return {"country_alpha3": a3, "nuts0": nuts0}
 
