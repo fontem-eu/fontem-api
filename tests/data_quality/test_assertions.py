@@ -115,8 +115,19 @@ def test_deadletter_empty_is_zero_tolerance_pipeline_warn():
 
 def test_values_block_except_documented_warn():
     warn_values = {a.id for a in ASSERTIONS if a.family == VALUES and a.severity == WARN}
-    # The only intentional warn in the value family is the accounting identity.
-    assert warn_values == {"values.accounting_identity"}
+    # Value assertions block by default; every exception is deliberate and
+    # named here, so adding one is a decision rather than a default.
+    assert warn_values == {
+        "values.accounting_identity",
+        # Alpha-2 country codes on Company: a known backlog, not a new
+        # regression. Two loaders wrote them until 2026-09-01 and were
+        # fixed at source; 14,888 rows remain until the backfill runs, so
+        # blocking would fail the job on data we already know about and
+        # have a plan for. The Authority equivalent DOES block, because
+        # that label has always been clean and any drift there is new.
+        # Raise this to BLOCK once the backfill reaches zero.
+        "values.company_country_is_alpha3",
+    }
 
 
 def test_engine_matches_family():

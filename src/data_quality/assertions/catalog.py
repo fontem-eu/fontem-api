@@ -287,6 +287,31 @@ ASSERTIONS: list[Assertion] = [
         zero_violations("companies missing gmr_id", "total"),
         "gmr_id is the canonical join key; a null one orphans the node.",
     ),
+    # Country codes are alpha-3 throughout the graph. Two loaders wrote
+    # alpha-2 until 2026-09-01 (fixed at source), leaving 14,888 Company
+    # rows to backfill. A code in the wrong form is not cosmetic: it
+    # silently misses every country join — the NUTS entity linker, the
+    # location-service lookups, the per-country sitemap shards.
+    Assertion(
+        "values.company_country_is_alpha3", VALUES,
+        "Company.country is alpha-3", WARN, "cypher",
+        "MATCH (c:Company) WHERE c.country IS NOT NULL "
+        "RETURN count(*) AS total, "
+        "count(CASE WHEN size(c.country) <> 3 THEN 1 END) AS violations",
+        zero_violations("companies with a non-alpha-3 country", "total"),
+        "Alpha-2 misses every country join silently. WARN not BLOCK while "
+        "the backfill drains; raise it once it reaches zero.",
+    ),
+    Assertion(
+        "values.authority_country_is_alpha3", VALUES,
+        "Authority.country is alpha-3", BLOCK, "cypher",
+        "MATCH (a:Authority) WHERE a.country IS NOT NULL "
+        "RETURN count(*) AS total, "
+        "count(CASE WHEN size(a.country) <> 3 THEN 1 END) AS violations",
+        zero_violations("authorities with a non-alpha-3 country", "total"),
+        "Authority has always been clean, so any drift here is a new "
+        "loader regression rather than a backlog — hence BLOCK.",
+    ),
     # ---- Family: grain integrity (BLOCK) — the Contract/Notice model ------
     # A :Contract must be the entity (one per real contract), never a raw TED
     # notice. If a modification notice ever carries the :Contract label again,
