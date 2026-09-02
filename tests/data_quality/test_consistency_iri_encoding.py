@@ -13,7 +13,7 @@ differently-encoded IRI returns no triples, which the caller reads as
 "every field mismatches" — a red result that looks like real drift but
 is an addressing bug.
 """
-from src.data_quality.assertions.consistency import _encode_iri_tail
+from src.data_quality.assertions.consistency import SPECS, _encode_iri_tail
 
 
 def test_space_is_encoded():
@@ -49,3 +49,29 @@ def test_angle_brackets_cannot_escape_the_iri():
 def test_accepts_non_string_keys():
     """Neo4j returns ints for some keys; the old code str()'d them."""
     assert _encode_iri_tail(12345) == "12345"
+
+
+def test_contract_addresses_both_grains():
+    """A Contract key can address two subjects and both are live.
+
+    Legacy notice-id-keyed events put every fact on
+    .../Contract/<ted_notice_id>. Notice-grain events split them, keeping
+    aggregates OFF the Contract subject and writing them to
+    .../Notice/<ted_notice_id>.
+
+    Measured in prod: 2011/S 1-000181 has 9 triples on Contract and 0 on
+    Notice; 2020/S 090-214531 has 2 on Contract (rdf:type only) and 4 on
+    Notice. Querying only the Contract form finds nothing for every
+    notice-grain record, and the caller reads "no triples" as "every
+    field disagrees" — the 12-of-12 false positive.
+    """
+    forms = SPECS["Contract"]["iri_forms"]
+    assert any(f.endswith("/Notice/") for f in forms)
+    assert any(f.endswith("/Contract/") for f in forms)
+
+
+def test_single_form_specs_still_work():
+    """Company has one subject form and must not need iri_forms."""
+    spec = SPECS["Company"]
+    forms = spec.get("iri_forms") or (spec["iri"],)
+    assert forms == (spec["iri"],)
