@@ -3,6 +3,7 @@ from __future__ import annotations
 
 # pylint: disable=missing-function-docstring
 
+from unittest import mock
 from unittest.mock import MagicMock
 
 from tests.dishka_fixtures import make_test_client, cleanup_dishka
@@ -154,6 +155,54 @@ def test_client_region_returns_shape_and_maps_alpha3_to_nuts0():
         # no geoip db in tests -> nulls, but the contract shape holds
         assert set(body) == {"country_alpha3", "nuts0"}
         assert r.headers.get("cache-control", "").startswith("no-store")
+    finally:
+        cleanup_dishka()
+
+
+def test_client_region_resolves_country_from_forwarded_ip():
+    """The geoip database returns ISO alpha-2 (`country.iso_code`).
+
+    The endpoint must normalise that to alpha-3 before converting to a
+    NUTS-0 code. Driving it through the real request path with a stubbed
+    database is the only way to catch the alpha-2/alpha-3 mix-up: the
+    shape assertion above stays green either way, because with no
+    database loaded every field is null.
+    """
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        with mock.patch.object(geo_ip, "country_for", return_value="PT"):
+            r = client.get(
+                "/geo/client-region",
+                headers={"X-Forwarded-For": "193.136.0.1"},
+            )
+        assert r.status_code == 200
+        assert r.json() == {"country_alpha3": "PRT", "nuts0": "PT"}
+    finally:
+        cleanup_dishka()
+
+
+def test_client_region_uses_nuts_code_for_greece():
+    """Greece is EL in NUTS, not GR — the region picker keys on NUTS."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        with mock.patch.object(geo_ip, "country_for", return_value="GR"):
+            r = client.get(
+                "/geo/client-region",
+                headers={"X-Forwarded-For": "62.103.0.1"},
+            )
+        assert r.json() == {"country_alpha3": "GRC", "nuts0": "EL"}
+    finally:
+        cleanup_dishka()
+
+
+def test_client_region_is_null_when_no_public_ip_is_visible():
+    """Private hops only (our own proxies) must not guess a country."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        r = client.get(
+            "/geo/client-region", headers={"X-Forwarded-For": "10.0.0.1"},
+        )
+        assert r.json() == {"country_alpha3": None, "nuts0": None}
     finally:
         cleanup_dishka()
 
