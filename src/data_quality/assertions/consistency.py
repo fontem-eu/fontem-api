@@ -15,6 +15,8 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
+from src.data.sparql.same_as import same_as_closure_query
+
 
 # The virtuoso sink percent-encodes every IRI it writes, using exactly this
 # safe set (virtuoso_sink.triples._percent_encode_iri). We have to build the
@@ -90,11 +92,18 @@ def _merged_virtuoso_map(virtuoso, iri_forms, key) -> dict:
     practice — whichever is not carrying the facts holds rdf:type or nothing
     — so merging is unambiguous and this module never has to know which
     producer wrote a given record.
+
+    Each form is read through its owl:sameAs closure. Identity lives in
+    Virtuoso: two records the consolidator approved as the same entity
+    are one entity there, and their facts are spread across both
+    subjects. Reading a bare subject sees half of them and reports the
+    rest as missing from Virtuoso — a cross-store inconsistency that
+    isn't one.
     """
     tail = _encode_iri_tail(key)
     vmap: dict = {}
     for base in iri_forms:
-        triples = virtuoso.query(f"SELECT ?p ?o WHERE {{ <{base}{tail}> ?p ?o }}")
+        triples = virtuoso.query(same_as_closure_query(f"{base}{tail}"))
         vmap.update(_virtuoso_map(triples))
     return vmap
 
