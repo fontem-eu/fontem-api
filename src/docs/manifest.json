@@ -19,7 +19,7 @@
      "summary": "observation, dataset and nuts_region columns, the search path, and why unfiltered dimensions double count.",
      "tags": ["sql", "postgres", "eurostat", "schema", "observation", "nuts"]},
     {"id": "store-rdf", "section": "Data stores", "title": "The RDF store (SPARQL)",
-     "summary": "Virtuoso, the Fontem ontology prefixes, and when a property path beats a Cypher variable-length match.",
+     "summary": "Virtuoso, the ontology prefixes, and when a property path beats a Cypher variable-length match.",
      "tags": ["sparql", "rdf", "virtuoso", "ontology", "wikidata", "ownership"]},
     {"id": "store-duckdb", "section": "Data stores", "title": "The browser transform (DuckDB)",
      "summary": "DuckDB-WASM over already-fetched source rows: always SQL, cannot reach the databases, cannot widen a result.",
