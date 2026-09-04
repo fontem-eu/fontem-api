@@ -100,8 +100,10 @@ def _node_to_panel(cls: str, node: dict[str, Any]) -> dict[str, Any]:  # pylint:
         if node.get("level") is not None:
             facts.append({"key": "level", "value": str(node["level"])})
     elif cls == "Lobbyist":
-        if node.get("transparency_register_id"):
-            facts.append({"key": "TR ID", "value": node["transparency_register_id"]})
+        # disclosure_id, not transparency_register_id: the latter is
+        # present on ZERO Lobbyist nodes, so this fact never appeared.
+        if node.get("disclosure_id"):
+            facts.append({"key": "TR ID", "value": node["disclosure_id"]})
     elif cls == "CohesionProject":
         if node.get("project_id"):
             facts.append({"key": "project_id", "value": node["project_id"]})

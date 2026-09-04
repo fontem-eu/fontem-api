@@ -46,6 +46,7 @@ from src.api.routers.entity_resolution import router as entity_resolution_router
 from src.api.routers.persons import router as persons_router
 from src.api.routers.graph import router as graph_router
 from src.api.routers.geo import router as geo_router
+from src.api.routers.lobbyists import router as lobbyists_router
 from src.api.routers.mentions import router as mentions_router
 from src.api.routers.euro_tracker import router as euro_tracker_router
 from src.api.routers.sparql import router as sparql_router
@@ -137,6 +138,7 @@ app.include_router(entity_resolution_router)
 app.include_router(persons_router)
 app.include_router(graph_router)
 app.include_router(geo_router)
+app.include_router(lobbyists_router)
 app.include_router(mentions_router)
 app.include_router(euro_tracker_router)
 app.include_router(sparql_router)
