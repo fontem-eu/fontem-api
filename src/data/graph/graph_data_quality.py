@@ -697,15 +697,58 @@ class GraphDataQualitySource(DataQualitySource):
             }
 
     def get_dedup_stats(self) -> dict:
-        """Deduplication queue stats."""
+        """Deduplication funnel stats.
+
+        This used to count `SAME_AS {reviewed: false}` vs
+        `{reviewed: true}`, from when a proposal and an assertion were
+        the same edge with a flag to tell them apart. They are now
+        different relationship types, so both of those counts would
+        return 0 forever and the panel would read as an empty queue
+        rather than a broken one.
+
+        The funnel is: a rule proposes a :SAME_AS_CANDIDATE, a reviewer
+        approves it into a :SAME_AS or declines it, and a :NOT_SAME_AS
+        records an assertion that was later corrected.
+        """
         with self._neo4j.session() as session:
-            pending = session.run(
-                "MATCH ()-[r:SAME_AS {reviewed: false}]->() RETURN count(r) AS n"
-            ).single()["n"]
-            reviewed = session.run(
-                "MATCH ()-[r:SAME_AS {reviewed: true}]->() RETURN count(r) AS n"
-            ).single()["n"]
-            return {"pending": pending, "reviewed": reviewed, "total": pending + reviewed}
+            counts = session.run(
+                """
+                CALL () {
+                  MATCH ()-[r:SAME_AS_CANDIDATE]->()
+                  WHERE coalesce(r.status, 'pending') = 'pending'
+                  RETURN count(r) AS pending, 0 AS declined,
+                         0 AS asserted, 0 AS corrected
+                UNION ALL
+                  MATCH ()-[r:SAME_AS_CANDIDATE]->()
+                  WHERE r.status = 'declined'
+                  RETURN 0 AS pending, count(r) AS declined,
+                         0 AS asserted, 0 AS corrected
+                UNION ALL
+                  MATCH ()-[r:SAME_AS]->()
+                  RETURN 0 AS pending, 0 AS declined,
+                         count(r) AS asserted, 0 AS corrected
+                UNION ALL
+                  MATCH ()-[r:NOT_SAME_AS]->()
+                  RETURN 0 AS pending, 0 AS declined,
+                         0 AS asserted, count(r) AS corrected
+                }
+                RETURN sum(pending) AS pending, sum(declined) AS declined,
+                       sum(asserted) AS asserted, sum(corrected) AS corrected
+                """
+            ).single()
+            pending = counts["pending"]
+            declined = counts["declined"]
+            asserted = counts["asserted"]
+            return {
+                "pending": pending,
+                # Kept under its old name so the existing panel keeps
+                # rendering: "reviewed" is everything a human has ruled on.
+                "reviewed": declined + asserted,
+                "declined": declined,
+                "asserted": asserted,
+                "corrected": counts["corrected"],
+                "total": pending + declined + asserted,
+            }
 
     def _filings_count(self, graph_iri: str) -> int:
         """Count distinct fontem:Filing in a single named graph."""

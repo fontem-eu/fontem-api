@@ -469,19 +469,43 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "refs.sameas_no_selfloop", REFS,
         "SAME_AS has no self-loops", BLOCK, "cypher",
-        "MATCH (a)-[:SAME_AS]->(a) RETURN count(*) AS violations",
+        "MATCH (a)-[:SAME_AS|SAME_AS_CANDIDATE]->(a) RETURN count(*) AS violations",
         zero_violations("self-referential SAME_AS edges"),
         "A SAME_AS self-loop is a dedup-rule bug; it would let the merge engine collapse a node "
-        "into itself.",
+        "into itself. Candidates are covered too: a self-loop is just as wrong as a proposal, "
+        "and catching it there catches the rule bug before a reviewer is asked to rule on it.",
     ),
     Assertion(
         "refs.sameas_confidence_range", REFS,
         "SAME_AS.confidence is within [0,1]", BLOCK, "cypher",
-        "MATCH ()-[r:SAME_AS]->() WHERE r.confidence IS NOT NULL "
+        "MATCH ()-[r:SAME_AS|SAME_AS_CANDIDATE]->() WHERE r.confidence IS NOT NULL "
         "AND (r.confidence < 0 OR r.confidence > 1) RETURN count(*) AS violations",
         zero_violations("out-of-range SAME_AS confidences"),
         "Consolidator confidences are probabilities; out-of-range values mean a broken rule, not "
-        "a strong match.",
+        "a strong match. Both relationship types carry the confidence: proposals are where a "
+        "broken rule shows up first, since almost everything stays a proposal.",
+    ),
+    Assertion(
+        "refs.sameas_not_contradicted", REFS,
+        "No SAME_AS between a pair marked NOT_SAME_AS", BLOCK, "cypher",
+        "MATCH (a)-[:SAME_AS]-(b) WHERE EXISTS { (a)-[:NOT_SAME_AS]-(b) } "
+        "RETURN count(*) AS violations",
+        zero_violations("assertions contradicting a correction"),
+        "A :NOT_SAME_AS is an operator's correction of an equivalence that was published and "
+        "found wrong. If a :SAME_AS survives alongside it, either the retraction did not apply "
+        "or a rule re-asserted the pair — and the wrong owl:sameAs is back in Virtuoso.",
+    ),
+    Assertion(
+        "refs.declined_candidate_not_reproposed", REFS,
+        "No pending candidate for a declined or corrected pair", BLOCK, "cypher",
+        "MATCH (a)-[r:SAME_AS_CANDIDATE]-(b) "
+        "WHERE coalesce(r.status, 'pending') = 'pending' "
+        "AND EXISTS { (a)-[:NOT_SAME_AS]-(b) } "
+        "RETURN count(*) AS violations",
+        zero_violations("re-proposed pairs a human already settled"),
+        "The rules are deterministic and the sweeper re-runs them over every entity forever, so "
+        "a decision that does not block re-proposal is undone on the next pass. This is the "
+        "assertion that catches the review queue silently refilling with settled pairs.",
     ),
     Assertion(
         "refs.lobbying_filedby_when_matched", REFS,
