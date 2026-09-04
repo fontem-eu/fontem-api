@@ -66,7 +66,12 @@ def _profile(node: dict[str, Any], filed_for: list[dict]) -> dict[str, Any]:
     }
 
 
-@router.get("/{disclosure_id}")
+@router.get(
+    "/{disclosure_id}",
+    responses={
+        404: {"description": "no register entry with that disclosure_id"},
+    },
+)
 @inject
 def lobbyist_detail(
     disclosure_id: str,
