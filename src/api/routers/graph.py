@@ -40,7 +40,9 @@ _LABEL_ID = {
     "Authority": "authority_id",
     "Person": "person_id",
     "Contract": "ted_notice_id",
-    "Lobbyist": "tr_id",
+    # disclosure_id, not tr_id: tr_id is present on ZERO Lobbyist nodes,
+    # so this lookup could never match one.
+    "Lobbyist": "disclosure_id",
 }
 
 

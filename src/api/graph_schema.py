@@ -38,6 +38,18 @@ COMPANY_NAME_FULLTEXT = "company_name_ft"
 CONTRACT_PUBLICATION_DATE = "contract_publication_date"
 AUTHORITY_NUTS = "authority_nuts"
 
+#: The key /lobbyists/{disclosure_id} looks up on.
+#:
+#: Lobbyist carried no index at all, so the profile route was a
+#: NodeByLabelScan over 18,195 nodes. Small next to Company, but this
+#: backs one page per lobbyist and the sitemap advertises every one of
+#: them, so a crawler turns it into 18,195 scans.
+#:
+#: disclosure_id is also the ONLY identifier these nodes actually have:
+#: gmr_id, tr_id and transparency_register_id are each present on zero
+#: of them, despite code having referenced all three.
+LOBBYIST_DISCLOSURE_ID = "lobbyist_disclosure_id"
+
 _STATEMENTS = (
     f"CREATE FULLTEXT INDEX {COMPANY_NAME_FULLTEXT} IF NOT EXISTS "
     "FOR (c:Company) ON EACH [c.name]",
@@ -45,6 +57,8 @@ _STATEMENTS = (
     "FOR (c:Contract) ON (c.publication_date)",
     f"CREATE INDEX {AUTHORITY_NUTS} IF NOT EXISTS "
     "FOR (a:Authority) ON (a.nuts)",
+    f"CREATE INDEX {LOBBYIST_DISCLOSURE_ID} IF NOT EXISTS "
+    "FOR (l:Lobbyist) ON (l.disclosure_id)",
 )
 
 
