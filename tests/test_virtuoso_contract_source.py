@@ -90,7 +90,7 @@ def test_count_and_total_are_separate_queries():
     v = _Virtuoso(counts=[{"cnt": "720"}], totals=[{"total": "365042992.2"}])
     out = _src(v).get_company_contracts("abc")
     assert out["contract_count"] == 720
-    assert out["total_value_eur"] == pytest.approx(365042992.2)
+    assert out["total_contract_value_eur"] == pytest.approx(365042992.2)
     joined = " ".join(v.queries)
     assert "IF(BOUND(" not in joined, (
         "IF(BOUND(...)) evaluates to 0 for every row in Virtuoso"
@@ -192,3 +192,88 @@ def test_everything_else_stays_on_the_graph_store(method):
     src = _src(_Virtuoso(), fb)
     getattr(src, method)("x")
     assert fb.calls == [method]
+
+
+# ── wire shape ────────────────────────────────────────────────────
+
+
+def test_returns_exactly_the_keys_the_neo4j_source_returns():
+    """The regression this file failed to catch.
+
+    The router reads company_name / country / total_contract_value_eur
+    straight off this dict. Dropping the first two and renaming the
+    third produced a 200 with a nameless company and no contracts —
+    which renders a blank profile rather than raising, so nothing caught
+    it until the e2e gate said "/company/<id> did not resolve".
+
+    Asserting my own shape is worthless here; the shape has to be pinned
+    against the implementation being replaced.
+    """
+    v = _Virtuoso(
+        rows=[{"n": "http://x/1", "notice_id": "n-1"}],
+        counts=[{"cnt": "7"}],
+        totals=[{"total": "1234.5"}],
+    )
+    out = _src(v).get_company_contracts("abc")
+    assert set(out) == {
+        "gmr_id", "company_name", "country",
+        "total_contract_value_eur", "contract_count", "contracts",
+    }
+
+
+def test_identity_prefers_the_requested_record():
+    """The visitor asked for this record; its own name wins when it has
+    one."""
+    v = _Virtuoso(rows=[])
+
+    def query(q):
+        v.queries.append(q)
+        if "?name" in q:
+            return [{"name": "Own Name", "country": "POL"}]
+        if "COUNT(DISTINCT ?n)" in q:
+            return [{"cnt": "0"}]
+        if "SUM(?v)" in q:
+            return [{"total": "0"}]
+        return []
+
+    v.query = query
+    out = _src(v).get_company_contracts("abc")
+    assert out["company_name"] == "Own Name"
+    first_name_q = next(q for q in v.queries if "?name" in q)
+    assert "Company/abc" in first_name_q
+    assert "sameAs" not in first_name_q, "the record's own name needs no closure"
+
+
+def test_identity_falls_back_to_the_closure_when_the_record_is_stripped():
+    """Historical sink bugs stripped subjects to a bare owl:sameAs.
+    Verified on prod: company fb2107f4 carries ONLY that triple while
+    its approved twin holds the real name. A nameless page is worse than
+    the twin's name, and the closure is the same entity by construction.
+    """
+    calls: list[str] = []
+
+    class _V:
+        def query(self, q):
+            calls.append(q)
+            if "?name" in q:
+                # first (own) lookup empty, second (closure) resolves
+                return [] if "sameAs" not in q else [{"name": "Twin Name", "country": "POL"}]
+            if "COUNT(DISTINCT ?n)" in q:
+                return [{"cnt": "0"}]
+            if "SUM(?v)" in q:
+                return [{"total": "0"}]
+            return []
+
+    out = _src(_V()).get_company_contracts("abc")
+    assert out["company_name"] == "Twin Name"
+    assert out["country"] == "POL"
+    assert sum(1 for q in calls if "?name" in q) == 2, "own first, then closure"
+
+
+def test_totals_default_to_zero_not_none():
+    """The router does `.get("total_contract_value_eur", 0)` but a
+    present-and-None key defeats that default and reaches the template
+    as null."""
+    v = _Virtuoso(totals=[])
+    out = _src(v).get_company_contracts("abc")
+    assert out["total_contract_value_eur"] == 0
