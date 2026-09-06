@@ -210,6 +210,60 @@ def test_client_region_is_null_when_no_public_ip_is_visible():
 # ── /geo/nuts-regions ──────────────────────────────────────────
 
 
+def test_nuts_regions_codes_filter_returns_only_what_was_asked_for():
+    """A caller wanting three labels should not receive 1,798 rows.
+
+    The full list is ~91 KB and is rebuilt from the boundary files on
+    every request, so a feed card naming the region a contract was
+    awarded in asks for its own codes.
+    """
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        full = client.get("/geo/nuts-regions").json()["regions"]
+        assert len(full) > 3
+        some = [r["code"] for r in full[:3]]
+        got = client.get(
+            f"/geo/nuts-regions?codes={','.join(some)}").json()["regions"]
+        assert sorted(r["code"] for r in got) == sorted(some)
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_codes_filter_is_case_insensitive_and_trims():
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        full = client.get("/geo/nuts-regions").json()["regions"]
+        code = full[0]["code"]
+        got = client.get(
+            f"/geo/nuts-regions?codes= {code.lower()} ").json()["regions"]
+        assert [r["code"] for r in got] == [code]
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_empty_codes_means_none_not_everything():
+    """`codes=` is an explicit empty selection.
+
+    Falling back to the full list there would hand a caller that asked
+    for nothing the largest response this endpoint has.
+    """
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        assert client.get("/geo/nuts-regions?codes=").json()["regions"] == []
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_without_the_filter_is_unchanged():
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        regions = client.get("/geo/nuts-regions").json()["regions"]
+        assert len(regions) > 100
+        assert set(regions[0]) == {"code", "name", "level"}
+    finally:
+        cleanup_dishka()
+
+
 def test_nuts_regions_returns_flat_list_all_levels():
     client = make_test_client(geo_source=_mock_geo_source([]))
     try:

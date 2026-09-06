@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Annotated
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -206,14 +207,35 @@ def entity_aggregate(
         group="geography",
         core=True),
 )
-def nuts_regions():
+def nuts_regions(
+    codes: Annotated[str | None, Query(
+        description="Comma-separated NUTS codes; returns only these. "
+                    "Omit for the full list.",
+        max_length=2000,
+    )] = None,
+):
     """Flat, geometry-free list of NUTS regions across all bundled levels.
 
     Returns ``{regions: [{code, name, level}]}`` — small enough (~1.8k rows)
     to power a client-side cascading region picker without downloading the
     full boundary GeoJSON. Levels/children are derivable from the codes
     (a child's code is prefixed by its parent's).
+
+    `codes` narrows that to the ones asked for. A caller that needs a
+    handful of labels — a feed card naming the region a contract was
+    awarded in — should not pull 1,798 rows to find three of them; the
+    full list is ~91 KB and this endpoint rebuilds it from the boundary
+    files on every request.
     """
+    wanted = None
+    if codes is not None:
+        wanted = {c.strip().upper() for c in codes.split(",") if c.strip()}
+        # An explicit empty selection means "none", not "everything" —
+        # returning the whole list there would be a surprising amount of
+        # data for a caller that asked for nothing.
+        if not wanted:
+            return {"regions": []}
+
     out = []
     for level in range(4):
         path = os.path.abspath(
@@ -226,7 +248,7 @@ def nuts_regions():
         for feat in data.get("features", []):
             props = feat.get("properties") or {}
             code = props.get("nuts_code")
-            if code:
+            if code and (wanted is None or code.upper() in wanted):
                 out.append(
                     {"code": code, "name": props.get("name") or code, "level": level}
                 )
