@@ -105,12 +105,55 @@ class VirtuosoContractSource(ContractDataSource):
 
         contracts = [self._row(r) for r in rows]
         self._attach_authorities(contracts)
+        identity = self._identity(gmr_id)
+        # Exactly the keys GraphContractSource returns. The router reads
+        # company_name / country / total_contract_value_eur straight off
+        # this dict, so a renamed or missing key renders a nameless page
+        # rather than raising — which is how it reached the e2e gate.
         return {
             "gmr_id": gmr_id,
-            "contracts": contracts,
+            "company_name": identity.get("name"),
+            "country": identity.get("country"),
+            "total_contract_value_eur": _num(
+                (totals[0] if totals else {}).get("total")
+            ) or 0,
             "contract_count": _int((counts[0] if counts else {}).get("cnt")),
-            "total_value_eur": _num((totals[0] if totals else {}).get("total")),
+            "contracts": contracts,
         }
+
+    def _identity(self, gmr_id: str) -> dict[str, Any]:
+        """The company's name and country.
+
+        Prefer the record the visitor actually asked for. Fall back to
+        its sameAs closure only when that record carries no name — which
+        happens, because historical sink bugs stripped subjects down to
+        a bare owl:sameAs. Verified on prod: company fb2107f4 has ONLY
+        the sameAs triple, while its approved twin 984840bd holds
+        "Salus International Sp. z o.o." and POL.
+
+        The fallback is not a bait-and-switch: the closure is, by
+        construction, the same entity. A nameless page would be worse
+        and would tell the visitor nothing.
+        """
+        own = self._name_query(f"<{_ID}/Company/{gmr_id}>")
+        if own.get("name"):
+            return own
+        via_closure = self._name_query("?me", closure=gmr_id)
+        return via_closure or own
+
+    def _name_query(self, subject: str, closure: str | None = None) -> dict[str, Any]:
+        binding = self._closure(closure) if closure else ""
+        rows = self._virtuoso.query(f"""
+SELECT ?name ?country WHERE {{
+  {binding}
+  GRAPH <{_G_COMPANY}> {{
+    {subject} <{_LABEL}> ?name .
+    OPTIONAL {{ {subject} <{_P17}> ?country }}
+  }}
+}}
+LIMIT 1
+""")
+        return rows[0] if rows else {}
 
     # ── everything else stays on the graph store ───────────────────
 
