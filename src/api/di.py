@@ -83,9 +83,29 @@ class DataSourceProvider(Provider):
         )
 
     @provide(scope=Scope.APP)
-    def contract_data_source(self, neo4j: Neo4jClient) -> ContractDataSource:
+    def contract_data_source(
+        self, neo4j: Neo4jClient, virtuoso: VirtuosoClient | None,
+    ) -> ContractDataSource:
+        """Company contracts come from Virtuoso so they aggregate across
+        owl:sameAs; everything else still reads the graph store.
+
+        A company page built on Neo4j alone shows one record's contracts
+        and silently omits its duplicates', because Neo4j holds no
+        equivalences — measured on prod, 3 contracts against 566 across
+        the closure. Wrapping rather than replacing keeps every other
+        read (and the SUBSIDIARY_OF walk the corporate group needs) on
+        the store that is actually good at it, and makes the swap
+        reversible by deleting one line.
+
+        With no Virtuoso configured the wrapper delegates everything, so
+        an environment that has not enabled it behaves exactly as before.
+        """
         from src.data.graph.graph_contract_source import GraphContractSource
-        return GraphContractSource(neo4j_client=neo4j)
+        from src.data.sparql.virtuoso_contract_source import VirtuosoContractSource
+        return VirtuosoContractSource(
+            fallback=GraphContractSource(neo4j_client=neo4j),
+            virtuoso=virtuoso,
+        )
 
     @provide(scope=Scope.APP)
     def data_quality_source(
