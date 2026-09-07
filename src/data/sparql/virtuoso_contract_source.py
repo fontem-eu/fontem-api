@@ -139,15 +139,40 @@ class VirtuosoContractSource(ContractDataSource):
         if own.get("name"):
             return own
         via_closure = self._name_query("?me", closure=gmr_id)
-        return via_closure or own
+        if not via_closure:
+            return own
+        # Merge rather than replace. The closure is consulted for the
+        # name the visitor's own record lacks; it must not drop a
+        # country that record does have.
+        merged = dict(own)
+        for key, value in via_closure.items():
+            if value and not merged.get(key):
+                merged[key] = value
+        return merged
 
     def _name_query(self, subject: str, closure: str | None = None) -> dict[str, Any]:
+        """Name and country for a subject, either of which may be absent.
+
+        The name is OPTIONAL, not required. Making it mandatory meant a
+        company with no rdfs:label matched nothing, so its country was
+        thrown away with it and the page rendered entirely blank —
+        aef601e8 has rdf:type Company and P17 "DEU" in Virtuoso (and
+        country DEU in Neo4j) but the profile showed null for both.
+        Nameless companies are not rare: they arrive from procurement
+        notices that identify a winner by registration number alone.
+
+        rdf:type is the anchor instead, so "exists but unnamed" still
+        returns a row while a gmr_id that resolves to nothing still
+        returns none — which the caller needs in order to 404 rather
+        than serve an empty page.
+        """
         binding = self._closure(closure) if closure else ""
         rows = self._virtuoso.query(f"""
 SELECT ?name ?country WHERE {{
   {binding}
   GRAPH <{_G_COMPANY}> {{
-    {subject} <{_LABEL}> ?name .
+    {subject} a <{_ONT}Company> .
+    OPTIONAL {{ {subject} <{_LABEL}> ?name }}
     OPTIONAL {{ {subject} <{_P17}> ?country }}
   }}
 }}
@@ -203,6 +228,17 @@ LIMIT 1
         )
 
     def _rows_query(self, gmr_id: str, limit: int) -> str:
+        """The listed contracts — the same population the count counts.
+
+        _CANONICAL belongs here as much as in _count_query. Without it
+        the rows included modification restatements that the count and
+        total deliberately exclude, so a company whose contracts are all
+        amendments rendered a table of rows above the words "0
+        contracts" — Siemens AG c0b601df returned contract_count 0,
+        total 0, and five can-modif rows. A row list that disagrees with
+        its own total is worse than either number alone, because there
+        is no way for a reader to tell which one is lying.
+        """
         optionals = "\n    ".join(
             f"OPTIONAL {{ ?n <{_ONT}{pred}> ?{key} }}"
             for key, pred in _CONTRACT_FIELDS
@@ -216,6 +252,7 @@ WHERE {{
     OPTIONAL {{ ?n <{_LABEL}> ?title }}
     OPTIONAL {{ ?n <{_ONT}awardedBy> ?auth }}
     {optionals}
+    {self._CANONICAL}
   }}
 }}
 ORDER BY DESC(?award_date)
