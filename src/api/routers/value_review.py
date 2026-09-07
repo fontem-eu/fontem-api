@@ -15,15 +15,27 @@ import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
+from src.api.admin_auth import require_data_admin
 from src.etl import value_review_queue
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/value-review", tags=["value-review"])
+# Operator surface: the queue exposes contracts flagged as having a
+# suspect value, and /decide emits a corrective UpsertContract event.
+# Gated at the router so a new endpoint is protected by default.
+router = APIRouter(
+    prefix="/value-review",
+    tags=["value-review"],
+    dependencies=[Depends(require_data_admin)],
+    responses={
+        401: {"description": "missing or invalid token"},
+        403: {"description": "not a platform data admin"},
+    },
+)
 
 _REASON_EXPLANATIONS = {
     "implausible_magnitude": (

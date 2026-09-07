@@ -6,14 +6,27 @@ Endpoints for reviewing and resolving SAME_AS merge candidates.
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
 from src.analysis.contract_data_source import ContractDataSource
+from src.api.admin_auth import require_data_admin
 from src.data.graph.neo4j_client import Neo4jClient
 
 
-router = APIRouter(prefix="/entity-resolution", tags=["entity-resolution"])
+# Every route here is an operator surface: the candidate list exposes
+# internal deduplication state, and /resolve merges two entities in the
+# graph. Gated at the router so a new endpoint added below is protected
+# by default rather than by remembering.
+router = APIRouter(
+    prefix="/entity-resolution",
+    tags=["entity-resolution"],
+    dependencies=[Depends(require_data_admin)],
+    responses={
+        401: {"description": "missing or invalid token"},
+        403: {"description": "not a platform data admin"},
+    },
+)
 
 
 class MergedProperties(BaseModel):

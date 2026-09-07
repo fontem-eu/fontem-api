@@ -105,6 +105,18 @@ spec:
               cpu: "2"
               memory: "8Gi"
           env:
+            # Verifies the community API's access tokens, so the operator
+            # endpoints (entity-resolution, value-review) can be limited
+            # to platform data admins. Same secret, already Vault-managed
+            # in every namespace — this only references it.
+            #
+            # Not optional: without it those routes answer 503 rather
+            # than falling back to a default and accepting anything.
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fontem-jwt-secret
+                  key: JWT_SECRET
             # SEC EDGAR's Fair Access policy requires a deliverable
             # contact in the User-Agent. edgartools picks this value up
             # automatically when building requests.
