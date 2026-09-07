@@ -90,37 +90,61 @@ def is_stranded(subject_iri: str) -> bool:
 def all_subjects(virtuoso: VirtuosoClient, graph_iri: str,
                  page: int = _PAGE,
                  cap: int = _RESULT_SET_MAX_ROWS) -> set[str]:
-    """Every distinct subject in a graph, paged.
+    """Every distinct subject in a graph, paged by key rather than offset.
 
-    Virtuoso caps a result set at ResultSetMaxRows (50,000 on shared and
-    prod) and truncates SILENTLY — HTTP 200, no warning, just fewer rows
-    than exist. graph/listing has 124,043 subjects, so a single
-    unpaginated scan returned the first 50,000 and this script concluded
-    that 3,166 stranded subjects had no live twin, when in fact every
-    one of them does. It would have skipped the entire migration and
-    reported success.
+    Two independent Virtuoso limits shape this, and both bite silently
+    or confusingly:
 
-    Paging with ORDER BY (required for OFFSET to be well defined) and a
-    page well under the cap. A page that comes back at or above the cap
-    is indistinguishable from a truncated one, so that is an error
-    rather than a result.
+    * ResultSetMaxRows (50,000 here) truncates a result set with no
+      warning — HTTP 200, just fewer rows than exist. graph/listing has
+      124,043 subjects, so one unpaginated scan returned the first
+      50,000 and every stranded subject looked like it had no live
+      twin. The script reported "would emit 0 events" and would have
+      skipped the whole migration while claiming success.
+
+    * MaxSortedTopRows (10,000) rejects any ORDER BY whose LIMIT+OFFSET
+      exceeds it: "SR353: Sorted TOP clause specifies more then 10005
+      rows to sort". So OFFSET paging cannot reach past row 10,000 at
+      all — the second page is a hard 500, not a truncation.
+
+    Keyset pagination satisfies both: each page sorts at most `page`
+    rows because the FILTER excludes everything already seen, so no
+    OFFSET is needed and nothing approaches either limit. A page at or
+    above the cap is still an error, since a full page is
+    indistinguishable from a truncated one.
     """
+    if page >= cap:
+        raise ValueError(
+            f"page size {page} is not below Virtuoso's result-set cap "
+            f"({cap}); a full page could not be told from a truncated one"
+        )
     subjects: set[str] = set()
-    offset = 0
+    last = ""
     while True:
         rows = virtuoso.query(
-            f"SELECT DISTINCT ?s WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }} "
-            f"ORDER BY ?s LIMIT {page} OFFSET {offset}"
+            f"SELECT DISTINCT ?s WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} "
+            f'FILTER(STR(?s) > "{last}") }} ORDER BY ?s LIMIT {page}'
         )
         if len(rows) >= cap:
             raise RuntimeError(
                 f"page of {len(rows)} rows hit Virtuoso's result-set cap; "
                 "results may be silently truncated. Lower --page-size."
             )
-        subjects.update(r["s"] for r in rows if r.get("s"))
+        got = [r["s"] for r in rows if r.get("s")]
+        if not got:
+            return subjects
+        subjects.update(got)
+        # Rows come back sorted, so the largest is the last one. Using
+        # max() rather than got[-1] so a client that reorders cannot
+        # silently make the scan loop forever or skip a block.
+        nxt = max(got)
+        if nxt <= last:
+            raise RuntimeError(
+                f"keyset did not advance past {last!r}; refusing to loop"
+            )
+        last = nxt
         if len(rows) < page:
             return subjects
-        offset += page
 
 
 def find_stranded(virtuoso: VirtuosoClient, graph_iri: str,

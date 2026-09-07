@@ -25,27 +25,39 @@ G = "http://data.fontem.eu/graph/listing"
 
 
 class _Virtuoso:
-    """Honours LIMIT/OFFSET, and truncates like the real server.
+    """Honours keyset paging, and enforces the two real server limits.
 
-    Virtuoso caps a result set at ResultSetMaxRows and truncates
-    SILENTLY — HTTP 200, no warning. Reproducing that here is the point:
-    without it a test passes against the exact failure this script hit
-    on shared.
+    ResultSetMaxRows truncates SILENTLY (HTTP 200, fewer rows).
+    MaxSortedTopRows rejects an ORDER BY sorting more than 10,000 rows
+    with SR353 — which is why OFFSET paging is impossible here at all.
+    A fake without both passes against bugs that broke the real run
+    twice.
     """
 
-    def __init__(self, subjects, cap=psub._RESULT_SET_MAX_ROWS):
+    def __init__(self, subjects, cap=None, sorted_top=10_000):
         self._subjects = sorted(subjects)
-        self._cap = cap
+        self._cap = cap if cap is not None else psub._RESULT_SET_MAX_ROWS
+        self._sorted_top = sorted_top
         self.queries = []
 
     def query(self, q):
         self.queries.append(q)
+        limit = int(q.split("LIMIT")[1].split()[0]) if "LIMIT" in q else None
+        offset = int(q.split("OFFSET")[1].split()[0]) if "OFFSET" in q else 0
+        if "ORDER BY" in q and limit is not None and limit + offset > self._sorted_top:
+            raise RuntimeError(
+                "SR353: Sorted TOP clause specifies more then "
+                f"{self._sorted_top + 5} rows to sort"
+            )
         rows = self._subjects
-        if "OFFSET" in q:
-            offset = int(q.split("OFFSET")[1].split()[0])
-            limit = int(q.split("LIMIT")[1].split()[0])
-            rows = rows[offset:offset + limit]
-        return [{"s": s} for s in rows[:self._cap]]
+        if 'STR(?s) > "' in q:
+            after = q.split('STR(?s) > "')[1].split('"')[0]
+            rows = [r for r in rows if r > after]
+        if offset:
+            rows = rows[offset:]
+        if limit is not None:
+            rows = rows[:limit]
+        return [{"s": r} for r in rows[:self._cap]]
 
 
 def _patch_sources(monkeypatch, subjects, on_event_log=None):
@@ -176,11 +188,21 @@ def test_paged_scan_finds_the_twin_that_a_truncated_one_misses():
     assert not without
 
 
-def test_a_page_at_the_cap_is_an_error_not_a_result():
-    """A page returning exactly the cap is indistinguishable from a
-    truncated one, so it must not be treated as data."""
-    subjects = [f"http://data.fontem.eu/id/Listing/T{i:06d}" for i in range(10)]
-    # page size above the server's cap: the page comes back full and
-    # there is no way to tell whether more rows exist.
-    with pytest.raises(RuntimeError, match="truncated"):
-        psub.all_subjects(_Virtuoso(subjects, cap=5), G, page=20, cap=5)
+def test_a_page_size_at_or_above_the_cap_is_rejected_up_front():
+    """A full page is indistinguishable from a truncated one, so a page
+    size that could reach the cap is refused before any query runs."""
+    with pytest.raises(ValueError, match="cap"):
+        psub.all_subjects(_Virtuoso([]), G, page=20, cap=5)
+
+
+def test_scan_never_uses_offset():
+    """MaxSortedTopRows rejects ORDER BY with LIMIT+OFFSET over 10,000
+    (SR353), so the second OFFSET page is a hard 500 rather than a
+    truncation. Keyset paging is not an optimisation here — OFFSET
+    simply cannot reach past row 10,000."""
+    subjects = [f"http://data.fontem.eu/id/Listing/T{i:06d}" for i in range(25_000)]
+    v = _Virtuoso(subjects)
+    found = psub.all_subjects(v, G)
+    assert len(found) == 25_000
+    assert not any("OFFSET" in q for q in v.queries), "used OFFSET paging"
+    assert len(v.queries) >= 3
