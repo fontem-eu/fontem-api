@@ -17,7 +17,10 @@ from fastapi import HTTPException
 from src.api.admin_auth import JWT_ALGORITHM, is_data_admin, require_data_admin
 
 
-SECRET = "test-secret"
+# 64 bytes, matching the real Vault-managed secret. PyJWT warns below 32,
+# and a test key shorter than production's would be testing something else.
+SECRET = "test-secret-" + "x" * 52
+OTHER_SECRET = "not-ours-" + "y" * 55
 
 
 class _Creds:
@@ -68,7 +71,7 @@ class TestRequireDataAdmin:
 
     def test_a_token_signed_with_another_secret_is_refused(self):
         with pytest.raises(HTTPException) as e:
-            require_data_admin(_Creds(_token({"roles": ["admin"]}, secret="not-ours")))
+            require_data_admin(_Creds(_token({"roles": ["admin"]}, secret=OTHER_SECRET)))
         assert e.value.status_code == 401
 
     def test_an_expired_token_is_refused(self):
