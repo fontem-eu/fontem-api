@@ -770,3 +770,84 @@ def test_a_notification_missing_every_field_is_still_a_string_shape():
         assert note == {"code": "", "title": "", "description": "", "severity": ""}
     finally:
         cleanup_dishka()
+
+
+# ── comments and strings are not statements ──────────────────────────────
+#
+# The scan used to upper-case the whole query and split it on whitespace, so
+# any English word matching a clause name was a rejection. A model asked to
+# document its work wrote
+#
+#     // Same set of contracts, grouped by what was bought
+#     MATCH (c:Contract)-[:AWARDED_TO]->(co:Company) ...
+#
+# and was refused for "the write/DDL keyword 'SET'". The query was read-only;
+# the comment was the whole offence. These pin that comments and string
+# literals are excluded from the scan WITHOUT opening a way to smuggle a
+# real clause past it.
+
+def test_a_comment_may_contain_a_keyword():
+    c = _client()
+    try:
+        for q in ("// Same set of contracts\nMATCH (n) RETURN n LIMIT 1",
+                  "/* we do not delete anything */ MATCH (n) RETURN n LIMIT 1",
+                  "MATCH (n) RETURN n LIMIT 1 // remove later"):
+            assert c.post("/query/cypher", json={"query": q}).status_code != 400, q
+    finally:
+        cleanup_dishka()
+
+
+def test_a_sql_line_comment_may_contain_a_keyword():
+    c = _client()
+    try:
+        r = c.post("/query/sql", json={"query": "SELECT 1 -- delete this later"})
+        assert r.status_code != 400
+    finally:
+        cleanup_dishka()
+
+
+def test_a_string_literal_may_contain_a_keyword():
+    c = _client()
+    try:
+        q = "MATCH (n) WHERE n.name CONTAINS 'set' RETURN n LIMIT 1"
+        assert c.post("/query/cypher", json={"query": q}).status_code != 400
+    finally:
+        cleanup_dishka()
+
+
+def test_a_real_clause_is_still_rejected_around_comments():
+    # The stripper must not become a way through: a keyword surrounded by
+    # comments is still a keyword.
+    c = _client()
+    try:
+        for q in ("/* a */ MATCH (n) SET n.x = 1",
+                  "// harmless\nMATCH (n) DETACH DELETE n",
+                  "MATCH (n) /* x */ REMOVE n.p"):
+            assert c.post("/query/cypher", json={"query": q}).status_code == 400, q
+    finally:
+        cleanup_dishka()
+
+
+def test_an_unterminated_quote_cannot_hide_a_keyword():
+    # Stripping to end-of-input on an unclosed quote is exactly how a
+    # clause after it would be hidden, so the stripper leaves it in place
+    # and the scan stays conservative.
+    c = _client()
+    try:
+        q = "MATCH (n) WHERE n.name = 'oops SET n.x = 1 RETURN n"
+        assert c.post("/query/cypher", json={"query": q}).status_code == 400
+    finally:
+        cleanup_dishka()
+
+
+def test_hash_does_not_start_a_comment_in_cypher_or_sql():
+    # `#` comments in MySQL and SPARQL, not in Postgres or Cypher. Treating
+    # it as one here would blind the scan to text those engines execute.
+    c = _client()
+    try:
+        assert c.post("/query/cypher",
+                      json={"query": "MATCH (n) # SET n.x = 1"}).status_code == 400
+        assert c.post("/query/sql",
+                      json={"query": "SELECT 1 # DROP TABLE t"}).status_code == 400
+    finally:
+        cleanup_dishka()
