@@ -277,3 +277,106 @@ def test_totals_default_to_zero_not_none():
     v = _Virtuoso(totals=[])
     out = _src(v).get_company_contracts("abc")
     assert out["total_contract_value_eur"] == 0
+
+
+# ── a company without a name still has a country ──────────────────
+
+class _NameCountryVirtuoso(_Virtuoso):
+    """A triple store where the company exists and has a country but
+    carries no rdfs:label.
+
+    This mock honours SPARQL semantics for the one thing under test: a
+    mandatory triple pattern that does not match eliminates the row. So
+    if the identity query demands ?name outside an OPTIONAL and the
+    entity has no name, it returns nothing — which is exactly how the
+    real store behaved, and why the country vanished with it. Without
+    that, the test would pass against the bug it exists to catch.
+    """
+
+    def __init__(self, own: list[dict], closure: list[dict] | None = None):
+        super().__init__()
+        self._own = own
+        self._closure_rows = closure if closure is not None else []
+
+    @staticmethod
+    def _name_is_mandatory(q: str) -> bool:
+        line = next(
+            (ln for ln in q.splitlines() if "#label> ?name" in ln), "",
+        )
+        return bool(line) and not line.strip().startswith("OPTIONAL")
+
+    def query(self, q):
+        self.queries.append(q)
+        if "?name" in q and "?country" in q:
+            rows = self._closure_rows if "?me" in q else self._own
+            if self._name_is_mandatory(q):
+                rows = [r for r in rows if r.get("name")]
+            return rows
+        return super().query(q)
+
+
+def test_nameless_company_keeps_its_country():
+    """Regression: the identity query required rdfs:label, so a company
+    with no name matched nothing and its country was discarded with it.
+
+    Shared 2026-09-07: aef601e8 has rdf:type Company and P17 "DEU" in
+    Virtuoso (country DEU in Neo4j too) and the profile rendered
+    company_name null AND country null — a blank page for a record that
+    exists. Nameless companies are not rare; procurement notices
+    routinely identify a winner by registration number alone.
+    """
+    v = _NameCountryVirtuoso(own=[{"country": "DEU"}])
+    out = _src(virtuoso=v).get_company_contracts("aef601e8", years=5, limit=5)
+    assert out["country"] == "DEU"
+    assert out["company_name"] in (None, "")
+
+
+def test_identity_query_does_not_require_a_name():
+    """The shape that caused it: the label must be OPTIONAL, and
+    rdf:type must anchor the pattern so a gmr_id resolving to nothing
+    still returns nothing (the caller needs that to 404)."""
+    v = _NameCountryVirtuoso(own=[{"country": "DEU"}])
+    _src(virtuoso=v).get_company_contracts("aef601e8", years=5, limit=5)
+    identity = next(q for q in v.queries if "?name" in q and "?country" in q)
+    assert "rdf-schema#label> ?name" in identity
+    # the label pattern must sit inside an OPTIONAL, not stand alone
+    label_line = next(
+        ln for ln in identity.splitlines() if "#label> ?name" in ln
+    )
+    assert label_line.strip().startswith("OPTIONAL"), label_line
+    assert "a <http://data.fontem.eu/ontology#Company>" in identity
+
+
+def test_closure_fallback_does_not_drop_a_country_we_already_have():
+    """The closure is consulted for the name the visitor's own record
+    lacks. It must not replace the whole identity and throw away a
+    country that record does have."""
+    v = _NameCountryVirtuoso(
+        own=[{"country": "DEU"}],
+        closure=[{"name": "Siemens AG"}],
+    )
+    out = _src(virtuoso=v).get_company_contracts("aef601e8", years=5, limit=5)
+    assert out["company_name"] == "Siemens AG"
+    assert out["country"] == "DEU"
+
+
+# ── listed rows and the count must describe the same population ───
+
+def test_rows_query_applies_the_canonical_filter():
+    """Regression: _rows_query omitted _CANONICAL while _count_query and
+    _total_query applied it, so the table listed modification
+    restatements the count deliberately excluded.
+
+    Shared 2026-09-07: Siemens AG c0b601df returned contract_count 0,
+    total 0, and five can-modif rows — a table of contracts above the
+    words "0 contracts". A row list that disagrees with its own total
+    gives the reader no way to tell which number is lying.
+    """
+    v = _Virtuoso(rows=[])
+    _src(virtuoso=v).get_company_contracts("c0b601df", years=5, limit=5)
+    rows_q = next(
+        q for q in v.queries
+        if "ORDER BY DESC(?award_date)" in q and "COUNT(" not in q
+    )
+    assert 'isCurrent' in rows_q
+    assert 'can-modif' in rows_q, "rows must exclude modification restatements"
