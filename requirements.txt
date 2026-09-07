@@ -59,3 +59,8 @@ prometheus-client>=0.20
 pycountry
 maxminddb
 minio>=7.2
+
+# Verifies the community API's access tokens so the operator endpoints
+# (entity-resolution, value-review) can be restricted to data admins.
+# Same HS256 secret, no shared database.
+PyJWT==2.13.0
