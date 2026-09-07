@@ -41,6 +41,7 @@ _ONT = "http://data.fontem.eu/ontology#"
 _G_COMPANY = "http://data.fontem.eu/graph/company"
 _G_CONTRACT = "http://data.fontem.eu/graph/contract"
 _G_AUTHORITY = "http://data.fontem.eu/graph/authority"
+_G_COHESION = "http://data.fontem.eu/graph/eu_cohesion"
 _LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 _P17 = "http://www.wikidata.org/prop/direct/P17"
 
@@ -182,8 +183,171 @@ LIMIT 1
 
     # ── everything else stays on the graph store ───────────────────
 
-    def get_authority_contracts(self, *a: Any, **k: Any) -> Any:
-        return self._fallback.get_authority_contracts(*a, **k)
+    def get_authority_contracts(
+        self, authority_id: str, years: int = 5, limit: int = 50,
+        lang: str | None = None,
+    ) -> dict:
+        """Contracts issued by an authority, across its sameAs closure.
+
+        Authorities duplicate for the same reasons companies do — the
+        same buyer appears under slightly different names across notices
+        — and the consolidator has already linked 623 of them. Measured
+        on shared, authority 0817e807 issues 1 contract from its own
+        subject and 12 across its closure: a 12x difference on a page
+        that is supposed to show what a public body spends.
+
+        `years` is accepted for interface compatibility and unused, as
+        on the company side: the rows query orders by award date and
+        takes `limit`, and no caller passes a narrowed window.
+
+        Falls back to the graph store when Virtuoso is not configured or
+        the query times out.
+        """
+        if self._virtuoso is None:
+            return self._fallback.get_authority_contracts(
+                authority_id, years, limit, lang)
+        try:
+            identity = self._authority_identity(authority_id)
+            if identity is None:
+                return {"authority_id": authority_id, "contracts": [],
+                        "contract_count": 0}
+            rows = self._virtuoso.query(
+                self._authority_rows_query(authority_id, limit))
+            contracts = []
+            for raw in rows:
+                contract = self._row(raw)
+                # _row carries the awarding authority for the company
+                # view; on this page the authority IS the subject, and
+                # the column the reader wants is who won.
+                contract.pop("_auth_iri", None)
+                contract["_contractor_iri"] = raw.get("awardee")
+                contracts.append(contract)
+            self._attach_contractors(contracts)
+            totals = self._authority_totals(authority_id)
+        except SparqlTimeout:
+            logger.warning(
+                "authority contracts for %s timed out in Virtuoso; "
+                "falling back to the graph store", authority_id,
+            )
+            return self._fallback.get_authority_contracts(
+                authority_id, years, limit, lang)
+        return {
+            "authority_id": authority_id,
+            "authority_name": identity.get("name"),
+            "country": identity.get("country"),
+            "total_spend_eur": totals["total"],
+            "contract_count": totals["count"],
+            "contracts": contracts,
+        }
+
+    @staticmethod
+    def _authority_closure(authority_id: str) -> str:
+        return (
+            f"GRAPH <{_G_AUTHORITY}> {{ <{_ID}/Authority/{authority_id}> "
+            f"(<{OWL_SAME_AS}>|^<{OWL_SAME_AS}>)* ?me . }}"
+        )
+
+    def _authority_identity(self, authority_id: str) -> dict | None:
+        """Name and country for the authority, or None if it resolves to
+        nothing — the caller needs that to return an empty payload
+        rather than one with null fields."""
+        rows = self._virtuoso.query(f"""
+SELECT ?name ?country WHERE {{
+  GRAPH <{_G_AUTHORITY}> {{
+    <{_ID}/Authority/{authority_id}> a <{_ONT}Authority> .
+    OPTIONAL {{ <{_ID}/Authority/{authority_id}> <{_LABEL}> ?name }}
+    OPTIONAL {{ <{_ID}/Authority/{authority_id}> <{_P17}> ?country }}
+  }}
+}}
+LIMIT 1
+""")
+        return rows[0] if rows else None
+
+    def _authority_rows_query(self, authority_id: str, limit: int) -> str:
+        optionals = "\n    ".join(
+            f"OPTIONAL {{ ?n <{_ONT}{pred}> ?{key} }}"
+            for key, pred in _CONTRACT_FIELDS
+        )
+        # DISTINCT for the same reason as the company rows query — see
+        # the note there. Authority 0817e807 returned 20 rows of a
+        # single contract without it.
+        return f"""
+SELECT DISTINCT ?n ?title ?awardee {" ".join("?" + k for k, _ in _CONTRACT_FIELDS)}
+WHERE {{
+  {self._authority_closure(authority_id)}
+  GRAPH <{_G_CONTRACT}> {{
+    ?n <{_ONT}awardedBy> ?me .
+    OPTIONAL {{ ?n <{_LABEL}> ?title }}
+    OPTIONAL {{ ?n <{_ONT}awardedTo> ?awardee }}
+    {optionals}
+    {self._CANONICAL}
+  }}
+}}
+ORDER BY DESC(?award_date)
+LIMIT {int(limit)}
+"""
+
+    def _authority_totals(self, authority_id: str) -> dict:
+        crows = self._virtuoso.query(f"""
+SELECT (COUNT(DISTINCT ?n) AS ?cnt) WHERE {{
+  {self._authority_closure(authority_id)}
+  GRAPH <{_G_CONTRACT}> {{ ?n <{_ONT}awardedBy> ?me . {self._CANONICAL} }}
+}}
+""")
+        count = int(crows[0]["cnt"]) if crows and crows[0].get("cnt") else 0
+        # Separate query for the same reason as the company side: an
+        # aggregate over an OPTIONAL alongside a COUNT makes Virtuoso
+        # evaluate the unbound branch as 0 for every row.
+        srows = self._virtuoso.query(f"""
+SELECT (SUM(?v) AS ?total) WHERE {{
+  SELECT DISTINCT ?n ?v WHERE {{
+    {self._authority_closure(authority_id)}
+    GRAPH <{_G_CONTRACT}> {{
+      ?n <{_ONT}awardedBy> ?me .
+      ?n <{_ONT}value_eur> ?v .
+      {self._CANONICAL}
+    }}
+  }}
+}}
+""")
+        total = 0
+        if srows and srows[0].get("total") not in (None, ""):
+            total = float(srows[0]["total"])
+        return {"count": count, "total": total}
+
+    def _attach_contractors(self, contracts: list[dict]) -> None:
+        """Resolve awardee IRIs to company names in ONE batched query.
+
+        Mirror of _attach_authorities, and batched for the same reason:
+        joining the company graph inside the rows query is costed by
+        Virtuoso at thousands of seconds and refused.
+        """
+        iris = {c.get("_contractor_iri") for c in contracts}
+        iris = {i for i in iris if i}
+        names: dict[str, dict] = {}
+        if iris:
+            values = " ".join(f"<{i}>" for i in iris)
+            # Same shape as _attach_authorities: one required pattern in
+            # the GRAPH block with VALUES after it. A block of nothing
+            # but OPTIONALs is a 500 from Virtuoso, not an empty result.
+            rows = self._virtuoso.query(f"""
+SELECT ?c ?name ?country WHERE {{
+  GRAPH <{_G_COMPANY}> {{
+    ?c <{_LABEL}> ?name .
+    OPTIONAL {{ ?c <{_P17}> ?country }}
+  }}
+  VALUES ?c {{ {values} }}
+}}
+""")
+            names = {r["c"]: r for r in rows if r.get("c")}
+        for contract in contracts:
+            iri = contract.pop("_contractor_iri", None)
+            row = names.get(iri, {}) if iri else {}
+            contract["contractor"] = row.get("name")
+            contract["contractor_country"] = row.get("country")
+            contract["contractor_gmr_id"] = (
+                iri.rsplit("/", 1)[-1] if iri else None
+            )
 
     def get_contract_detail(self, *a: Any, **k: Any) -> Any:
         return self._fallback.get_contract_detail(*a, **k)
@@ -191,8 +355,115 @@ LIMIT 1
     def get_sector_summary(self, *a: Any, **k: Any) -> Any:
         return self._fallback.get_sector_summary(*a, **k)
 
-    def get_company_cohesion_grants(self, *a: Any, **k: Any) -> Any:
-        return self._fallback.get_company_cohesion_grants(*a, **k)
+    #: Grant fields, in the response's own naming. Same shape the Neo4j
+    #: source returns, so the router and the web app see no difference.
+    _GRANT_FIELDS: tuple[tuple[str, str], ...] = (
+        ("eu_contribution", "detail_eu_contribution"),
+        ("total_budget", "detail_total_budget"),
+        ("fund", "detail_fund"),
+        ("programme", "detail_programme"),
+        ("start_date", "detail_start_date"),
+        ("end_date", "detail_end_date"),
+        ("nuts", "detail_nuts_code"),
+        ("year", "year"),
+    )
+
+    def get_company_cohesion_grants(self, gmr_id: str, limit: int = 50) -> dict:
+        """EU cohesion grants, aggregated across the company's closure.
+
+        The funding side had exactly the problem the contracts side had:
+        a company whose duplicates hold the grants showed none of them.
+        Measured on shared, Siemens b559559e returns 21 grants from its
+        own subject and 22 across its 22-member closure.
+
+        Falls back to the graph store when Virtuoso is not configured,
+        so an environment without it behaves as before.
+        """
+        if self._virtuoso is None:
+            return self._fallback.get_company_cohesion_grants(gmr_id, limit)
+        try:
+            identity = self._identity(gmr_id)
+            grants = self._grant_rows(gmr_id, limit)
+            totals = self._grant_totals(gmr_id)
+        except SparqlTimeout:
+            logger.warning(
+                "cohesion grants for %s timed out in Virtuoso; "
+                "falling back to the graph store", gmr_id,
+            )
+            return self._fallback.get_company_cohesion_grants(gmr_id, limit)
+        return {
+            "gmr_id": gmr_id,
+            "name": identity.get("name"),
+            "country": identity.get("country"),
+            "grants": grants,
+            "grant_count": totals["count"],
+            "total_eu_contribution": totals["total"],
+        }
+
+    def _grant_rows(self, gmr_id: str, limit: int) -> list[dict]:
+        optionals = "\n    ".join(
+            f"OPTIONAL {{ ?d <{_ONT}{pred}> ?{key} }}"
+            for key, pred in self._GRANT_FIELDS
+        )
+        rows = self._virtuoso.query(f"""
+SELECT DISTINCT ?d ?title {" ".join("?" + k for k, _ in self._GRANT_FIELDS)}
+WHERE {{
+  {self._closure(gmr_id)}
+  GRAPH <{_G_COHESION}> {{
+    ?d <{_ONT}filedBy> ?me .
+    ?d <{_ONT}disclosureSystem> "eu-cohesion" .
+    OPTIONAL {{ ?d <{_LABEL}> ?title }}
+    {optionals}
+  }}
+}}
+ORDER BY DESC(?start_date) DESC(?year)
+LIMIT {int(limit)}
+""")
+        return [
+            {
+                "title": r.get("title"),
+                **{key: r.get(key) for key, _ in self._GRANT_FIELDS},
+            }
+            for r in rows
+        ]
+
+    def _grant_totals(self, gmr_id: str) -> dict:
+        """Count and EU-contribution sum over the closure.
+
+        COUNT(DISTINCT ?d) rather than COUNT(*): a disclosure filed by
+        two companies that later turn out to be the same entity would
+        otherwise be counted once per closure member.
+        """
+        rows = self._virtuoso.query(f"""
+SELECT (COUNT(DISTINCT ?d) AS ?cnt) WHERE {{
+  {self._closure(gmr_id)}
+  GRAPH <{_G_COHESION}> {{
+    ?d <{_ONT}filedBy> ?me .
+    ?d <{_ONT}disclosureSystem> "eu-cohesion" .
+  }}
+}}
+""")
+        count = int(rows[0]["cnt"]) if rows and rows[0].get("cnt") else 0
+        # Summed in a separate query for the same reason _total_query is
+        # separate on the contracts side: mixing an aggregate over an
+        # OPTIONAL with a COUNT in one SELECT makes Virtuoso evaluate the
+        # unbound branch as 0 for every row.
+        srows = self._virtuoso.query(f"""
+SELECT (SUM(?v) AS ?total) WHERE {{
+  SELECT DISTINCT ?d ?v WHERE {{
+    {self._closure(gmr_id)}
+    GRAPH <{_G_COHESION}> {{
+      ?d <{_ONT}filedBy> ?me .
+      ?d <{_ONT}disclosureSystem> "eu-cohesion" .
+      ?d <{_ONT}detail_eu_contribution> ?v .
+    }}
+  }}
+}}
+""")
+        total = 0
+        if srows and srows[0].get("total") not in (None, ""):
+            total = float(srows[0]["total"])
+        return {"count": count, "total": total}
 
     def get_single_bidder_stats(self, *a: Any, **k: Any) -> Any:
         return self._fallback.get_single_bidder_stats(*a, **k)
@@ -243,8 +514,16 @@ LIMIT 1
             f"OPTIONAL {{ ?n <{_ONT}{pred}> ?{key} }}"
             for key, pred in _CONTRACT_FIELDS
         )
+        # DISTINCT is load-bearing, not tidiness. The closure is a
+        # property path, and Virtuoso yields ?me once per PATH, not once
+        # per member — a 22-member closure with several sameAs routes
+        # between its records returns the same contract many times over.
+        # Measured on shared before this: company c0b601df asked for 20
+        # rows and got 20, of which 2 were distinct contracts. The page
+        # rendered the same two awards ten times each while the count
+        # beside it (COUNT(DISTINCT ?n)) correctly said 29.
         return f"""
-SELECT ?n ?title ?auth {" ".join("?" + k for k, _ in _CONTRACT_FIELDS)}
+SELECT DISTINCT ?n ?title ?auth {" ".join("?" + k for k, _ in _CONTRACT_FIELDS)}
 WHERE {{
   {self._closure(gmr_id)}
   GRAPH <{_G_CONTRACT}> {{
