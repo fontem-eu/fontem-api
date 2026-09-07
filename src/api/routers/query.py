@@ -62,6 +62,68 @@ _SQL_FORBIDDEN = (
 _CYPHER_PROC_DENY = re.compile(r"\b(dbms|apoc)\s*\.", re.IGNORECASE)
 
 
+#: Line-comment markers per language. `#` is deliberately absent: it starts
+#: a comment in MySQL and SPARQL but not in Postgres or Cypher, and treating
+#: it as one here would blind the scan to text those engines DO execute.
+_LINE_COMMENT = {"Cypher": ("//",), "SQL": ("--",)}
+
+
+def _strip_noncode(query: str, lang: str) -> str:
+    """The query with comments and string literals blanked out.
+
+    For SCANNING only — the engine is always sent the original. A keyword
+    inside a comment or a quoted string is not a statement, and treating it
+    as one rejected working queries: a model wrote
+
+        // Same set of contracts, grouped by what was bought
+        MATCH (c:Contract)-[:AWARDED_TO]->(co:Company) ...
+
+    and was refused for "the write/DDL keyword 'SET'", because upper-casing
+    and splitting turns the English word "set" into the Cypher clause. The
+    query was read-only. Documenting it was what made it look dangerous.
+
+    Blanked, not deleted, so nothing on either side of a removed span is
+    joined into a new token that was never written.
+
+    An UNTERMINATED string or block comment is left in place. Stripping to
+    the end of the input on an unclosed quote is exactly how a keyword after
+    it would be hidden from this scan; such a query cannot parse anyway, so
+    the conservative reading costs nothing real.
+    """
+    line_markers = _LINE_COMMENT.get(lang, ())
+    out = list(query)
+    i, n = 0, len(query)
+    while i < n:
+        ch = query[i]
+        # Block comment — both languages use /* ... */
+        if query.startswith("/*", i):
+            end = query.find("*/", i + 2)
+            if end == -1:
+                break                      # unterminated: leave the rest alone
+            for j in range(i, end + 2):
+                out[j] = " "
+            i = end + 2
+            continue
+        marker = next((m for m in line_markers if query.startswith(m, i)), None)
+        if marker:
+            end = query.find("\n", i)
+            end = n if end == -1 else end
+            for j in range(i, end):
+                out[j] = " "
+            i = end
+            continue
+        if ch in ("'", '"', "`"):
+            end = query.find(ch, i + 1)
+            if end == -1:
+                break                      # unterminated: leave the rest alone
+            for j in range(i, end + 1):
+                out[j] = " "
+            i = end + 1
+            continue
+        i += 1
+    return "".join(out)
+
+
 def _validate(query: str, forbidden: tuple, lang: str) -> str:
     if not isinstance(query, str) or not query.strip():
         raise HTTPException(status_code=400, detail="Body must include a non-empty `query` string")
@@ -70,7 +132,10 @@ def _validate(query: str, forbidden: tuple, lang: str) -> str:
             status_code=400,
             detail=f"Query exceeds the {_MAX_QUERY_BYTES}-byte studio limit",
         )
-    words = set(query.upper().replace("(", " ").replace(")", " ").replace(";", " ").split())
+    # Scanned with comments and string literals blanked; the engine still
+    # receives the query exactly as written.
+    scannable = _strip_noncode(query, lang)
+    words = set(scannable.upper().replace("(", " ").replace(")", " ").replace(";", " ").split())
     hit = next((t for t in forbidden if t in words), None)
     if hit:
         raise HTTPException(
