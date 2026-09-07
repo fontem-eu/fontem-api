@@ -337,6 +337,11 @@ class GraphContractSource(ContractDataSource):
             "procedure_type": ct.get("procedure_type"),
             "award_date": ct.get("publication_date"),
             "authority": {
+                # authority_id, not gmr_id: Authority nodes carry the
+                # former on all 207,002 of them and the latter on none.
+                # Without it the detail page can name the buyer but not
+                # link to it, while the supplier beside it is clickable.
+                "authority_id": auth_node.get("authority_id"),
                 "name": auth_name,
                 "country": auth_node.get("country"),
             },

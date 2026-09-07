@@ -529,6 +529,55 @@ def test_get_contract_detail_includes_integrity():
     assert integ["integrity_red_flags"] >= 2
 
 
+def test_get_contract_detail_carries_the_authority_id():
+    """The buyer needs an id, or the page can name it but not link to it.
+
+    The supplier beside it has always been clickable; the buyer was not,
+    purely because the projection dropped its identifier.
+
+    authority_id, not gmr_id: every one of the 207,002 Authority nodes
+    carries the former and none carries the latter.
+    """
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    ct = {"ted_notice_id": "n1", "title": "Books", "publication_date": "2026-01-15"}
+    auth = {"authority_id": "a-77", "name": "Ministry", "country": "HUN"}
+    comp = {"gmr_id": "g1", "name": "Acme", "country": "HUN"}
+    session.run.return_value.single.return_value = {
+        "ct": ct, "a": auth, "c": comp, "cpv": None}
+    src._neo4j.session.return_value.__enter__ = MagicMock(  # pylint: disable=protected-access
+        return_value=session)
+    src._neo4j.session.return_value.__exit__ = MagicMock(  # pylint: disable=protected-access
+        return_value=False)
+    out = src.get_contract_detail("n1")
+    assert out["authority"]["authority_id"] == "a-77"
+    assert out["authority"]["name"] == "Ministry"
+    # The supplier's own id is untouched.
+    assert out["contractor"]["gmr_id"] == "g1"
+
+
+def test_get_contract_detail_authority_id_is_none_when_absent():
+    """An authority without one still renders — as text, not a dead link."""
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    session.run.return_value.single.return_value = {
+        "ct": {"ted_notice_id": "n1"},
+        "a": {"name": "Ministry"},
+        "c": {"gmr_id": "g1", "name": "Acme"},
+        "cpv": None,
+    }
+    src._neo4j.session.return_value.__enter__ = MagicMock(  # pylint: disable=protected-access
+        return_value=session)
+    src._neo4j.session.return_value.__exit__ = MagicMock(  # pylint: disable=protected-access
+        return_value=False)
+    out = src.get_contract_detail("n1")
+    assert out["authority"]["authority_id"] is None
+
+
 def test_get_contract_detail_missing_returns_none():
     """A missing contract row yields None (404 path)."""
     from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
