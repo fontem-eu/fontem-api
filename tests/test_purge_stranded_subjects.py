@@ -25,11 +25,27 @@ G = "http://data.fontem.eu/graph/listing"
 
 
 class _Virtuoso:
-    def __init__(self, subjects):
-        self._subjects = subjects
+    """Honours LIMIT/OFFSET, and truncates like the real server.
 
-    def query(self, _q):
-        return [{"s": s} for s in self._subjects]
+    Virtuoso caps a result set at ResultSetMaxRows and truncates
+    SILENTLY — HTTP 200, no warning. Reproducing that here is the point:
+    without it a test passes against the exact failure this script hit
+    on shared.
+    """
+
+    def __init__(self, subjects, cap=psub._RESULT_SET_MAX_ROWS):
+        self._subjects = sorted(subjects)
+        self._cap = cap
+        self.queries = []
+
+    def query(self, q):
+        self.queries.append(q)
+        rows = self._subjects
+        if "OFFSET" in q:
+            offset = int(q.split("OFFSET")[1].split()[0])
+            limit = int(q.split("LIMIT")[1].split()[0])
+            rows = rows[offset:offset + limit]
+        return [{"s": s} for s in rows[:self._cap]]
 
 
 def _patch_sources(monkeypatch, subjects, on_event_log=None):
@@ -130,3 +146,41 @@ def test_reason_names_the_live_subject():
     assert event_type == "PurgeSubject"
     assert payload["subject_iri"] == RAW
     assert ENC in payload["reason"]
+
+
+# ── the scan must not be silently truncated ───────────────────────
+
+def test_scan_pages_past_the_result_set_cap():
+    """Regression for the shared dry run of 2026-09-07.
+
+    graph/listing has 124,043 subjects and Virtuoso's ResultSetMaxRows
+    is 50,000. One unpaginated scan returned the first 50,000 with HTTP
+    200 and no warning, so every stranded subject looked like it had no
+    live twin: the script reported "would emit 0 events" and would have
+    skipped the whole migration while reporting success.
+    """
+    subjects = [f"http://data.fontem.eu/id/Listing/T{i:06d}" for i in range(120_000)]
+    subjects += [RAW, ENC]
+    found = psub.all_subjects(_Virtuoso(subjects), G)
+    assert len(found) == len(subjects)
+    assert RAW in found and ENC in found
+
+
+def test_paged_scan_finds_the_twin_that_a_truncated_one_misses():
+    """The consequence that matters: with paging the stranded subject
+    is correctly classified as a duplicate, not an orphan."""
+    subjects = [f"http://data.fontem.eu/id/Listing/T{i:06d}" for i in range(60_000)]
+    subjects += [RAW, ENC]
+    with_twin, without = psub.find_stranded(_Virtuoso(subjects), G)
+    assert with_twin == [RAW]
+    assert not without
+
+
+def test_a_page_at_the_cap_is_an_error_not_a_result():
+    """A page returning exactly the cap is indistinguishable from a
+    truncated one, so it must not be treated as data."""
+    subjects = [f"http://data.fontem.eu/id/Listing/T{i:06d}" for i in range(10)]
+    # page size above the server's cap: the page comes back full and
+    # there is no way to tell whether more rows exist.
+    with pytest.raises(RuntimeError, match="truncated"):
+        psub.all_subjects(_Virtuoso(subjects, cap=5), G, page=20, cap=5)
