@@ -65,6 +65,12 @@ _IRI_SAFE = "%:/?#[]@!$&'()*+,;=._-~"
 
 _DEFAULT_GRAPH = "http://data.fontem.eu/graph/listing"
 
+# Virtuoso's ResultSetMaxRows, from virtuoso.ini on shared and prod. A
+# result at or above this is assumed truncated, because the server does
+# not say which it is.
+_RESULT_SET_MAX_ROWS = 50_000
+_PAGE = 10_000
+
 _REASON = (
     "stranded by the 2026-06-07 IRI percent-encoding fix "
     "(fontem-virtuoso-sink 37af28e); live subject is {live}"
@@ -81,18 +87,52 @@ def is_stranded(subject_iri: str) -> bool:
     return quote(subject_iri, safe=_IRI_SAFE) != subject_iri
 
 
-def find_stranded(virtuoso: VirtuosoClient, graph_iri: str) -> tuple[list[str], list[str]]:
+def all_subjects(virtuoso: VirtuosoClient, graph_iri: str,
+                 page: int = _PAGE,
+                 cap: int = _RESULT_SET_MAX_ROWS) -> set[str]:
+    """Every distinct subject in a graph, paged.
+
+    Virtuoso caps a result set at ResultSetMaxRows (50,000 on shared and
+    prod) and truncates SILENTLY — HTTP 200, no warning, just fewer rows
+    than exist. graph/listing has 124,043 subjects, so a single
+    unpaginated scan returned the first 50,000 and this script concluded
+    that 3,166 stranded subjects had no live twin, when in fact every
+    one of them does. It would have skipped the entire migration and
+    reported success.
+
+    Paging with ORDER BY (required for OFFSET to be well defined) and a
+    page well under the cap. A page that comes back at or above the cap
+    is indistinguishable from a truncated one, so that is an error
+    rather than a result.
+    """
+    subjects: set[str] = set()
+    offset = 0
+    while True:
+        rows = virtuoso.query(
+            f"SELECT DISTINCT ?s WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }} "
+            f"ORDER BY ?s LIMIT {page} OFFSET {offset}"
+        )
+        if len(rows) >= cap:
+            raise RuntimeError(
+                f"page of {len(rows)} rows hit Virtuoso's result-set cap; "
+                "results may be silently truncated. Lower --page-size."
+            )
+        subjects.update(r["s"] for r in rows if r.get("s"))
+        if len(rows) < page:
+            return subjects
+        offset += page
+
+
+def find_stranded(virtuoso: VirtuosoClient, graph_iri: str,
+                  page: int = _PAGE,
+                  cap: int = _RESULT_SET_MAX_ROWS) -> tuple[list[str], list[str]]:
     """Return (stranded_with_live_twin, stranded_without_twin).
 
-    Classified client-side from one flat subject list rather than with a
+    Classified client-side from the full subject list rather than with a
     self-join in SPARQL: the join is quadratic over a graph with 124K
-    subjects and Virtuoso's cost estimator refuses it, while the flat
-    scan is one cheap query.
+    subjects and Virtuoso's cost estimator refuses it.
     """
-    rows = virtuoso.query(
-        f"SELECT DISTINCT ?s WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }}"
-    )
-    subjects = {r["s"] for r in rows if r.get("s")}
+    subjects = all_subjects(virtuoso, graph_iri, page, cap)
     stranded = sorted(s for s in subjects if is_stranded(s))
     with_twin, without_twin = [], []
     for s in stranded:
@@ -137,10 +177,17 @@ def main(argv=None) -> None:
              "That removes the only copy of the data, not a duplicate.",
     )
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--page-size", type=int, default=_PAGE,
+        help="Subjects per scan request. Must stay under Virtuoso's "
+             f"ResultSetMaxRows ({_RESULT_SET_MAX_ROWS}), which truncates "
+             "silently.",
+    )
     args = parser.parse_args(argv)
 
     virtuoso = VirtuosoClient.from_env()
-    with_twin, without_twin = find_stranded(virtuoso, args.graph)
+    with_twin, without_twin = find_stranded(
+        virtuoso, args.graph, args.page_size)
 
     logger.info("graph %s", args.graph)
     logger.info("  stranded with a live twin : %d", len(with_twin))
