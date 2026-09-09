@@ -12,8 +12,11 @@ the corporate-group walk (SUBSIDIARY_OF*1..5) which is a real graph
 traversal and stays where it belongs.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 
+from src.data.graph.graph_contract_source import GraphContractSource
 from src.data.sparql.virtuoso_contract_source import VirtuosoContractSource
 from src.data.sparql.virtuoso_client import SparqlTimeout
 
@@ -180,9 +183,16 @@ def test_a_virtuoso_timeout_falls_back_rather_than_blanking_the_page():
     assert fb.calls == ["get_company_contracts"]
 
 
+# get_company_cohesion_grants and get_authority_contracts left this list
+# when they moved to Virtuoso — both are entity-scoped, so the sameAs
+# closure changes their answer. What remains is either per-contract
+# (detail, stored_publication_number) or a store-wide aggregate (sector
+# summary, single-bidder), where there is no entity whose duplicates
+# could be missed and no closure to walk. Migrating those would move
+# work to Virtuoso without changing a single answer.
 @pytest.mark.parametrize("method", [
-    "get_authority_contracts", "get_contract_detail", "get_sector_summary",
-    "get_company_cohesion_grants", "get_single_bidder_stats",
+    "get_contract_detail", "get_sector_summary",
+    "get_single_bidder_stats",
     "get_single_bidder_by_country", "get_stored_publication_number",
 ])
 def test_everything_else_stays_on_the_graph_store(method):
@@ -380,3 +390,285 @@ def test_rows_query_applies_the_canonical_filter():
     )
     assert 'isCurrent' in rows_q
     assert 'can-modif' in rows_q, "rows must exclude modification restatements"
+
+
+# ── cohesion grants, through the same closure ─────────────────────────
+
+class _CohesionVirtuoso:
+    """Answers the three cohesion queries by shape."""
+
+    def __init__(self, rows=None, count="0", total=None):
+        self.queries: list[str] = []
+        self._rows = rows if rows is not None else []
+        self._count = count
+        self._total = total
+
+    def query(self, q):
+        self.queries.append(q)
+        if "COUNT(DISTINCT ?d)" in q:
+            return [{"cnt": self._count}]
+        if "SUM(?v)" in q:
+            return [{"total": self._total}] if self._total is not None else []
+        if "?name" in q and "?country" in q:
+            return [{"name": "Siemens AG", "country": "DEU"}]
+        return self._rows
+
+
+def test_cohesion_grants_read_through_the_sameas_closure():
+    """The funding side had the same defect as the contracts side: a
+    company whose duplicates hold the grants showed none of them.
+    Measured on shared — Siemens b559559e returns 21 grants from its own
+    subject and 22 across its closure."""
+    v = _CohesionVirtuoso(count="22")
+    _src(virtuoso=v).get_company_cohesion_grants("b559559e", limit=5)
+    rows_q = next(q for q in v.queries if "filedBy" in q and "COUNT" not in q)
+    assert "owl#sameAs" in rows_q, "grants query does not walk the closure"
+    assert "^<http://www.w3.org/2002/07/owl#sameAs>" in rows_q, (
+        "closure must include the inverse leg — which side the "
+        "consolidator recorded as source is arbitrary"
+    )
+
+
+def test_cohesion_wire_shape_matches_the_graph_source():
+    """Regression: an earlier migration on the contracts side dropped
+    company_name/country and renamed a total. The router reads with
+    .get(), so the page degraded to blanks instead of erroring and the
+    e2e caught it, not the unit tests. Pin the key set."""
+    v = _CohesionVirtuoso(count="3", total="1000.0")
+    out = _src(virtuoso=v).get_company_cohesion_grants("b559559e")
+    assert set(out) == {
+        "gmr_id", "name", "country", "grants",
+        "grant_count", "total_eu_contribution",
+    }
+
+
+def test_cohesion_grant_rows_carry_every_field_the_web_app_reads():
+    v = _CohesionVirtuoso(rows=[{
+        "title": "Skills development", "eu_contribution": "500.5",
+        "total_budget": "1000", "fund": "ESF+", "programme": "P1",
+        "start_date": "2025-01-24", "end_date": "2026-01-01",
+        "nuts": "DE21", "year": "2025",
+    }], count="1")
+    out = _src(virtuoso=v).get_company_cohesion_grants("b559559e")
+    assert set(out["grants"][0]) == {
+        "title", "eu_contribution", "total_budget", "fund", "programme",
+        "start_date", "end_date", "nuts", "year",
+    }
+
+
+def test_cohesion_count_is_distinct_over_disclosures():
+    """A disclosure filed by two records that later turn out to be the
+    same entity must be counted once, not once per closure member."""
+    v = _CohesionVirtuoso(count="22")
+    _src(virtuoso=v).get_company_cohesion_grants("b559559e")
+    count_q = next(q for q in v.queries if "COUNT(DISTINCT ?d)" in q)
+    assert "COUNT(DISTINCT ?d)" in count_q
+
+
+def test_cohesion_total_is_summed_over_distinct_disclosures():
+    """Same reason, for the money: the sum runs over a DISTINCT subquery
+    so a grant reachable via two closure members is not double-counted."""
+    v = _CohesionVirtuoso(count="2", total="78660.0")
+    out = _src(virtuoso=v).get_company_cohesion_grants("b559559e")
+    total_q = next(q for q in v.queries if "SUM(?v)" in q)
+    assert "SELECT DISTINCT ?d ?v" in total_q
+    assert out["total_eu_contribution"] == 78660.0
+
+
+def test_cohesion_missing_total_is_zero_not_none():
+    """A company with grants but no eu_contribution on any of them must
+    report 0 — the web app formats this as currency."""
+    v = _CohesionVirtuoso(count="3", total=None)
+    out = _src(virtuoso=v).get_company_cohesion_grants("b559559e")
+    assert out["total_eu_contribution"] == 0
+
+
+def test_cohesion_delegates_when_virtuoso_is_absent():
+    fb = _Fallback()
+    _src(virtuoso=None, fallback=fb).get_company_cohesion_grants("x")
+    assert fb.calls == ["get_company_cohesion_grants"]
+
+
+def test_cohesion_falls_back_on_timeout():
+    class _Timeout(_CohesionVirtuoso):
+        def query(self, q):
+            raise SparqlTimeout("too slow")
+
+    fb = _Fallback()
+    out = _src(virtuoso=_Timeout(), fallback=fb).get_company_cohesion_grants("x")
+    assert fb.calls == ["get_company_cohesion_grants"]
+    assert out == {"from": "neo4j"}
+
+
+def test_cohesion_shape_is_pinned_against_the_graph_source_itself():
+    """Compare the two sources rather than a copy of one of them.
+
+    The earlier contracts regression passed every unit test because the
+    expected keys were written out by hand next to the new code — so the
+    test agreed with the bug. Driving the real GraphContractSource and
+    diffing the key sets is the check that would have caught it.
+    """
+    neo4j = MagicMock()
+    session = MagicMock()
+    session.run.return_value.single.return_value = {
+        "name": "Siemens AG", "country": "DEU",
+        "grant_count": 3, "total_eu": 1000.0,
+    }
+    session.run.return_value.data.return_value = [{
+        "title": "t", "eu_contribution": 1.0, "total_budget": 2.0,
+        "fund": "ESF+", "programme": "P", "start_date": "2025-01-01",
+        "end_date": "2026-01-01", "nuts": "DE21", "year": 2025,
+    }]
+    neo4j.session.return_value.__enter__ = MagicMock(return_value=session)
+    neo4j.session.return_value.__exit__ = MagicMock(return_value=False)
+    graph_out = GraphContractSource(neo4j_client=neo4j).get_company_cohesion_grants("g")
+
+    virtuoso_out = _src(virtuoso=_CohesionVirtuoso(
+        rows=[{
+            "title": "t", "eu_contribution": "1.0", "total_budget": "2.0",
+            "fund": "ESF+", "programme": "P", "start_date": "2025-01-01",
+            "end_date": "2026-01-01", "nuts": "DE21", "year": "2025",
+        }],
+        count="3", total="1000.0",
+    )).get_company_cohesion_grants("g")
+
+    assert set(virtuoso_out) == set(graph_out), (
+        "top-level keys drifted from the graph source"
+    )
+    assert set(virtuoso_out["grants"][0]) == set(graph_out["grants"][0]), (
+        "grant row keys drifted from the graph source"
+    )
+
+
+# ── the closure yields paths, not members ────────────────────────────
+
+def test_company_rows_query_is_distinct():
+    """Regression, and it shipped.
+
+    The closure is a property path, and Virtuoso yields ?me once per
+    PATH rather than once per member. A 22-member closure with several
+    sameAs routes between its records returns the same contract many
+    times. Measured on shared: company c0b601df asked for 20 rows and
+    got 20, of which 2 were distinct contracts — the page rendered the
+    same two awards ten times each while the count beside it, which
+    used COUNT(DISTINCT ?n), correctly said 29. The count and the list
+    disagreeing is the visible symptom; neither query was obviously
+    wrong on its own.
+    """
+    v = _Virtuoso(rows=[])
+    _src(virtuoso=v).get_company_contracts("abc", years=5, limit=20)
+    rows_q = next(
+        q for q in v.queries
+        if "ORDER BY DESC(?award_date)" in q and "COUNT(" not in q
+    )
+    assert rows_q.lstrip().startswith("SELECT DISTINCT"), (
+        "closure paths multiply rows; the list needs DISTINCT"
+    )
+
+
+def test_authority_rows_query_is_distinct():
+    v = _AuthorityVirtuoso(rows=[])
+    _src(virtuoso=v).get_authority_contracts("aid", limit=20)
+    rows_q = next(
+        q for q in v.queries
+        if "ORDER BY DESC(?award_date)" in q and "COUNT(" not in q
+    )
+    assert rows_q.lstrip().startswith("SELECT DISTINCT")
+
+
+def test_cohesion_rows_query_is_distinct():
+    v = _CohesionVirtuoso()
+    _src(virtuoso=v).get_company_cohesion_grants("abc", limit=20)
+    rows_q = next(q for q in v.queries if "filedBy" in q and "COUNT" not in q
+                  and "SUM(" not in q)
+    assert rows_q.lstrip().startswith("SELECT DISTINCT")
+
+
+# ── authority contracts, through the authority closure ───────────────
+
+class _AuthorityVirtuoso:
+    def __init__(self, rows=None, count="0", total=None):
+        self.queries: list[str] = []
+        self._rows = rows if rows is not None else []
+        self._count = count
+        self._total = total
+
+    def query(self, q):
+        self.queries.append(q)
+        if "?name" in q and "?country" in q and "Authority>" in q:
+            return [{"name": "European Commission", "country": "TZA"}]
+        if "COUNT(DISTINCT ?n)" in q:
+            return [{"cnt": self._count}]
+        if "SUM(?v)" in q:
+            return [{"total": self._total}] if self._total is not None else []
+        if "?c ?name ?country" in q:
+            return [{"c": "http://data.fontem.eu/id/Company/g1",
+                     "name": "GOPA PACE", "country": "DEU"}]
+        return self._rows
+
+
+def test_authority_contracts_walk_the_authority_closure():
+    """623 authorities already carry owl:sameAs — the same buyer under
+    slightly different names across notices. Measured on shared,
+    authority 0817e807 issues 1 contract from its own subject and 12
+    across its closure."""
+    v = _AuthorityVirtuoso(count="12")
+    _src(virtuoso=v).get_authority_contracts("0817e807")
+    rows_q = next(q for q in v.queries if "awardedBy" in q and "COUNT" not in q
+                  and "SUM(" not in q)
+    assert "graph/authority" in rows_q
+    assert "owl#sameAs" in rows_q
+    assert "^<http://www.w3.org/2002/07/owl#sameAs>" in rows_q
+
+
+def test_authority_wire_shape_matches_the_graph_source():
+    v = _AuthorityVirtuoso(count="12", total="500.0")
+    out = _src(virtuoso=v).get_authority_contracts("0817e807")
+    assert set(out) == {
+        "authority_id", "authority_name", "country",
+        "total_spend_eur", "contract_count", "contracts",
+    }
+
+
+def test_authority_rows_carry_the_contractor_not_the_authority():
+    """On this page the authority IS the subject; the column the reader
+    wants is who won. _row carries the awarding authority for the
+    company view, and that must not leak through."""
+    v = _AuthorityVirtuoso(rows=[{
+        "n": "http://data.fontem.eu/id/Contract/x",
+        "title": "T", "awardee": "http://data.fontem.eu/id/Company/g1",
+        "notice_id": "n1", "publication_number": "p1",
+    }], count="1")
+    out = _src(virtuoso=v).get_authority_contracts("0817e807")
+    row = out["contracts"][0]
+    assert row["contractor"] == "GOPA PACE"
+    assert row["contractor_country"] == "DEU"
+    assert row["contractor_gmr_id"] == "g1"
+    assert "_auth_iri" not in row and "_contractor_iri" not in row
+
+
+def test_authority_unknown_id_returns_an_empty_payload():
+    """A gmr_id that resolves to nothing must not render a page of
+    nulls — the caller distinguishes on the empty contracts list."""
+    class _None(_AuthorityVirtuoso):
+        def query(self, q):
+            self.queries.append(q)
+            return []
+    out = _src(virtuoso=_None()).get_authority_contracts("nope")
+    assert out["contracts"] == [] and out["contract_count"] == 0
+
+
+def test_authority_delegates_when_virtuoso_is_absent():
+    fb = _Fallback()
+    _src(virtuoso=None, fallback=fb).get_authority_contracts("a")
+    assert fb.calls == ["get_authority_contracts"]
+
+
+def test_authority_falls_back_on_timeout():
+    class _Timeout(_AuthorityVirtuoso):
+        def query(self, q):
+            raise SparqlTimeout("slow")
+    fb = _Fallback()
+    out = _src(virtuoso=_Timeout(), fallback=fb).get_authority_contracts("a")
+    assert fb.calls == ["get_authority_contracts"]
+    assert out == {"from": "neo4j"}
