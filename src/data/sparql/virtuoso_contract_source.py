@@ -45,6 +45,11 @@ _G_COHESION = "http://data.fontem.eu/graph/eu_cohesion"
 _LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 _P17 = "http://www.wikidata.org/prop/direct/P17"
 
+#: Indent between OPTIONAL lines inside a generated WHERE block. The
+#: three builders that assemble one share it so a change to the query
+#: layout cannot leave them formatted differently.
+_OPTIONAL_SEP = "\n    "
+
 # Fields read straight off the notice/contract subject. Name here maps to
 # the ontology predicate; the row key is what the API already returns, so
 # the wire shape does not change when the backing store does.
@@ -264,7 +269,7 @@ LIMIT 1
         return rows[0] if rows else None
 
     def _authority_rows_query(self, authority_id: str, limit: int) -> str:
-        optionals = "\n    ".join(
+        optionals = _OPTIONAL_SEP.join(
             f"OPTIONAL {{ ?n <{_ONT}{pred}> ?{key} }}"
             for key, pred in _CONTRACT_FIELDS
         )
@@ -401,7 +406,7 @@ SELECT ?c ?name ?country WHERE {{
         }
 
     def _grant_rows(self, gmr_id: str, limit: int) -> list[dict]:
-        optionals = "\n    ".join(
+        optionals = _OPTIONAL_SEP.join(
             f"OPTIONAL {{ ?d <{_ONT}{pred}> ?{key} }}"
             for key, pred in self._GRANT_FIELDS
         )
@@ -510,7 +515,7 @@ SELECT (SUM(?v) AS ?total) WHERE {{
         its own total is worse than either number alone, because there
         is no way for a reader to tell which one is lying.
         """
-        optionals = "\n    ".join(
+        optionals = _OPTIONAL_SEP.join(
             f"OPTIONAL {{ ?n <{_ONT}{pred}> ?{key} }}"
             for key, pred in _CONTRACT_FIELDS
         )
