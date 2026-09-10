@@ -52,6 +52,12 @@ eventsStore:
   secretName: fontem-postgres-credentials
   secretKey: EVENTS_DATABASE_URL
 
+# The PreSync hook that keeps search.entity_embeddings in step with what
+# routers/search.py queries. Same postgres image the events bootstrap uses,
+# so psql and the server are the same build.
+searchMigrate:
+  image: contribute.void42.internal/fontem/postgres-fontem:16.13-pgv0.8.1
+
 # Consolidator the admin review proxy forwards to. Empty means
 # namespace-relative (`http://fontem-consolidator:8000`), which is
 # correct only where a consolidator runs in the same namespace —
