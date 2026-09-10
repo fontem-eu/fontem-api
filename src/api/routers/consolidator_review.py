@@ -28,6 +28,7 @@ surface this change exists to close. This list is the allowlist.
 from __future__ import annotations
 
 import os
+from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, Request
@@ -35,6 +36,10 @@ from fastapi.responses import JSONResponse
 
 from src.api.admin_auth import require_data_admin
 
+# Plain http:// is deliberate: this never leaves the cluster, and both
+# consolidator deployments run a linkerd-proxy sidecar, so the hop is
+# mTLS at the mesh rather than in the URL scheme.
+#
 # Namespace-relative by default, which resolves to the local
 # consolidator in fontem-prod. fontem-staging and fontem-testing run no
 # consolidator of their own and must set this explicitly to the shared
@@ -131,7 +136,7 @@ async def list_relationships(request: Request) -> JSONResponse:
 @router.post("/candidates/{from_id}/{to_id}/decide")
 async def decide_candidate(
     from_id: str, to_id: str, request: Request,
-    claims: dict = Depends(require_data_admin),
+    claims: Annotated[dict, Depends(require_data_admin)],
 ) -> JSONResponse:
     """Approve or decline one SAME_AS proposal."""
     body = await _json_body(request)
@@ -144,7 +149,7 @@ async def decide_candidate(
 @router.post("/relationships/{edge_id}/decide")
 async def decide_relationship(
     edge_id: str, request: Request,
-    claims: dict = Depends(require_data_admin),
+    claims: Annotated[dict, Depends(require_data_admin)],
 ) -> JSONResponse:
     """Accept or reject one relationship-review candidate."""
     body = await _json_body(request)
