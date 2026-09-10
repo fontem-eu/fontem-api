@@ -21,10 +21,16 @@ so no new ones are produced. This withdraws the ones already asserted.
 
 What counts as corroborated
 ---------------------------
-Exactly what the fixed rule accepts: an agreeing postal code (compared
-with whitespace and case normalised, because "821 09" and "82109" are
-the same Slovak code), or an agreeing hard identifier — vat,
-registered_as, cik. A pair with any of those is left alone.
+Exactly what the fixed rule accepts: an agreeing postal code, or an
+agreeing hard identifier — vat, registered_as, cik. A pair with any of
+those is left alone.
+
+Postal codes are compared with case and every separator stripped, not
+just whitespace: "821 09" and "82109" are the same Slovak code and
+"2790-072" and "2790 072" the same Portuguese one. The dry run caught
+WARPCOM SERVICES, S.A. being selected for retraction on exactly that —
+a corroborated pair that a whitespace-only comparison called
+uncorroborated.
 
 What a retraction does
 ----------------------
@@ -72,8 +78,8 @@ WHERE r.method = 'successor_lei_match'
    OR 'successor_lei_match' IN r.detection_rules
 WITH a, b,
   (a.postal_code IS NOT NULL AND b.postal_code IS NOT NULL
-   AND replace(toUpper(a.postal_code),' ','')
-     = replace(toUpper(b.postal_code),' ','')) AS postal_ok,
+   AND apoc.text.replace(toUpper(a.postal_code), '[^A-Z0-9]', '')
+     = apoc.text.replace(toUpper(b.postal_code), '[^A-Z0-9]', '')) AS postal_ok,
   (a.vat IS NOT NULL AND b.vat IS NOT NULL AND a.vat = b.vat) AS vat_ok,
   (a.registered_as IS NOT NULL AND b.registered_as IS NOT NULL
    AND a.registered_as = b.registered_as) AS reg_ok,
