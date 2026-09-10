@@ -175,6 +175,14 @@ def emit_purges(log: EventLog, graph_iri: str, subjects: list[str],
                     graph_iri=graph_iri,
                     subject_iri=subject,
                     reason=_REASON.format(live=_twin(subject)),
+                    # These IRIs are ordinary -- percent-encoding
+                    # produces them unchanged -- so the sink cannot tell
+                    # one from a live subject by its IRI. Declaring the
+                    # predicates lets it check the store and refuse if
+                    # the subject holds anything this script did not
+                    # account for. Without it the purge is refused
+                    # outright (fontem-virtuoso-sink#131).
+                    only_predicates=list(_ROLLUP_PREDICATES),
                 ))
                 sent += 1
         logger.info("emitted %d/%d PurgeSubject events", sent, len(subjects))
