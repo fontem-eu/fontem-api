@@ -12,6 +12,7 @@ from fontem_event_schemas.integrity import contract_red_flags
 
 from ...analysis.contract_data_source import ContractDataSource
 from ...api.lang import authority_name_expr, contract_title_expr
+from .identity import identity_class
 from ._value_quality import (
     canonical_count,
     canonical_predicate,
@@ -52,10 +53,16 @@ class GraphContractSource(ContractDataSource):
             # name never existed on the nodes — the dashboard pre-fix
             # reported all 56k contracts as "missing cpv_main").
             rows = session.run(
-                "MATCH (a:Authority)-[:AWARDED]->(ct:Contract)"
-                "-[:AWARDED_TO]->(c:Company {gmr_id: $gid}) "
+                # Across the identity class, not just this record: the
+                # consolidator's approved merges are what make a company
+                # page show the entity's contracts rather than one
+                # duplicate's. DISTINCT because a contract awarded to
+                # two members of the class is reachable twice.
+                identity_class("Company", "gmr_id")
+                + "MATCH (a:Authority)-[:AWARDED]->(ct:Contract)"
+                "-[:AWARDED_TO]->(me) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
-                "RETURN ct.ted_notice_id AS notice_id, "
+                "RETURN DISTINCT ct.ted_notice_id AS notice_id, "
                 # ted_publication_number is the human-readable TED ID
                 # ("295342-2026"); the UI uses it to short-circuit the
                 # /api/contracts/<id>/ted-link redirector and link
@@ -96,8 +103,13 @@ class GraphContractSource(ContractDataSource):
             ).data()
 
             total_value = session.run(
-                "MATCH (ct:Contract)-[:AWARDED_TO]->"
-                "(c:Company {gmr_id: $gid}) "
+                identity_class("Company", "gmr_id")
+                + "MATCH (ct:Contract)-[:AWARDED_TO]->(me) "
+                # DISTINCT before the aggregates, not inside them:
+                # canonical_count sums over ROWS, so a contract reachable
+                # through two class members would be counted twice and
+                # its value added twice.
+                "WITH DISTINCT ct "
                 "RETURN " + trusted_value_sum("ct") + " AS total, "
                 + canonical_count("ct") + " AS cnt",
                 gid=gmr_id,
@@ -165,10 +177,18 @@ class GraphContractSource(ContractDataSource):
             # Same property-name remap as get_company_contracts —
             # award_date / cpv aliases read from publication_date / cpv.
             rows = session.run(
-                "MATCH (a:Authority {authority_id: $aid})"
-                "-[:AWARDED]->(ct:Contract)-[:AWARDED_TO]->(c:Company) "
+                # Across the identity class — eu-LISA is two Authority
+                # nodes the consolidator merged, with three contracts on
+                # one and one on the other, so an unresolved read shows
+                # whichever the caller happened to name. `a` is rebound
+                # to the class member that actually awarded each
+                # contract, so the row's authority fields stay truthful.
+                identity_class("Authority", "authority_id", param="aid",
+                               out="a")
+                + "MATCH (a)-[:AWARDED]->(ct:Contract)"
+                "-[:AWARDED_TO]->(c:Company) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
-                "RETURN ct.ted_notice_id AS notice_id, "
+                "RETURN DISTINCT ct.ted_notice_id AS notice_id, "
                 "  ct.ted_publication_number AS publication_number, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
@@ -199,8 +219,13 @@ class GraphContractSource(ContractDataSource):
             ).data()
 
             total = session.run(
-                "MATCH (a:Authority {authority_id: $aid})"
-                "-[:AWARDED]->(ct:Contract) "
+                identity_class("Authority", "authority_id", param="aid",
+                               out="a")
+                + "MATCH (a)-[:AWARDED]->(ct:Contract) "
+                # DISTINCT before the aggregates: canonical_count sums
+                # over ROWS, so a contract reachable through two class
+                # members would count twice and add its value twice.
+                "WITH DISTINCT ct "
                 "RETURN " + trusted_value_sum("ct") + " AS total, "
                 + canonical_count("ct") + " AS cnt",
                 aid=authority_id,

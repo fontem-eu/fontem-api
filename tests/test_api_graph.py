@@ -704,3 +704,152 @@ def test_node_with_datetime_property_serializes_as_iso():
     edge_dt = body["edges"][0]["properties"]["detected_at"]
     assert isinstance(edge_dt, str)
     assert edge_dt.startswith("2026-01-01T")
+
+
+# ── GE-API-11: identity classes collapse onto the center ──────
+#
+# eu-LISA on shared is two Authority nodes the consolidator approved as
+# the same buyer, with three contracts on one and one on the other. The
+# contracts list resolves identity and counted 4; the explorer traversed
+# from the single node it was handed and drew 3. These pin the fix:
+# resolve the class first, then render it as one entity.
+
+COMPANY_A_TWIN = FakeNode(
+    ["Company"], {"gmr_id": "comp-twin", "name": "Acme Corporation", "country": "FRA"},
+)
+CONTRACT_TWIN = FakeNode(["Contract"], {
+    "ted_notice_id": "con-twin", "title": "Twin's contract", "value_eur": 900,
+})
+REL_TWIN_AWARDED_TO = FakeRelationship(CONTRACT_TWIN, COMPANY_A_TWIN, "AWARDED_TO")
+REL_SAME_AS = FakeRelationship(COMPANY_A, COMPANY_A_TWIN, "SAME_AS",
+                               {"confidence": 0.97, "method": "lei_match"})
+
+
+def _class_handler(class_ids, paths):
+    """Neo4j stub: comp-aaa is a Company, its identity class is
+    `class_ids`, and the traversal returns `paths`."""
+    def handler(query, **kwargs):
+        if "labels(n)[0]" in query:
+            return FakeResult({"label": "Company"}
+                              if kwargs.get("eid") == "comp-aaa" else None)
+        if "RETURN n LIMIT 1" in query:
+            return FakeResult({"n": COMPANY_A})
+        if "apoc.path.subgraphNodes" in query:
+            return FakeResult([{"id": i} for i in class_ids])
+        if "MATCH path" in query:
+            return FakeResult([{"path": p} for p in paths])
+        return FakeResult(None)
+    return handler
+
+
+def test_traversal_anchors_on_the_whole_identity_class():
+    """The seed's id alone is not the anchor — every member's is, or a
+    contract awarded to the twin is unreachable."""
+    seen = {}
+
+    def handler(query, **kwargs):
+        if "MATCH path" in query:
+            seen["ids"] = kwargs.get("ids")
+            seen["query"] = query
+            return FakeResult([])
+        return _class_handler(["comp-aaa", "comp-twin"], [])(query, **kwargs)
+
+    client = make_test_client(neo4j_client=FakeNeo4jClient(handler))
+    try:
+        assert client.get("/api/graph/comp-aaa?depth=1").status_code == 200
+    finally:
+        cleanup_dishka()
+    assert seen["ids"] == ["comp-aaa", "comp-twin"]
+    assert "IN $ids" in seen["query"]
+
+
+def test_the_twins_contract_is_reachable_from_the_seed():
+    """The eu-LISA case: a contract hanging off the OTHER record in the
+    class must appear, or the explorer keeps disagreeing with the
+    contracts list."""
+    path = FakePath([CONTRACT_TWIN, COMPANY_A_TWIN], [REL_TWIN_AWARDED_TO])
+    client = make_test_client(neo4j_client=FakeNeo4jClient(
+        _class_handler(["comp-aaa", "comp-twin"], [path])))
+    try:
+        body = client.get("/api/graph/comp-aaa?depth=1").json()
+    finally:
+        cleanup_dishka()
+    assert "con-twin" in {n["id"] for n in body["nodes"]}
+
+
+def test_the_twin_renders_as_the_center_not_as_a_second_node():
+    """One entity, one node. Leaving the duplicate in place is what the
+    identity model exists to prevent, and the UI would draw two circles
+    for one company."""
+    path = FakePath([CONTRACT_TWIN, COMPANY_A_TWIN], [REL_TWIN_AWARDED_TO])
+    client = make_test_client(neo4j_client=FakeNeo4jClient(
+        _class_handler(["comp-aaa", "comp-twin"], [path])))
+    try:
+        body = client.get("/api/graph/comp-aaa?depth=1").json()
+    finally:
+        cleanup_dishka()
+    ids = {n["id"] for n in body["nodes"]}
+    assert "comp-twin" not in ids
+    assert "comp-aaa" in ids
+    # and the twin's edge now points at the center
+    awarded = [e for e in body["edges"] if e["type"] == "AWARDED_TO"]
+    assert awarded and all(e["target"] == "comp-aaa" for e in awarded)
+
+
+def test_member_to_member_edges_are_not_drawn():
+    """After the collapse a SAME_AS between two members is a self-loop
+    on the center, which says nothing about the entity."""
+    path = FakePath([COMPANY_A, COMPANY_A_TWIN], [REL_SAME_AS])
+    client = make_test_client(neo4j_client=FakeNeo4jClient(
+        _class_handler(["comp-aaa", "comp-twin"], [path])))
+    try:
+        body = client.get("/api/graph/comp-aaa?depth=1").json()
+    finally:
+        cleanup_dishka()
+    assert body["edges"] == []
+    assert not any(e["source"] == e["target"] for e in body["edges"])
+
+
+def test_one_contract_awarded_to_two_members_is_one_edge():
+    """Both members' AWARDED_TO edges collapse to the same endpoints, so
+    the dedup has to run AFTER the remap or the UI draws it twice."""
+    rel_a = FakeRelationship(CONTRACT_1, COMPANY_A, "AWARDED_TO")
+    rel_b = FakeRelationship(CONTRACT_1, COMPANY_A_TWIN, "AWARDED_TO")
+    paths = [FakePath([CONTRACT_1, COMPANY_A], [rel_a]),
+             FakePath([CONTRACT_1, COMPANY_A_TWIN], [rel_b])]
+    client = make_test_client(neo4j_client=FakeNeo4jClient(
+        _class_handler(["comp-aaa", "comp-twin"], paths)))
+    try:
+        body = client.get("/api/graph/comp-aaa?depth=1").json()
+    finally:
+        cleanup_dishka()
+    assert len([e for e in body["edges"] if e["type"] == "AWARDED_TO"]) == 1
+
+
+def test_an_unmerged_entity_is_unaffected():
+    """The overwhelmingly common case: a class of one behaves exactly as
+    before, with no extra nodes dropped and no edges rewritten."""
+    path = FakePath([CONTRACT_1, COMPANY_A], [REL_AWARDED_TO])
+    client = make_test_client(neo4j_client=FakeNeo4jClient(
+        _class_handler(["comp-aaa"], [path])))
+    try:
+        body = client.get("/api/graph/comp-aaa?depth=1").json()
+    finally:
+        cleanup_dishka()
+    assert {n["id"] for n in body["nodes"]} == {"comp-aaa", "con-111"}
+    assert len(body["edges"]) == 1
+
+
+def test_the_seed_survives_a_class_query_that_returns_nothing():
+    """Defence in depth: if the BFS comes back empty (no :SAME_AS rows,
+    a stubbed store, a null key on a member) the caller must still get
+    its own entity rather than an empty anchor list matching nothing."""
+    path = FakePath([CONTRACT_1, COMPANY_A], [REL_AWARDED_TO])
+    client = make_test_client(neo4j_client=FakeNeo4jClient(
+        _class_handler([], [path])))
+    try:
+        body = client.get("/api/graph/comp-aaa?depth=1").json()
+    finally:
+        cleanup_dishka()
+    assert body["center"]["id"] == "comp-aaa"
+    assert "comp-aaa" in {n["id"] for n in body["nodes"]}

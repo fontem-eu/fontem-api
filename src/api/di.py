@@ -83,29 +83,29 @@ class DataSourceProvider(Provider):
         )
 
     @provide(scope=Scope.APP)
-    def contract_data_source(
-        self, neo4j: Neo4jClient, virtuoso: VirtuosoClient | None,
-    ) -> ContractDataSource:
-        """Company contracts come from Virtuoso so they aggregate across
-        owl:sameAs; everything else still reads the graph store.
+    def contract_data_source(self, neo4j: Neo4jClient) -> ContractDataSource:
+        """Contracts come from Neo4j, aggregated across the identity
+        class.
 
-        A company page built on Neo4j alone shows one record's contracts
-        and silently omits its duplicates', because Neo4j holds no
-        equivalences — measured on prod, 3 contracts against 566 across
-        the closure. Wrapping rather than replacing keeps every other
-        read (and the SUBSIDIARY_OF walk the corporate group needs) on
-        the store that is actually good at it, and makes the swap
-        reversible by deleting one line.
+        They were served from Virtuoso for a while, to pick up the
+        owl:sameAs closure a company page needs — Neo4j held no
+        equivalences, so a page showed one record's contracts and
+        silently omitted its duplicates'. The closure was real; the
+        store was the wrong place to get it from. Virtuoso can express
+        only ONE winner per contract (fontem:awardedTo is single-valued,
+        122,863 triples over 122,863 subjects) against Neo4j's 190,123
+        AWARDED_TO edges, so serving a company page from the triple
+        store lost 41% of company-contract pairs — a bigger hole than
+        the one it filled.
 
-        With no Virtuoso configured the wrapper delegates everything, so
-        an environment that has not enabled it behaves exactly as before.
+        Identity is back in Neo4j as :SAME_AS (fontem-neo4j-sink#148)
+        and GraphContractSource resolves the class with
+        apoc.path.subgraphNodes, so both halves come from the store that
+        holds the edges. See src/data/graph/identity.py for why that is
+        traversal rather than reasoning.
         """
         from src.data.graph.graph_contract_source import GraphContractSource
-        from src.data.sparql.virtuoso_contract_source import VirtuosoContractSource
-        return VirtuosoContractSource(
-            fallback=GraphContractSource(neo4j_client=neo4j),
-            virtuoso=virtuoso,
-        )
+        return GraphContractSource(neo4j_client=neo4j)
 
     @provide(scope=Scope.APP)
     def data_quality_source(
