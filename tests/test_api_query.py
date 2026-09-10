@@ -851,3 +851,80 @@ def test_hash_does_not_start_a_comment_in_cypher_or_sql():
                       json={"query": "SELECT 1 # DROP TABLE t"}).status_code == 400
     finally:
         cleanup_dishka()
+
+
+# ── a store outage is not a bad query ─────────────────────────
+#
+# A Neo4j restart used to come back as HTTP 400 "Cypher error: ..." —
+# the same answer a malformed query gets. That is not cosmetic: the
+# feed catalogue re-validates published queries and DEMOTES any that
+# stop validating, so one OOMKill silently un-published three briefings
+# and emptied the public landing feed. It did not heal when Neo4j came
+# back, because the demotion is persisted.
+
+
+class _RaisingSession:
+    """A session whose transaction raises the driver's own outage error."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def begin_transaction(self, **_kw):
+        raise self._exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+class _UnavailableNeo4j:  # pylint: disable=too-few-public-methods
+    def __init__(self, exc):
+        self._exc = exc
+
+    def session(self, **_config):
+        return _RaisingSession(self._exc)
+
+    def close(self):
+        pass
+
+
+def test_cypher_answers_503_when_the_store_is_unreachable():
+    from neo4j.exceptions import ServiceUnavailable  # pylint: disable=import-outside-toplevel
+
+    c = make_test_client(neo4j_client=_UnavailableNeo4j(
+        ServiceUnavailable("Couldn't connect to neo4j:7687")))
+    try:
+        r = c.post("/query/cypher", json={"query": "MATCH (n) RETURN n"})
+        assert r.status_code == 503, r.text
+        assert "unavailable" in r.json()["detail"].lower()
+    finally:
+        cleanup_dishka()
+
+
+def test_cypher_answers_503_when_the_session_expires():
+    """SessionExpired is the same class of failure — the server went away
+    mid-flight — and must not be reported as the caller's mistake."""
+    from neo4j.exceptions import SessionExpired  # pylint: disable=import-outside-toplevel
+
+    c = make_test_client(neo4j_client=_UnavailableNeo4j(
+        SessionExpired("connection closed with incomplete handshake response")))
+    try:
+        assert c.post("/query/cypher",
+                      json={"query": "MATCH (n) RETURN n"}).status_code == 503
+    finally:
+        cleanup_dishka()
+
+
+def test_a_genuine_cypher_error_is_still_a_400():
+    """The carve-out must stay narrow: a query the engine rejects is the
+    caller's problem and has to keep saying so, or the studio stops
+    telling authors their query is broken."""
+    c = make_test_client(neo4j_client=_UnavailableNeo4j(
+        ValueError("Invalid input 'RETRUN'")))
+    try:
+        assert c.post("/query/cypher",
+                      json={"query": "MATCH (n) RETRUN n"}).status_code == 400
+    finally:
+        cleanup_dishka()
