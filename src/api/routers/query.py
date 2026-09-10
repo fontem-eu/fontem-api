@@ -34,6 +34,7 @@ import psycopg
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Body, HTTPException
 from neo4j import READ_ACCESS
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
 
 from src.data.graph.neo4j_client import Neo4jClient
 from src.data.sparql.virtuoso_client import VirtuosoClient
@@ -282,7 +283,11 @@ def _jsonable(v):
 
 @router.post(
     "/cypher",
-    responses={400: {"description": "invalid / forbidden query"}, 504: {"description": "timeout"}},
+    responses={
+        400: {"description": "invalid / forbidden query"},
+        503: {"description": "store unavailable"},
+        504: {"description": "timeout"},
+    },
 )
 @inject
 def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient]) -> dict:
@@ -329,6 +334,20 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
                 cols, rows, truncated, notes = _run(tx)
     except HTTPException:
         raise
+    except (ServiceUnavailable, SessionExpired) as exc:
+        # The store is down or the connection dropped -- nothing to do with
+        # the query. This used to fall into the branch below and answer 400,
+        # which tells the caller their query is invalid when the database
+        # was simply unreachable.
+        #
+        # That is not cosmetic. The feed catalogue re-validates published
+        # queries and DEMOTES any that stop validating, so one Neo4j restart
+        # silently un-published three briefings and emptied the public feed
+        # -- a state that did not heal when Neo4j came back.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cypher store unavailable: {str(exc)[:300]}",
+        ) from exc
     except Exception as exc:  # pylint: disable=broad-exception-caught
         # surface engine/driver errors to the editor rather than 500-ing
         msg = str(exc)
