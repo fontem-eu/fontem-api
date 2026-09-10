@@ -117,6 +117,16 @@ spec:
                 secretKeyRef:
                   name: fontem-jwt-secret
                   key: JWT_SECRET
+            # Which consolidator the review proxy talks to. The
+            # namespace-relative default resolves to the local one in
+            # fontem-prod. fontem-staging and fontem-testing run no
+            # consolidator of their own, so their values MUST name the
+            # shared service explicitly — left unset there, the review
+            # screen answers 502 and the ETL hooks silently no-op.
+{{- if .Values.consolidatorUrl }}
+            - name: CONSOLIDATOR_URL
+              value: {{ .Values.consolidatorUrl | quote }}
+{{- end }}
             # SEC EDGAR's Fair Access policy requires a deliverable
             # contact in the User-Agent. edgartools picks this value up
             # automatically when building requests.
