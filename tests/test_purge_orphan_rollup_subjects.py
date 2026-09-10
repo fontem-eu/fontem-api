@@ -177,6 +177,9 @@ def test_purge_names_the_subject_verbatim_and_points_at_the_twin():
     assert payload["subject_iri"] == f"{N}639139-2020"
     assert payload["graph_iri"] == G
     assert f"{C}639139-2020" in payload["reason"]
+    # The sink refuses a purge of an ordinary IRI without this, and
+    # with it checks the store before deleting anything.
+    assert set(payload["only_predicates"]) == set(porp._ROLLUP_PREDICATES)
 
 
 def test_dry_run_emits_nothing(monkeypatch):
