@@ -9,6 +9,7 @@ from __future__ import annotations
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
+from src.data.graph.identity import identity_class
 from src.data.graph.neo4j_client import Neo4jClient
 
 from ..schemas.graph import (
@@ -22,8 +23,18 @@ from ..schemas.graph import (
 router = APIRouter(prefix="/graph", tags=["graph"])
 
 NODE_CAP = 500
-# Always excluded. REPORTED / LISTED_AS / CATEGORIZED_AS / SAME_AS are
-# internal bookkeeping. CLIENT_OF / SUPPLIER_OF are the retired summary
+# Always excluded FROM THE DRAWN GRAPH. REPORTED / LISTED_AS /
+# CATEGORIZED_AS are internal bookkeeping.
+#
+# SAME_AS is excluded for a different reason, and the distinction
+# matters: it is not bookkeeping, it is identity, and the traversal
+# above depends on it. It is resolved BEFORE the walk (see
+# _identity_class) and the class is then collapsed onto the center, so
+# by the time edges are drawn a SAME_AS between two members would be a
+# self-loop on a node that already represents both. Excluding it here
+# keeps it out of the picture without keeping it out of the answer.
+#
+# CLIENT_OF / SUPPLIER_OF are the retired summary
 # edges of the deleted trade-edges materialiser — the per-contract
 # AWARDED / AWARDED_TO edges carry the same information (with a time
 # dimension). Excluding them here is defence in depth: stale leftovers
@@ -60,6 +71,50 @@ def _detect_entity(session, entity_id: str) -> tuple[str, str] | None:
         if result:
             return label, id_prop
     return None
+
+
+def _identity_class(session, label: str, id_prop: str, eid: str) -> list[str]:
+    """Every id the consolidator has declared equivalent to this one,
+    the seed included.
+
+    The graph-store half of Virtuoso's ``(owl:sameAs|^owl:sameAs)*``.
+    Not inference — reachability over one relationship type, in both
+    directions, reflexive. See src/data/graph/identity.py for why the
+    BFS and not ``-[:SAME_AS*0..]-`` (Cypher's ``*`` enumerates paths,
+    which does not terminate usefully on a cyclic class), and why the
+    TYPE and not a status property (:SAME_AS_CANDIDATE carries 304,702
+    pending proposals alongside 39,193 approved).
+
+    Asked as its own query rather than folded into the traversal: the
+    class is what the collapse below keys on, so it has to be known
+    before any path is read, and it is one cheap BFS over a class that
+    is almost always a single node.
+    """
+    rows = session.run(
+        identity_class(label, id_prop, param="eid", out="m")
+        + f"RETURN m.{id_prop} AS id",
+        eid=eid,
+    ).data()
+    ids = [r["id"] for r in rows if r.get("id")]
+    # The seed is in the BFS output, but a class member with a null key
+    # would drop out of `ids` and take the seed with it if it were the
+    # only row. Belt and braces: the caller must always get its own id.
+    return ids if eid in ids else [eid, *ids]
+
+
+def _collapse_to(center_id: str, class_ids: set[str]):
+    """Map any identity-class member's id onto the center's.
+
+    The class is ONE entity, so it renders as one node however many
+    records back it. Without this the explorer shows a duplicate beside
+    the entity, joined by an edge the UI is not meant to draw, and the
+    contract count on the profile disagrees with what the graph shows —
+    which is exactly the eu-LISA split (three contracts on one
+    Authority node, one on its twin).
+    """
+    def _map(node_id: str) -> str:
+        return center_id if node_id in class_ids else node_id
+    return _map
 
 
 def _fetch_node(session, label: str, id_prop: str, eid: str) -> GraphNode:
@@ -151,8 +206,16 @@ def _path_to_detail(path) -> PathDetail:
 # ── Traversal core ───────────────────────────────────────────
 
 
-def _collect_paths(result, center_node):
-    """Extract deduplicated nodes and edges from path records."""
+def _collect_paths(result, center_node, collapse=None):
+    """Extract deduplicated nodes and edges from path records.
+
+    `collapse` maps an identity-class member's id onto the center's, so
+    a merged entity renders as one node rather than as itself beside its
+    duplicates. Applied BEFORE the dedup keys are computed: two members'
+    edges to the same contract are one edge once the endpoints agree,
+    and deduping first would keep both.
+    """
+    collapse = collapse or (lambda nid: nid)
     nodes_map: dict[str, GraphNode] = {center_node.id: center_node}
     edges_set: set[tuple] = set()
     edges_list: list[GraphEdge] = []
@@ -161,10 +224,22 @@ def _collect_paths(result, center_node):
         path = record["path"]
         for node in path.nodes:
             nd = _node_to_graph_node(node)
+            # A class member is already represented by the center node,
+            # which carries the id the caller asked about — replacing it
+            # would swap the center for a duplicate mid-traversal.
+            if collapse(nd.id) != nd.id:
+                continue
             if nd.id not in nodes_map:
                 nodes_map[nd.id] = nd
         for rel in path.relationships:
             ed = _edge_to_graph_edge(rel)
+            ed.source = collapse(ed.source)
+            ed.target = collapse(ed.target)
+            if ed.source == ed.target:
+                # Member-to-member: an edge inside the collapsed class,
+                # which is now a self-loop on the center and says
+                # nothing about the entity's relationships.
+                continue
             edge_key = (ed.source, ed.target, ed.type)
             if edge_key not in edges_set:
                 edges_set.add(edge_key)
@@ -377,17 +452,28 @@ def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 truncated=False, total_available=1,
             )
 
+        # Anchor on the whole identity class, not just the record the
+        # caller named. eu-LISA is two Authority nodes the consolidator
+        # merged, with three contracts on one and one on the other, so
+        # traversing from a single node showed 3 while the contracts
+        # list — which does resolve identity — counted 4.
+        class_ids = _identity_class(
+            session, center_label, center_id_prop, entity_id)
         result = session.run(
-            f"MATCH (start:{center_label} {{{center_id_prop}: $eid}}) "
+            f"MATCH (start:{center_label}) "
+            f"WHERE start.{center_id_prop} IN $ids "
             f"MATCH path = (start)-[*1..{depth}]-(neighbor) "
             f"WHERE NONE(r IN relationships(path) "
             f"  WHERE type(r) IN $excluded) "
             f"RETURN path",
-            eid=entity_id,
+            ids=class_ids,
             excluded=list(_EXCLUDED),
         )
 
-        nodes_map, edges_list = _collect_paths(result, center_node)
+        nodes_map, edges_list = _collect_paths(
+            result, center_node,
+            _collapse_to(center_node.id, set(class_ids)),
+        )
 
         # Filter contracts by date if 'since' is provided
         if since:

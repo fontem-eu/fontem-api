@@ -49,8 +49,16 @@ CONVENTIONS = (
     "Contracts point at their winners: (Contract)-[:AWARDED_TO]->(Company). "
     "Buyers point at contracts: (Authority)-[:AWARDED]->(Contract). "
     "Company->Contract patterns return nothing.",
-    "SAME_AS, LISTED_AS, REPORTED and CATEGORIZED_AS are internal "
-    "bookkeeping edges, not analytical relationships.",
+    "LISTED_AS, REPORTED and CATEGORIZED_AS are internal bookkeeping "
+    "edges, not analytical relationships.",
+    "SAME_AS joins records the consolidator has confirmed are the same "
+    "real-world entity, so a question about ALL of an entity's contracts "
+    "must traverse it first: MATCH (c:Company {gmr_id: $id}) "
+    "CALL apoc.path.subgraphNodes(c, {relationshipFilter: 'SAME_AS', "
+    "maxLevel: -1}) YIELD node AS m MATCH (ct:Contract)-[:AWARDED_TO]->(m) "
+    "RETURN DISTINCT ct. Counting without it under-reports every merged "
+    "entity. SAME_AS_CANDIDATE is NOT the same edge: it is mostly "
+    "unreviewed proposals and must never be traversed as identity.",
     "CLIENT_OF and SUPPLIER_OF are retired summary edges; any survivors are "
     "stale. Use the per-contract AWARDED / AWARDED_TO edges, which carry a "
     "time dimension.",
