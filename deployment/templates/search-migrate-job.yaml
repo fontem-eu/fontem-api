@@ -1,0 +1,100 @@
+{{- /*
+The search schema, as an ArgoCD PreSync hook.
+
+Argo runs this to completion BEFORE the rest of the sync, so the columns
+this API queries exist before any pod that queries them is serving. Same
+reasoning — and the same shape — as fontem-community-api's alembic
+migrate-job: a broken migration blocks the release instead of rolling out
+pods that expect a schema the database does not have.
+
+Why this exists at all: `name_lex_i18n` reached production BY HAND and
+nowhere else. Nothing in any repository created it, so /search/results
+answered `column "name_lex_i18n" does not exist` — a 500 on every query —
+in testing and staging for months while production served the same
+endpoint fine. The environment that exists to catch a search regression
+could not run the query, and a restored production database would have
+come up the same way with no code to prevent it.
+
+The column is the translations-only lexical lane. An authority whose
+canonical name is Cyrillic matches a Latin query ONLY through it: in
+production "kozloduy" finds `АЕЦ КОЗЛОДУЙ ЕАД` via name_lex_i18n and not
+via name_lex. Missing, it is not a degraded search — it is no search.
+
+Guarded on the table existing. `search.entity_embeddings` is written by
+the embedding sink, which owns its creation; a fresh database reaches this
+hook before the sink has written anything, and an unguarded ALTER there
+would abort the sync over a table nobody has needed yet.
+
+It connects with EVENTS_DATABASE_URL, the same secret the app resolves its
+search DSN from (see routers/search.py: SEARCH_DATABASE_URL or
+EVENTS_DATABASE_URL). One source for both, so the migration cannot run
+against a different database than the one that gets queried.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Stable name + BeforeHookCreation: exactly one exists at a time, and the
+  # last run stays readable after a sync.
+  name: {{ .Release.Name }}-search-migrate
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  labels:
+    app: {{ .Release.Name }}-search-migrate
+spec:
+  # No retries. A migration that failed once should be read by a human, not
+  # attempted again against a database it may have half-changed.
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-search-migrate
+      annotations:
+        # The mesh sidecar never exits, so a Job with linkerd injected never
+        # reaches Complete and Argo waits on the hook forever.
+        linkerd.io/inject: disabled
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: migrate
+          image: {{ .Values.searchMigrate.image | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # SQLAlchemy driver prefixes are rewritten exactly as
+              # routers/search.py rewrites them, so one secret serves both
+              # the app and this migration whatever shape it is stored in.
+              DSN=$(printf '%s' "$RAW_DSN" \
+                    | sed -e 's|^postgresql+asyncpg://|postgresql://|' \
+                          -e 's|^postgresql+psycopg://|postgresql://|')
+              psql "$DSN" -v ON_ERROR_STOP=1 <<'SQL'
+              DO $$
+              BEGIN
+                  IF to_regclass('search.entity_embeddings') IS NOT NULL THEN
+                      ALTER TABLE search.entity_embeddings
+                          ADD COLUMN IF NOT EXISTS name_lex_i18n tsvector;
+                      CREATE INDEX IF NOT EXISTS entity_embeddings_lex_i18n
+                          ON search.entity_embeddings USING gin (name_lex_i18n);
+                  ELSE
+                      RAISE NOTICE 'search.entity_embeddings absent - the embedding sink has not created it yet; nothing to migrate';
+                  END IF;
+              END $$;
+              SQL
+              echo "search-migrate: ok"
+          env:
+            # The DSN the app itself resolves its search store from, so the
+            # migration cannot run against a different database than the one
+            # that gets queried.
+            - name: RAW_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.eventsStore.secretName | quote }}
+                  key: {{ .Values.eventsStore.secretKey | default "EVENTS_DATABASE_URL" }}
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
