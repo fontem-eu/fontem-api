@@ -31,12 +31,16 @@ def test_selection_requires_a_discriminating_attribute():
     )
 
 
-def test_selection_normalises_postal_codes():
-    """"821 09" and "82109" are the same Slovak code; comparing raw
-    would retract pairs that are genuinely corroborated."""
+def test_selection_strips_every_postal_separator_not_just_spaces():
+    """"821 09" and "82109" are the same Slovak code; "2790-072" and
+    "2790 072" the same Portuguese one. A whitespace-only comparison
+    selected WARPCOM SERVICES, S.A. for retraction — a corroborated
+    pair — which the dry run caught before anything was emitted."""
     q = retract._FIND
-    assert "replace(toUpper(a.postal_code),' ','')" in q
-    assert "replace(toUpper(b.postal_code),' ','')" in q
+    for side in ("a", "b"):
+        assert (f"apoc.text.replace(toUpper({side}.postal_code), "
+                "'[^A-Z0-9]', '')") in q, f"{side} side not fully normalised"
+    assert "replace(toUpper(a.postal_code),' ','')" not in q
 
 
 def test_selection_is_scoped_to_the_offending_rule():
