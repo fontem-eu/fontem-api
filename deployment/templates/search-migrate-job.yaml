@@ -72,8 +72,15 @@ spec:
               DSN=$(printf '%s' "$RAW_DSN" \
                     | sed -e 's|^postgresql+asyncpg://|postgresql://|' \
                           -e 's|^postgresql+psycopg://|postgresql://|')
+              # The dollar-quote is TAGGED on purpose. Kubernetes expands
+              # container args itself -- $(VAR) is substituted and $$ is the
+              # escape for a literal $ -- so a plain `DO $mig$` reaches psql as
+              # `DO $` and dies with `syntax error at or near "$"`. The
+              # shell heredoc is quoted, so the shell is not the culprit and
+              # the usual quoting fixes do nothing. A tag contains no $$
+              # sequence and passes through untouched.
               psql "$DSN" -v ON_ERROR_STOP=1 <<'SQL'
-              DO $$
+              DO $mig$
               BEGIN
                   IF to_regclass('search.entity_embeddings') IS NOT NULL THEN
                       ALTER TABLE search.entity_embeddings
@@ -83,7 +90,7 @@ spec:
                   ELSE
                       RAISE NOTICE 'search.entity_embeddings absent - the embedding sink has not created it yet; nothing to migrate';
                   END IF;
-              END $$;
+              END $mig$;
               SQL
               echo "search-migrate: ok"
           env:
