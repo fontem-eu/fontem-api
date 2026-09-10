@@ -75,6 +75,12 @@ _ROLLUP_PREDICATES = (f"{_FONTEM}isCurrent", f"{_FONTEM}currentValue")
 _RESULT_SET_MAX_ROWS = 50_000
 _PAGE = 10_000
 
+# Twin lookups go out as VALUES blocks on a GET query string, and
+# Virtuoso answers 400 Bad Request once that URL gets long rather than
+# saying the request was too large. 1,000 IRIs per chunk is ~64KB of
+# URL and is refused; 100 is ~6.5KB and is not.
+_TWIN_CHUNK = 100
+
 _REASON = (
     "orphan Notice subject created by a mis-routed contract value rollup "
     "(fontem-virtuoso-sink#130); the notice's triples live at {live}"
@@ -133,16 +139,18 @@ def find_candidates(virtuoso: VirtuosoClient, graph_iri: str,
 
 
 def partition_by_twin(virtuoso: VirtuosoClient, graph_iri: str,
-                      candidates: list[str]) -> tuple[list[str], list[str]]:
+                      candidates: list[str],
+                      chunk_size: int = _TWIN_CHUNK) -> tuple[list[str], list[str]]:
     """Split candidates into (has_contract_twin, no_twin).
 
-    Asked as one ASK-shaped VALUES query per chunk rather than a
-    self-join over the whole graph: the join is quadratic across 122K
-    subjects and Virtuoso's cost estimator refuses it.
+    Asked as one VALUES query per chunk rather than a self-join over the
+    whole graph: the join is quadratic across 122K subjects and
+    Virtuoso's cost estimator refuses it. Chunked small because the
+    query rides in a GET URL -- see _TWIN_CHUNK.
     """
     with_twin, without = [], []
-    for start in range(0, len(candidates), 1000):
-        chunk = candidates[start:start + 1000]
+    for start in range(0, len(candidates), chunk_size):
+        chunk = candidates[start:start + chunk_size]
         values = " ".join(f"<{_twin(s)}>" for s in chunk)
         rows = virtuoso.query(
             f"SELECT DISTINCT ?t WHERE {{ GRAPH <{graph_iri}> {{ "

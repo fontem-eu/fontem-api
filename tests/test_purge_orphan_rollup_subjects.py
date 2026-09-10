@@ -191,3 +191,25 @@ def test_dry_run_emits_nothing(monkeypatch):
     monkeypatch.setattr(porp, "EventLog", event_log_cls)
     porp.main([])
     event_log_cls.from_env.assert_not_called()
+
+
+def test_twin_lookup_is_chunked_small_enough_for_a_get_url():
+    """Virtuoso answers 400 Bad Request when the GET query string gets
+    long, and says nothing about size. The first shared run failed that
+    way at 1,000 IRIs per chunk (~64KB of URL); the guard is that the
+    chunk stays small, so assert both the default and that the code
+    actually splits by it."""
+    assert porp._TWIN_CHUNK <= 200
+    subjects = [f"{N}n-{i:04d}" for i in range(250)]
+    triples = _store(*[(s, [IS_CURRENT]) for s in subjects])
+    triples += [(porp._twin(s), [f"{porp._FONTEM}cpv"]) for s in subjects]
+    v = _Virtuoso(triples)
+    with_twin, without = porp.partition_by_twin(
+        v, G, sorted(subjects), chunk_size=100,
+    )
+    assert with_twin == sorted(subjects)
+    assert not without
+    values_queries = [q for q in v.queries if "VALUES ?t" in q]
+    assert len(values_queries) == 3
+    for q in values_queries:
+        assert q.count("<http") <= 101   # 100 values + the graph IRI
