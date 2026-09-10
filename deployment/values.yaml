@@ -51,3 +51,9 @@ service:
 eventsStore:
   secretName: fontem-postgres-credentials
   secretKey: EVENTS_DATABASE_URL
+
+# Consolidator the admin review proxy forwards to. Empty means
+# namespace-relative (`http://fontem-consolidator:8000`), which is
+# correct only where a consolidator runs in the same namespace —
+# today that is fontem-prod alone.
+consolidatorUrl: ""
