@@ -73,3 +73,12 @@ def test_job_hooks_disable_the_mesh_sidecar():
             f"{path} defines a Job without disabling mesh injection; "
             "ArgoCD would wait on it forever"
         )
+
+
+def test_the_search_migration_carries_every_column_the_sink_writes():
+    """The sink INSERTs name_lex_i18n and parts; a hook that does not add
+    them turns every batch into a dead letter on a fresh database."""
+    hook = (_TEMPLATES / "search-migrate-job.yaml").read_text(encoding="utf-8")
+    for column in ("name_lex_i18n tsvector", "parts jsonb"):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in hook, \
+            f"search-migrate does not add {column}"

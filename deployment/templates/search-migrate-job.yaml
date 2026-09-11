@@ -87,6 +87,15 @@ spec:
                           ADD COLUMN IF NOT EXISTS name_lex_i18n tsvector;
                       CREATE INDEX IF NOT EXISTS entity_embeddings_lex_i18n
                           ON search.entity_embeddings USING gin (name_lex_i18n);
+                      -- The fields each row was composed from. Without it the
+                      -- embedding sink rebuilds a row from one event's payload,
+                      -- so a partial producer (load_ted_contracts: a supplier's
+                      -- name and country) cut a GLEIF-described company down to
+                      -- what its own notice said. NULL means "composed before
+                      -- this column existed"; the row accumulates from its next
+                      -- event on. See fontem-embedding-sink migrations/002.
+                      ALTER TABLE search.entity_embeddings
+                          ADD COLUMN IF NOT EXISTS parts jsonb;
                   ELSE
                       RAISE NOTICE 'search.entity_embeddings absent - the embedding sink has not created it yet; nothing to migrate';
                   END IF;
