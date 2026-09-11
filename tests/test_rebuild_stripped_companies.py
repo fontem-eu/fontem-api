@@ -98,16 +98,25 @@ def test_ids_absent_from_neo4j_are_reported():
     assert sorted(missing) == ["gone-1", "gone-2"]
 
 
-def test_selection_requires_a_low_predicate_count_not_just_sameas():
-    """Every sameAs subject in graph/company is damaged today, but that
-    is a fact about the incident, not an invariant. A healthy company
-    that legitimately gains an owl:sameAs later must not be rewritten by
-    a re-run of this script."""
+def test_selection_is_the_damage_signature_not_just_sameas():
+    """The signature is "carries owl:sameAs AND has lost its rdf:type" --
+    exactly what a whole-subject wipe leaves behind. A healthy company
+    always carries a type, so this excludes intact records and any
+    company that legitimately gains an owl:sameAs later. Selecting on
+    owl:sameAs alone would be right today but is a fact about the
+    incident, not an invariant.
+
+    It also has to be a lookup rather than an aggregation: the
+    predicate-counting version selected the same 26,752 subjects and had
+    not returned after 15 minutes on prod, because the group-by runs
+    across the whole graph for every page. This answers in 431ms."""
     v = _Virtuoso([f"{rsc._COMPANY_PREFIX}a"])
     rsc.find_stripped(v, page=10)
     q = v.queries[0]
-    assert f"COUNT(DISTINCT ?p) <= {rsc._MAX_PREDICATES}" in q
+    assert "FILTER NOT EXISTS { ?s a ?t }" in q
     assert "owl#sameAs" in q
+    assert "COUNT(" not in q, "per-page aggregation is what made this unusable"
+    assert "GROUP BY" not in q
 
 
 def test_keyset_paging_walks_past_one_page():
