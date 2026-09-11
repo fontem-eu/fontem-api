@@ -71,12 +71,6 @@ _COMPANY_PREFIX = "http://data.fontem.eu/id/Company/"
 _RESULT_SET_MAX_ROWS = 50_000
 _PAGE = 5_000
 
-#: A damaged subject carries owl:sameAs and almost nothing else. Three is
-#: the observed ceiling (the partials picked up a region or a label from a
-#: later scoped write); a healthy company carries 7 or more and, crucially,
-#: carries rdf:type -- which the strip always removed.
-_MAX_PREDICATES = 3
-
 #: Fields copied from the Neo4j node into the event payload. entity_kind
 #: is deliberately absent -- see the hazards in the module docstring.
 _FIELDS = ("name", "country", "lei", "vat", "cik", "active",
@@ -92,11 +86,19 @@ def find_stripped(virtuoso: VirtuosoClient, page: int = _PAGE,
     SR353, so neither a single scan nor offset paging is safe at 26,752
     rows.
 
-    The predicate-count filter is what makes this precise. Selecting on
-    owl:sameAs alone would be right today -- every sameAs subject in
-    graph/company is damaged -- but that is a property of the incident,
-    not an invariant, and a healthy company that legitimately gains an
-    owl:sameAs later must not be rewritten by a re-run.
+    The signature is "carries owl:sameAs and has lost its rdf:type".
+    That is exactly what a whole-subject wipe does -- it deletes the type
+    with everything else -- and a healthy company always carries one, so
+    the test excludes both intact records and any company that
+    legitimately gains an owl:sameAs later. Selecting on owl:sameAs alone
+    would be right today (every sameAs subject in graph/company is
+    damaged) but that is a fact about the incident, not an invariant.
+
+    The first version of this counted predicates per subject and kept
+    those at or below three. It selected the same 26,752 subjects and was
+    unusable: the aggregation runs across the whole graph for every page
+    and had not returned after 15 minutes on prod. FILTER NOT EXISTS
+    answers in 431ms, because it is a lookup rather than a group-by.
     """
     if page >= cap:
         raise ValueError(
@@ -107,14 +109,13 @@ def find_stripped(virtuoso: VirtuosoClient, page: int = _PAGE,
     last = ""
     while True:
         rows = virtuoso.query(f"""
-SELECT ?s (COUNT(DISTINCT ?p) AS ?np) WHERE {{
+SELECT ?s WHERE {{
   GRAPH <{_G_COMPANY}> {{
     ?s <{_OWL_SAME_AS}> ?o .
-    ?s ?p ?o2 .
+    FILTER NOT EXISTS {{ ?s a ?t }}
   }}
   FILTER(STR(?s) > "{last}")
 }}
-GROUP BY ?s HAVING (COUNT(DISTINCT ?p) <= {_MAX_PREDICATES})
 ORDER BY ?s LIMIT {page}
 """)
         if len(rows) >= cap:
