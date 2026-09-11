@@ -43,6 +43,12 @@ source, not the event log: re-emitting a subject's last logged payload
 restores exactly the partial description that did the damage.
 ``owl:sameAs`` survives -- the sink's replace never deletes it.
 
+Run it only against a virtuoso-sink with fontem-virtuoso-sink#133. A
+Company rebuild carries no entity_kind, which that sink applies as a
+replace of the fields the event states; before it the same event was a
+whole-subject replace, and a subject's fontem:subsidiaryOf edges live on
+the subject -- 29 of 40 label-less subjects sampled on shared carry them.
+
 What ``entity_kind`` does, and when the repair sends it
 -------------------------------------------------------
 An ``UpsertCompany`` carrying ``entity_kind`` makes the sink issue an
@@ -54,7 +60,8 @@ holds 245,585 funds, so neither is hypothetical.
 The stripped repair therefore never sends it and skips funds. The
 labelless repair needs it to reach the right subject, so it sends it
 only when that is the point, and holds back any entity whose subjects
-carry owl:sameAs (see ``same_as_holders``):
+carry something the rebuild would delete without writing back --
+owl:sameAs, fontem:subsidiaryOf edges (see ``would_lose``):
 
 * a fund is rebuilt exactly as load_gleif writes one -- ``entity_kind``
   FUND at the Company IRI -- so the sink refreshes the InvestmentFund
@@ -105,6 +112,9 @@ _OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
 # not network endpoints. Schemes are spec-defined.
 _RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"  # NOSONAR
 _ID_PREFIX = "http://data.fontem.eu/id/"  # NOSONAR
+_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"  # NOSONAR
+_WDT_P17 = "http://www.wikidata.org/prop/direct/P17"  # NOSONAR
+_FONTEM = "http://data.fontem.eu/ontology#"  # NOSONAR
 _COMPANY_PREFIX = f"{_ID_PREFIX}Company/"
 
 #: Virtuoso's ResultSetMaxRows. A page at or above this is assumed
@@ -116,15 +126,15 @@ _PAGE = 5_000
 #: on the 30k repair, so no backlog builds in front of the daily ETL.
 _DEFAULT_MAX_RATE = 30.0
 
-#: gmr_ids per owl:sameAs check: two subject IRIs each, in the query string.
-_SAME_AS_CHUNK = 50
+#: gmr_ids per would_lose check: two subject IRIs each, in the query string.
+_HOLD_CHUNK = 50
 
 #: Why a label-less subject was not rebuilt.
 MISSING = "missing"
 NAMELESS = "nameless"
 UNKINDED_TWIN = "unkinded_twin"
-HELD_SAME_AS = "same_as"
-_SKIP_REASONS = (MISSING, NAMELESS, UNKINDED_TWIN, HELD_SAME_AS)
+HELD_WOULD_LOSE = "would_lose_data"
+_SKIP_REASONS = (MISSING, NAMELESS, UNKINDED_TWIN, HELD_WOULD_LOSE)
 
 #: Fields copied from the Neo4j node into the event payload. entity_kind
 #: is deliberately absent -- see the module docstring for when it is added.
@@ -395,16 +405,33 @@ def load_for_labelless(
     return payloads, skipped
 
 
-def same_as_holders(virtuoso: VirtuosoClient, gmr_ids: list[str],
-                    chunk: int = _SAME_AS_CHUNK) -> set[str]:
-    """The gmr_ids whose Company or InvestmentFund subject carries
-    owl:sameAs.
+#: Every predicate an UpsertCompany rebuild writes -- the virtuoso-sink's
+#: COMPANY_FIELD_PREDICATES -- plus rdf:type. Mirrored, not imported: the
+#: sink is a separate service. A field it gains later is missing here,
+#: which only makes would_lose more cautious.
+_REWRITTEN = frozenset({
+    _RDF_TYPE, _RDFS_LABEL, _WDT_P17,
+    *(f"{_FONTEM}{local}" for local in (
+        "lei", "vat", "cik", "legalForm", "postalCode", "entityKind",
+        "registeredAs", "registeredAt", "jurisdiction", "registrationStatus",
+        "entityCreationDate", "address", "city", "region", "hqAddress",
+        "hqCity", "hqRegion", "hqPostalCode", "hqCountry", "active", "alias",
+    )),
+})
+
+
+def would_lose(virtuoso: VirtuosoClient, gmr_ids: list[str],
+               chunk: int = _HOLD_CHUNK) -> set[str]:
+    """The gmr_ids whose Company or InvestmentFund subject carries a
+    predicate an entity_kind rebuild would delete without writing back.
 
     Checked for every payload that carries entity_kind. The sink answers
-    one with an UNFILTERED delete of the InvestmentFund subject, which
-    would drop an equivalence written there, and a sameAs-preserving
-    replace of the Company subject, which for a fund leaves a lone
-    owl:sameAs behind -- the exact signature of the 2026-09-03 wipe.
+    one with an UNFILTERED delete of the InvestmentFund subject and a
+    whole-subject replace of the Company subject that spares only
+    owl:sameAs. That is safe for the fields the rebuild rewrites and
+    destructive for anything else a subject holds: fontem:subsidiaryOf
+    edges are deleted, and an owl:sameAs on the Company subject is left
+    alone on an otherwise empty subject -- the 2026-09-03 signature.
     """
     found: set[str] = set()
     for start in range(0, len(gmr_ids), chunk):
@@ -413,10 +440,14 @@ def same_as_holders(virtuoso: VirtuosoClient, gmr_ids: list[str],
             for gid in gmr_ids[start:start + chunk] for label in _LOOKUP_LABELS
         )
         rows = virtuoso.query(
-            f"SELECT DISTINCT ?s WHERE {{ GRAPH <{_G_COMPANY}> {{ "
-            f"VALUES ?s {{ {values} }} ?s <{_OWL_SAME_AS}> ?o }} }}"
+            f"SELECT DISTINCT ?s ?p WHERE {{ GRAPH <{_G_COMPANY}> {{ "
+            f"VALUES ?s {{ {values} }} ?s ?p ?o }} }}"
         )
-        found.update(ref[1] for r in rows if (ref := _subject_ref(r.get("s") or "")))
+        found.update(
+            ref[1] for r in rows
+            if r.get("p") not in _REWRITTEN
+            and (ref := _subject_ref(r.get("s") or ""))
+        )
     return found
 
 
@@ -469,11 +500,11 @@ def _rebuild_page(  # pylint: disable=too-many-arguments,too-many-positional-arg
     """Rebuild one page. Returns (rebuilt, funds, skipped ids by reason);
     without a log nothing is emitted and ``rebuilt`` is what would be."""
     payloads, skipped = load_for_labelless(neo4j, refs, batch)
-    held = same_as_holders(virtuoso, [
+    held = would_lose(virtuoso, [
         p["gmr_id"] for p in payloads if p["identity"].get("entity_kind")
     ])
     payloads = [p for p in payloads if p["gmr_id"] not in held]
-    skipped[HELD_SAME_AS] = sorted(held)
+    skipped[HELD_WOULD_LOSE] = sorted(held)
     funds = sum(p["identity"].get("entity_kind") == "FUND" for p in payloads)
     rebuilt = (emit_rebuilds(log, payloads, batch, rate)
                if log is not None else len(payloads))
