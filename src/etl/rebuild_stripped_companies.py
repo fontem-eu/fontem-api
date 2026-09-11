@@ -1,8 +1,12 @@
-"""Rebuild the company subjects an AssertSameAs wiped out of Virtuoso.
+"""Rebuild company subjects Virtuoso lost, from Neo4j.
 
+Two kinds of damage, chosen with ``--select``.
+
+``stripped`` (default): the AssertSameAs wipe
+---------------------------------------------
 On 2026-09-03 the prod consolidator had event emission on while the
 Virtuoso sink still treated AssertSameAs as an ordinary upsert. Ordinary
-upserts are whole-subject replaces -- ``DELETE WHERE { <s> ?p ?o }`` --
+upserts were whole-subject replaces -- ``DELETE WHERE { <s> ?p ?o }`` --
 so each assertion deleted the company's entire record and inserted a
 lone ``owl:sameAs``. Emission was turned off the same day; the sink was
 fixed later (AssertSameAs is now in ADDITIVE_EVENTS), which stops it
@@ -16,43 +20,76 @@ later scoped write. Every one of the 26,752 subjects carrying
 which is the signature that distinguishes this from every other thin
 subject in the graph.
 
+``labelless``: company subjects with no name
+--------------------------------------------
+Measured on prod 2026-09-11: 2,579,228 company subjects have no
+``rdfs:label`` -- 2,424,580 Company and 154,648 InvestmentFund -- and
+2,359,235 of them carry nothing at all but their ``rdf:type``. Neo4j
+holds them intact: 80 of 80 sampled have a name, each under the label
+its subject says (Company -> GENERAL, InvestmentFund -> FUND).
+
+Partial producers explain much of it. load_gleif_relationships sends
+``{gmr_id, lei}`` and load_ted_contracts ``{name, country, active}``, and
+until the sink scoped partial UpsertCompany events each one replaced the
+whole subject: the last event of 369 of 500 damaged subjects is one of
+those, against 148 of 1,000 healthy ones. Why the rest lost even the
+fields a partial event writes is not established; the shared store,
+replayed from the same log by the current sink, has none.
+
 How the repair works
 --------------------
-Re-emit ``UpsertCompany``. The renderer produces the full subject and
-the sink's replace is whole-subject, so the record comes back complete.
-Crucially ``owl:sameAs`` SURVIVES: it is in ``_PRESERVED_ON_REPLACE``
-and the delete clause exempts it, so the repair does not undo the
-identity assertion that caused the damage.
+Re-emit ``UpsertCompany`` built from the Neo4j node. Neo4j is the
+source, not the event log: re-emitting a subject's last logged payload
+restores exactly the partial description that did the damage.
+``owl:sameAs`` survives -- the sink's replace never deletes it.
 
-Neo4j is the source, not the event log. Re-emitting each subject's last
-logged payload would faithfully restore the *pre-incident* state, which
-for most of these was already thinner than what Neo4j holds today.
-Verified on prod: of the fully stripped ids, all but 123 exist as
-:Company with name and country populated.
-
-Two hazards this deliberately avoids
-------------------------------------
+What ``entity_kind`` does, and when the repair sends it
+-------------------------------------------------------
 An ``UpsertCompany`` carrying ``entity_kind`` makes the sink issue an
-extra, UNFILTERED delete of the sibling ``InvestmentFund`` subject --
-unfiltered meaning it does not exempt owl:sameAs. And when
-``entity_kind`` is ``FUND`` the renderer writes to the InvestmentFund
-subject entirely, so the stripped ``Company/<id>`` subject would be left
-exactly as stripped. Prod holds 245,585 funds, so neither is
-hypothetical. This script therefore SKIPS any entity Neo4j reports as a
-fund and never sends ``entity_kind``; those are reported for separate
-handling rather than silently mangled.
+extra, UNFILTERED delete of the InvestmentFund subject -- unfiltered
+meaning it does not exempt owl:sameAs -- and, for ``FUND``, write the
+record at the InvestmentFund subject instead of the Company one. Prod
+holds 245,585 funds, so neither is hypothetical.
+
+The stripped repair therefore never sends it and skips funds. The
+labelless repair needs it to reach the right subject, so it sends it
+only when that is the point, and holds back any entity whose subjects
+carry owl:sameAs (see ``same_as_holders``):
+
+* a fund is rebuilt exactly as load_gleif writes one -- ``entity_kind``
+  FUND at the Company IRI -- so the sink refreshes the InvestmentFund
+  subject and drops any Company twin;
+* an InvestmentFund subject whose node is not a fund is a stale twin,
+  rebuilt with the node's own ``entity_kind`` so the sink drops it. With
+  no kind to state it is reported: inventing one writes it to both
+  stores.
+
+Pace and restarts
+-----------------
+Every consumer reads the one ordered event log, so a burst holds every
+later event -- the daily ETL included -- behind it until the slowest sink
+drains it. The embedding sink kept up with the 30k repair at ~40
+events/s; ``--max-rate`` (default 30/s) keeps this under that.
+
+The labelless scan is page by page: select, look up, emit, then the next
+page. The selection is the damage, so a restarted run finds only what is
+still damaged; ``--start-after`` skips ahead to the last key logged.
 
 Usage::
 
-    python -m src.etl.rebuild_stripped_companies             # report
-    python -m src.etl.rebuild_stripped_companies --apply     # emit
+    python -m src.etl.rebuild_stripped_companies                  # report
+    python -m src.etl.rebuild_stripped_companies --apply          # emit
+    python -m src.etl.rebuild_stripped_companies --select labelless --limit 50000
+    python -m src.etl.rebuild_stripped_companies --select labelless --apply
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import time
 import uuid
+from collections.abc import Callable, Iterator
 
 from fontem_event_schemas import builders
 from fontem_events import EventLog
@@ -64,15 +101,33 @@ logger = logging.getLogger(__name__)
 
 _G_COMPANY = "http://data.fontem.eu/graph/company"
 _OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
-_COMPANY_PREFIX = "http://data.fontem.eu/id/Company/"
+# Both are RDF IRIs (the RDFS vocabulary, Fontem's subject namespace),
+# not network endpoints. Schemes are spec-defined.
+_RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"  # NOSONAR
+_ID_PREFIX = "http://data.fontem.eu/id/"  # NOSONAR
+_COMPANY_PREFIX = f"{_ID_PREFIX}Company/"
 
 #: Virtuoso's ResultSetMaxRows. A page at or above this is assumed
 #: truncated, because the server does not say which it is.
 _RESULT_SET_MAX_ROWS = 50_000
 _PAGE = 5_000
 
+#: Events/s ceiling for --apply. Under the ~40/s the embedding sink held
+#: on the 30k repair, so no backlog builds in front of the daily ETL.
+_DEFAULT_MAX_RATE = 30.0
+
+#: gmr_ids per owl:sameAs check: two subject IRIs each, in the query string.
+_SAME_AS_CHUNK = 50
+
+#: Why a label-less subject was not rebuilt.
+MISSING = "missing"
+NAMELESS = "nameless"
+UNKINDED_TWIN = "unkinded_twin"
+HELD_SAME_AS = "same_as"
+_SKIP_REASONS = (MISSING, NAMELESS, UNKINDED_TWIN, HELD_SAME_AS)
+
 #: Fields copied from the Neo4j node into the event payload. entity_kind
-#: is deliberately absent -- see the hazards in the module docstring.
+#: is deliberately absent -- see the module docstring for when it is added.
 _FIELDS = ("name", "country", "lei", "vat", "cik", "active",
            "legal_form", "postal_code")
 
@@ -91,6 +146,32 @@ _FIELDS = ("name", "country", "lei", "vat", "cik", "active",
 _IDENTITY_FIELDS = tuple(
     k for k in builders.COMPANY_IDENTITY_FIELDS if k != "entity_kind"
 )
+
+
+def _check_page_size(page: int, cap: int) -> None:
+    if page >= cap:
+        raise ValueError(
+            f"page size {page} is not below Virtuoso's result-set cap "
+            f"({cap}); a full page could not be told from a truncated one"
+        )
+
+
+def _keyset_page(virtuoso: VirtuosoClient, query: str, last: str,
+                 cap: int) -> list[str]:
+    """One keyset page of subject IRIs, refusing a truncated page and a
+    key that does not advance."""
+    rows = virtuoso.query(query)
+    if len(rows) >= cap:
+        raise RuntimeError(
+            f"page of {len(rows)} rows hit Virtuoso's result-set cap; "
+            "results may be silently truncated. Lower --page-size."
+        )
+    got = [r["s"] for r in rows if r.get("s")]
+    if got and max(got) <= last:
+        raise RuntimeError(
+            f"keyset did not advance past {last!r}; refusing to loop"
+        )
+    return got
 
 
 def find_stripped(virtuoso: VirtuosoClient, page: int = _PAGE,
@@ -116,15 +197,11 @@ def find_stripped(virtuoso: VirtuosoClient, page: int = _PAGE,
     and had not returned after 15 minutes on prod. FILTER NOT EXISTS
     answers in 431ms, because it is a lookup rather than a group-by.
     """
-    if page >= cap:
-        raise ValueError(
-            f"page size {page} is not below Virtuoso's result-set cap "
-            f"({cap}); a full page could not be told from a truncated one"
-        )
+    _check_page_size(page, cap)
     found: list[str] = []
     last = ""
     while True:
-        rows = virtuoso.query(f"""
+        got = _keyset_page(virtuoso, f"""
 SELECT ?s WHERE {{
   GRAPH <{_G_COMPANY}> {{
     ?s <{_OWL_SAME_AS}> ?o .
@@ -133,25 +210,66 @@ SELECT ?s WHERE {{
   FILTER(STR(?s) > "{last}")
 }}
 ORDER BY ?s LIMIT {page}
-""")
-        if len(rows) >= cap:
-            raise RuntimeError(
-                f"page of {len(rows)} rows hit Virtuoso's result-set cap; "
-                "results may be silently truncated. Lower --page-size."
-            )
-        got = [r["s"] for r in rows if r.get("s")]
+""", last, cap)
         if not got:
             return found
         found.extend(s[len(_COMPANY_PREFIX):] for s in got
                      if s.startswith(_COMPANY_PREFIX))
-        nxt = max(got)
-        if nxt <= last:
-            raise RuntimeError(
-                f"keyset did not advance past {last!r}; refusing to loop"
-            )
-        last = nxt
-        if len(rows) < page:
+        last = max(got)
+        if len(got) < page:
             return found
+
+
+def _labelless_query(after: str, page: int) -> str:
+    return f"""
+SELECT ?s WHERE {{
+  GRAPH <{_G_COMPANY}> {{
+    ?s a ?t .
+    FILTER NOT EXISTS {{ ?s <{_RDFS_LABEL}> ?l }}
+  }}
+  FILTER(STR(?s) > "{after}")
+}}
+ORDER BY ?s LIMIT {page}
+"""
+
+
+def _subject_ref(iri: str) -> tuple[str, str] | None:
+    """``(subject label, gmr_id)`` for a Company or InvestmentFund IRI."""
+    if not iri.startswith(_ID_PREFIX):
+        return None
+    label, _, gid = iri[len(_ID_PREFIX):].partition("/")
+    if label not in _LOOKUP_LABELS or not gid or "/" in gid:
+        return None
+    return label, gid
+
+
+def iter_labelless(
+    virtuoso: VirtuosoClient, page: int = _PAGE,
+    cap: int = _RESULT_SET_MAX_ROWS, start_after: str = "",
+) -> Iterator[tuple[str, list[tuple[str, str]]]]:
+    """Yield ``(last key, [(subject label, gmr_id), ...])`` per page of
+    company subjects that have no ``rdfs:label``.
+
+    "Has no label", not "has nothing but a type". The second is the
+    literal description of the damage and was the first query tried: its
+    ``FILTER NOT EXISTS { ?s ?p ?o . FILTER(?p != rdf:type) }`` returned
+    nothing in 500s on prod. A single-predicate NOT EXISTS is a lookup --
+    5,000 rows in 12.5s -- and it also takes in the ~220k subjects that
+    kept a stray lei or owl:sameAs but lost their name, which are just as
+    broken.
+    """
+    _check_page_size(page, cap)
+    last = start_after
+    while True:
+        got = _keyset_page(virtuoso, _labelless_query(last, page), last, cap)
+        if not got:
+            return
+        last = max(got)
+        # A subject with two types comes back twice.
+        refs = [ref for s in dict.fromkeys(got) if (ref := _subject_ref(s))]
+        yield last, refs
+        if len(got) < page:
+            return
 
 
 #: Looked up one label at a time, never label-less. Both labels carry a
@@ -182,9 +300,30 @@ def _lookup_query(label: str) -> str:
     )
 
 
+def _lookup(session, chunk: list[str]) -> dict[str, dict]:
+    """One row per gmr_id. Querying per label means a node that carries
+    BOTH labels comes back twice; fund classification wins, because
+    repairing a fund as a Company is a silent no-op."""
+    by_id: dict[str, dict] = {}
+    for label in _LOOKUP_LABELS:
+        for r in session.run(_lookup_query(label), ids=chunk).data():
+            prev = by_id.get(r["gmr_id"])
+            if prev is None or _is_fund(r):
+                by_id[r["gmr_id"]] = r
+    return by_id
+
+
+def _payload(gmr_id: str, props: dict) -> dict:
+    return {
+        "gmr_id": gmr_id,
+        **{f: props.get(f) for f in _FIELDS},
+        "identity": {k: props.get(k) for k in _IDENTITY_FIELDS},
+    }
+
+
 def load_from_neo4j(neo4j: Neo4jClient, gmr_ids: list[str],
                     batch: int = 500) -> tuple[list[dict], list[str], list[str]]:
-    """Return (payloads, missing_ids, fund_ids).
+    """Return (payloads, missing_ids, fund_ids) for the stripped repair.
 
     Funds are separated rather than repaired: the renderer would write
     them at the InvestmentFund subject and leave the Company subject
@@ -197,17 +336,7 @@ def load_from_neo4j(neo4j: Neo4jClient, gmr_ids: list[str],
     with neo4j.session() as session:
         for start in range(0, len(gmr_ids), batch):
             chunk = gmr_ids[start:start + batch]
-            # One row per gmr_id. Querying per label means a node that
-            # carries BOTH labels comes back twice; fund classification
-            # wins, because repairing a fund as a Company is the silent
-            # no-op the module docstring warns about.
-            by_id: dict[str, dict] = {}
-            for label in _LOOKUP_LABELS:
-                for r in session.run(_lookup_query(label), ids=chunk).data():
-                    prev = by_id.get(r["gmr_id"])
-                    if prev is None or _is_fund(r):
-                        by_id[r["gmr_id"]] = r
-            seen = set(by_id)
+            by_id = _lookup(session, chunk)
             for r in by_id.values():
                 if _is_fund(r):
                     funds.append(r["gmr_id"])
@@ -218,18 +347,102 @@ def load_from_neo4j(neo4j: Neo4jClient, gmr_ids: list[str],
                     # which is not a repair -- report it instead.
                     missing.append(r["gmr_id"])
                     continue
-                payloads.append({
-                    "gmr_id": r["gmr_id"],
-                    **{f: props.get(f) for f in _FIELDS},
-                    "identity": {k: props.get(k) for k in _IDENTITY_FIELDS},
-                })
-            missing.extend(i for i in chunk if i not in seen)
+                payloads.append(_payload(r["gmr_id"], props))
+            missing.extend(i for i in chunk if i not in by_id)
     return payloads, missing, funds
 
 
-def emit_rebuilds(log: EventLog, payloads: list[dict],
-                  batch: int = 500) -> int:
-    """Emit one UpsertCompany per repairable subject."""
+def _labelless_payload(row: dict | None, gid: str,
+                       subjects: set[str]) -> tuple[dict | None, str | None]:
+    """(payload, None) for a rebuildable entity, else (None, reason)."""
+    if row is None:
+        return None, MISSING
+    props = row.get("props") or {}
+    if not props.get("name"):
+        return None, NAMELESS
+    payload = _payload(gid, props)
+    if _is_fund(row):
+        payload["identity"]["entity_kind"] = "FUND"
+    elif "Company" not in subjects:
+        if not props.get("entity_kind"):
+            return None, UNKINDED_TWIN
+        payload["identity"]["entity_kind"] = props["entity_kind"]
+    return payload, None
+
+
+def load_for_labelless(
+    neo4j: Neo4jClient, refs: list[tuple[str, str]], batch: int = 500,
+) -> tuple[list[dict], dict[str, list[str]]]:
+    """Return (payloads, skipped ids by reason) for label-less subjects.
+
+    See the module docstring for when a payload carries entity_kind.
+    """
+    subjects: dict[str, set[str]] = {}
+    for label, gid in refs:
+        subjects.setdefault(gid, set()).add(label)
+    ids = list(subjects)
+    payloads: list[dict] = []
+    skipped: dict[str, list[str]] = {MISSING: [], NAMELESS: [], UNKINDED_TWIN: []}
+    with neo4j.session() as session:
+        for start in range(0, len(ids), batch):
+            by_id = _lookup(session, ids[start:start + batch])
+            for gid in ids[start:start + batch]:
+                payload, reason = _labelless_payload(by_id.get(gid), gid, subjects[gid])
+                if payload is None:
+                    skipped[reason].append(gid)
+                else:
+                    payloads.append(payload)
+    return payloads, skipped
+
+
+def same_as_holders(virtuoso: VirtuosoClient, gmr_ids: list[str],
+                    chunk: int = _SAME_AS_CHUNK) -> set[str]:
+    """The gmr_ids whose Company or InvestmentFund subject carries
+    owl:sameAs.
+
+    Checked for every payload that carries entity_kind. The sink answers
+    one with an UNFILTERED delete of the InvestmentFund subject, which
+    would drop an equivalence written there, and a sameAs-preserving
+    replace of the Company subject, which for a fund leaves a lone
+    owl:sameAs behind -- the exact signature of the 2026-09-03 wipe.
+    """
+    found: set[str] = set()
+    for start in range(0, len(gmr_ids), chunk):
+        values = " ".join(
+            f"<{_ID_PREFIX}{label}/{gid}>"
+            for gid in gmr_ids[start:start + chunk] for label in _LOOKUP_LABELS
+        )
+        rows = virtuoso.query(
+            f"SELECT DISTINCT ?s WHERE {{ GRAPH <{_G_COMPANY}> {{ "
+            f"VALUES ?s {{ {values} }} ?s <{_OWL_SAME_AS}> ?o }} }}"
+        )
+        found.update(ref[1] for r in rows if (ref := _subject_ref(r.get("s") or "")))
+    return found
+
+
+class RateLimit:
+    """Hold emission at or under ``max_rate`` events/s over the whole run."""
+
+    def __init__(self, max_rate: float,
+                 clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep):
+        self._rate = max_rate
+        self._clock = clock
+        self._sleep = sleep
+        self._start = clock()
+        self._sent = 0
+
+    def consumed(self, n: int) -> None:
+        self._sent += n
+        ahead = self._sent / self._rate - (self._clock() - self._start)
+        if ahead > 0:
+            self._sleep(ahead)
+
+
+def emit_rebuilds(log: EventLog, payloads: list[dict], batch: int = 500,
+                  rate: RateLimit | None = None) -> int:
+    """Emit one UpsertCompany per repairable subject, at the Company IRI
+    -- where load_gleif emits every company, funds included."""
     sent = 0
     for start in range(0, len(payloads), batch):
         chunk = payloads[start:start + batch]
@@ -243,28 +456,115 @@ def emit_rebuilds(log: EventLog, payloads: list[dict],
                     payload=builders.upsert_company(**p),
                 )
                 sent += 1
+        if rate is not None:
+            rate.consumed(len(chunk))
         logger.info("emitted %d/%d UpsertCompany events", sent, len(payloads))
     return sent
 
 
-def main(argv=None) -> None:
-    """CLI entry point."""
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
-    )
+def _rebuild_page(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    virtuoso: VirtuosoClient, neo4j: Neo4jClient, log: EventLog | None,
+    refs: list[tuple[str, str]], batch: int, rate: RateLimit | None,
+) -> tuple[int, int, dict[str, list[str]]]:
+    """Rebuild one page. Returns (rebuilt, funds, skipped ids by reason);
+    without a log nothing is emitted and ``rebuilt`` is what would be."""
+    payloads, skipped = load_for_labelless(neo4j, refs, batch)
+    held = same_as_holders(virtuoso, [
+        p["gmr_id"] for p in payloads if p["identity"].get("entity_kind")
+    ])
+    payloads = [p for p in payloads if p["gmr_id"] not in held]
+    skipped[HELD_SAME_AS] = sorted(held)
+    funds = sum(p["identity"].get("entity_kind") == "FUND" for p in payloads)
+    rebuilt = (emit_rebuilds(log, payloads, batch, rate)
+               if log is not None else len(payloads))
+    return rebuilt, funds, skipped
+
+
+class _Tally:
+    """Running totals, and up to 20 example ids per reason not rebuilt."""
+
+    def __init__(self) -> None:
+        self.totals = dict.fromkeys(("selected", "rebuilt", "funds",
+                                     *_SKIP_REASONS), 0)
+        self._samples: dict[str, list[str]] = {k: [] for k in _SKIP_REASONS}
+
+    def add(self, rebuilt: int, funds: int,
+            skipped: dict[str, list[str]]) -> None:
+        self.totals["rebuilt"] += rebuilt
+        self.totals["funds"] += funds
+        for reason, ids in skipped.items():
+            self.totals[reason] += len(ids)
+            room = 20 - len(self._samples[reason])
+            self._samples[reason].extend(ids[:max(room, 0)])
+
+    def log_samples(self) -> None:
+        for reason, ids in self._samples.items():
+            for gid in ids:
+                logger.warning("not rebuilt (%s): %s", reason, gid)
+
+
+def run_labelless(  # pylint: disable=too-many-arguments
+    virtuoso: VirtuosoClient, neo4j: Neo4jClient, log: EventLog | None, *,
+    page: int = _PAGE, batch: int = 500, limit: int | None = None,
+    start_after: str = "", rate: RateLimit | None = None,
+) -> dict[str, int]:
+    """Select, look up and -- given a log -- emit, one page at a time."""
+    tally = _Tally()
+    t0 = time.monotonic()
+    for n, (last, refs) in enumerate(
+            iter_labelless(virtuoso, page, start_after=start_after), 1):
+        if limit is not None:
+            refs = refs[:max(limit - tally.totals["selected"], 0)]
+            if not refs:
+                break
+        tally.totals["selected"] += len(refs)
+        tally.add(*_rebuild_page(virtuoso, neo4j, log, refs, batch, rate))
+        logger.info(
+            "page %d, last key %s: %d selected; totals %s (%.1f rebuilt/s)",
+            n, last, len(refs), tally.totals,
+            tally.totals["rebuilt"] / max(time.monotonic() - t0, 1e-9),
+        )
+    tally.log_samples()
+    return tally.totals
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--apply", action="store_true",
         help="Emit the events. Without this the script only reports.",
     )
+    parser.add_argument("--select", choices=("stripped", "labelless"),
+                        default="stripped")
     parser.add_argument("--page-size", type=int, default=_PAGE)
     parser.add_argument("--batch", type=int, default=500)
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="labelless: stop after this many subjects (a sampled dry run).",
+    )
+    parser.add_argument(
+        "--start-after", default="",
+        help="labelless: resume past this subject IRI (a logged last key).",
+    )
+    parser.add_argument(
+        "--max-rate", type=float, default=_DEFAULT_MAX_RATE,
+        help="labelless: events/s ceiling with --apply; 0 disables it.",
+    )
+    return parser
 
-    virtuoso = VirtuosoClient.from_env()
-    # Reads NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD from the
-    # environment, the same way every other ETL constructs it.
-    neo4j = Neo4jClient()
+
+def _main_labelless(args, virtuoso: VirtuosoClient, neo4j: Neo4jClient) -> None:
+    log = EventLog.from_env() if args.apply else None
+    rate = (RateLimit(args.max_rate)
+            if log is not None and args.max_rate > 0 else None)
+    totals = run_labelless(
+        virtuoso, neo4j, log, page=args.page_size, batch=args.batch,
+        limit=args.limit, start_after=args.start_after, rate=rate,
+    )
+    logger.info("%s: %s", "emitted" if log is not None else "dry run", totals)
+
+
+def _main_stripped(args, virtuoso: VirtuosoClient, neo4j: Neo4jClient) -> None:
     stripped = find_stripped(virtuoso, args.page_size)
     logger.info("%d stripped company subjects in %s", len(stripped), _G_COMPANY)
 
@@ -286,6 +586,22 @@ def main(argv=None) -> None:
     log = EventLog.from_env()
     sent = emit_rebuilds(log, payloads, args.batch)
     logger.info("emitted %d UpsertCompany events", sent)
+
+
+def main(argv=None) -> None:
+    """CLI entry point."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+    )
+    args = _parser().parse_args(argv)
+    virtuoso = VirtuosoClient.from_env()
+    # Reads NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD from the
+    # environment, the same way every other ETL constructs it.
+    neo4j = Neo4jClient()
+    if args.select == "labelless":
+        _main_labelless(args, virtuoso, neo4j)
+    else:
+        _main_stripped(args, virtuoso, neo4j)
 
 
 if __name__ == "__main__":
