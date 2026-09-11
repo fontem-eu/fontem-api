@@ -18,19 +18,20 @@ _F = f"{rsc._ID_PREFIX}InvestmentFund/"
 
 
 class _Virtuoso:
-    """Keyset pages over label-less subjects, and owl:sameAs lookups."""
+    """Keyset pages over label-less subjects, and per-subject predicate
+    lookups answered from ``held`` ({subject IRI: [predicate, ...]})."""
 
-    def __init__(self, subjects, same_as=()):
+    def __init__(self, subjects, held=None):
         self._subjects = sorted(subjects)
-        self._same_as = set(same_as)
+        self._held = held or {}
         self.queries = []
 
     def query(self, q):
         self.queries.append(q)
         if "VALUES ?s" in q:
-            iris = q.split("VALUES ?s {")[1].split("}")[0].split()
-            return [{"s": i.strip("<>")} for i in iris
-                    if i.strip("<>") in self._same_as]
+            iris = [i.strip("<>") for i in
+                    q.split("VALUES ?s {")[1].split("}")[0].split()]
+            return [{"s": i, "p": p} for i in iris for p in self._held.get(i, ())]
         limit = int(q.split("LIMIT")[1].split()[0])
         after = q.split('STR(?s) > "')[1].split('"')[0]
         return [{"s": s} for s in self._subjects if s > after][:limit]
@@ -158,17 +159,57 @@ def test_missing_and_nameless_nodes_are_reported():
     assert skipped[rsc.MISSING] == ["gone"]
 
 
-def test_an_entity_kind_rebuild_is_held_back_when_it_would_cost_an_equivalence():
-    v = _Virtuoso([f"{_C}a", f"{_C}f"], same_as={f"{_C}f", f"{_C}a"})
-    neo = _neo4j([_node("a", ["Company"], "GENERAL"),
-                  _node("f", ["InvestmentFund"], "FUND")])
+_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
+_SUBSIDIARY_OF = "http://data.fontem.eu/ontology#subsidiaryOf"
+
+
+def _run(held, nodes, subjects):
     log = MagicMock()
     emit = log.batch.return_value.__enter__.return_value
-    totals = rsc.run_labelless(v, neo, log)
-    # The company is rebuilt without entity_kind: its sameAs is safe.
-    assert [c.kwargs["payload"]["gmr_id"] for c in emit.upsert.call_args_list] == ["a"]
-    assert totals[rsc.HELD_SAME_AS] == 1
-    assert totals["rebuilt"] == 1
+    totals = rsc.run_labelless(_Virtuoso(subjects, held), _neo4j(nodes), log)
+    return [c.kwargs["payload"]["gmr_id"] for c in emit.upsert.call_args_list], totals
+
+
+def test_a_fund_rebuild_that_would_orphan_an_equivalence_is_held_back():
+    emitted, totals = _run({f"{_C}f": [rsc._RDF_TYPE, _SAME_AS]},
+                           [_node("f", ["InvestmentFund"], "FUND")], [f"{_C}f"])
+    assert not emitted
+    assert totals[rsc.HELD_WOULD_LOSE] == 1
+
+
+def test_a_fund_rebuild_that_would_delete_relationship_edges_is_held_back():
+    """fontem:subsidiaryOf lives on the subject: 29 of 40 label-less
+    subjects sampled on shared carry it. The relabel deletes would take
+    it with them and the rebuild writes only company fields back."""
+    emitted, totals = _run(
+        {f"{_F}f": [rsc._RDF_TYPE, f"{rsc._FONTEM}lei", _SUBSIDIARY_OF]},
+        [_node("f", ["InvestmentFund"], "FUND")], [f"{_F}f"])
+    assert not emitted
+    assert totals[rsc.HELD_WOULD_LOSE] == 1
+
+
+def test_a_fund_carrying_only_rewritten_fields_is_rebuilt():
+    emitted, totals = _run(
+        {f"{_F}f": [rsc._RDF_TYPE, f"{rsc._FONTEM}lei"],
+         f"{_C}f": [rsc._RDF_TYPE, rsc._RDFS_LABEL, rsc._WDT_P17]},
+        [_node("f", ["InvestmentFund"], "FUND")], [f"{_F}f"])
+    assert emitted == ["f"]
+    assert totals["funds"] == 1
+
+
+def test_a_company_rebuild_is_never_held_back():
+    """No entity_kind: the sink replaces only the fields the event states,
+    so the subject's edges and equivalences survive the rebuild."""
+    emitted, totals = _run({f"{_C}a": [rsc._RDF_TYPE, _SAME_AS, _SUBSIDIARY_OF]},
+                           [_node("a", ["Company"], "GENERAL")], [f"{_C}a"])
+    assert emitted == ["a"]
+    assert totals[rsc.HELD_WOULD_LOSE] == 0
+
+
+def test_what_a_rebuild_writes_back_excludes_edges_and_equivalences():
+    assert rsc._RDFS_LABEL in rsc._REWRITTEN and rsc._RDF_TYPE in rsc._REWRITTEN
+    assert _SAME_AS not in rsc._REWRITTEN
+    assert _SUBSIDIARY_OF not in rsc._REWRITTEN
 
 
 def test_a_dry_run_emits_nothing(monkeypatch):
