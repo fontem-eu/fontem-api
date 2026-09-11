@@ -76,6 +76,22 @@ _PAGE = 5_000
 _FIELDS = ("name", "country", "lei", "vat", "cik", "active",
            "legal_form", "postal_code")
 
+#: The GLEIF identity block, exactly as load_gleif sends it (it passes
+#: builders.COMPANY_IDENTITY_FIELDS through `identity=`), minus
+#: entity_kind for the same hazard. Taken from the canonical tuple, not
+#: copied, so a field added to the schema reaches the repair too.
+#:
+#: Without this the repair was a quiet regression on a second store.
+#: UpsertCompany also reaches the embedding sink, whose upsert is a whole
+#: replace built from `name · aliases · (city, country, legal_form)`. On a
+#: 498-company sample of the stripped set, 18% carry city and 6% aliases
+#: in Neo4j; a payload without them would have overwritten those
+#: companies' search vectors with thinner ones -- roughly 4,700 losing
+#: city context and 1,650 losing aliases -- while "repairing" Virtuoso.
+_IDENTITY_FIELDS = tuple(
+    k for k in builders.COMPANY_IDENTITY_FIELDS if k != "entity_kind"
+)
+
 
 def find_stripped(virtuoso: VirtuosoClient, page: int = _PAGE,
                   cap: int = _RESULT_SET_MAX_ROWS) -> list[str]:
@@ -150,17 +166,19 @@ _LOOKUP_LABELS = ("Company", "InvestmentFund")
 
 def _is_fund(row: dict) -> bool:
     return ("InvestmentFund" in (row.get("labels") or [])
-            or row.get("entity_kind") == "FUND")
+            or (row.get("props") or {}).get("entity_kind") == "FUND")
 
 
 def _lookup_query(label: str) -> str:
+    # The whole property map, filtered in Python to what the schema
+    # allows. Enumerating columns here is how the identity block went
+    # missing the first time; the schema is additionalProperties:false,
+    # so the filter below -- not this query -- is what keeps stray node
+    # properties (name_clean, last_consolidated_at) out of the event.
     return (
         f"MATCH (c:{label}) WHERE c.gmr_id IN $ids "
         "RETURN c.gmr_id AS gmr_id, labels(c) AS labels, "
-        "  c.name AS name, c.country AS country, c.lei AS lei, "
-        "  c.vat AS vat, c.cik AS cik, c.active AS active, "
-        "  c.entity_kind AS entity_kind, "
-        "  c.legal_form AS legal_form, c.postal_code AS postal_code"
+        "  properties(c) AS props"
     )
 
 
@@ -194,14 +212,16 @@ def load_from_neo4j(neo4j: Neo4jClient, gmr_ids: list[str],
                 if _is_fund(r):
                     funds.append(r["gmr_id"])
                     continue
-                if not r.get("name"):
+                props = r.get("props") or {}
+                if not props.get("name"):
                     # A nameless node rebuilds a subject with no label,
                     # which is not a repair -- report it instead.
                     missing.append(r["gmr_id"])
                     continue
                 payloads.append({
                     "gmr_id": r["gmr_id"],
-                    **{f: r.get(f) for f in _FIELDS},
+                    **{f: props.get(f) for f in _FIELDS},
+                    "identity": {k: props.get(k) for k in _IDENTITY_FIELDS},
                 })
             missing.extend(i for i in chunk if i not in seen)
     return payloads, missing, funds

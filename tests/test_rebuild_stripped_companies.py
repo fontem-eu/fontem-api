@@ -45,7 +45,11 @@ def _neo4j(records, seen_queries=None):
             seen_queries.append(query)
         label = query.split("MATCH (c:")[1].split(")")[0]
         res = MagicMock()
-        res.data.return_value = [r for r in records if label in (r.get("labels") or [])]
+        res.data.return_value = [
+            {"gmr_id": r["gmr_id"], "labels": r.get("labels") or [],
+             "props": {k: v for k, v in r.items() if k != "labels"}}
+            for r in records if label in (r.get("labels") or [])
+        ]
         return res
 
     session.run.side_effect = _run
@@ -59,13 +63,17 @@ def test_entity_kind_is_never_sent():
     owl:sameAs, so the repair would destroy the very assertion it is
     meant to preserve."""
     assert "entity_kind" not in rsc._FIELDS
+    assert "entity_kind" not in rsc._IDENTITY_FIELDS
     payloads, _, _ = rsc.load_from_neo4j(_neo4j([
         {"gmr_id": "a", "labels": ["Company"], "name": "Acme",
-         "country": "FRA", "entity_kind": None, "lei": None, "vat": None,
+         "country": "FRA", "entity_kind": "GENERAL", "lei": None, "vat": None,
          "cik": None, "active": True, "legal_form": None,
          "postal_code": None},
     ]), ["a"])
     assert payloads and "entity_kind" not in payloads[0]
+    # ...and not smuggled in through the identity block either, which is
+    # where load_gleif sends it.
+    assert "entity_kind" not in payloads[0]["identity"]
 
 
 def test_funds_are_skipped_not_repaired():
@@ -221,3 +229,77 @@ def test_a_node_with_both_labels_is_classified_once_as_a_fund():
     assert not payloads
     assert funds == ["d1"]
     assert not missing
+
+
+_SHAKTI = {  # a real stripped prod company with the full GLEIF block
+    "gmr_id": "013aea9c-e2b3-5c2d-a7be-65e618627964", "labels": ["Company"],
+    "name": "SHAKTI ENTERPRISES", "name_clean": "shaktienterprises",
+    "country": "IND", "active": True, "lei": "9845001C3AME84BC4428",
+    "legal_form": "4QIE", "postal_code": "202001",
+    "entity_kind": "SOLE_PROPRIETOR", "registration_status": "LAPSED",
+    "registered_as": "0606008845", "registered_at": "RA000709",
+    "jurisdiction": "IN", "entity_creation_date": "2007-02-07T00:00:00+00:00",
+    "address": "B - 1, SECTOR - 1, TALANAGARI INDUSTRIAL AREA, UPSIDA",
+    "city": "ALIGARH", "region": "IN-UP",
+    "hq_address": "B - 1, SECTOR - 1, TALANAGARI INDUSTRIAL AREA, UPSIDA",
+    "hq_city": "ALIGARH", "hq_region": "IN-UP", "hq_country": "IND",
+    "hq_postal_code": "202001", "aliases": ["GAURAV MITTAL"],
+    "last_consolidated_at": "2026-09-02T18:30:25.413Z",
+}
+
+
+def test_the_identity_block_is_carried_from_neo4j():
+    """UpsertCompany also reaches the embedding sink, whose upsert is a
+    whole replace built from `name · aliases · (city, country,
+    legal_form)`. Dropping city and aliases would overwrite good search
+    vectors with thinner ones -- ~4,700 companies losing city context and
+    ~1,650 losing aliases, extrapolated from a prod sample."""
+    payloads, _, _ = rsc.load_from_neo4j(_neo4j([_SHAKTI]), [_SHAKTI["gmr_id"]])
+    ident = payloads[0]["identity"]
+    assert ident["city"] == "ALIGARH"
+    assert ident["aliases"] == ["GAURAV MITTAL"]
+    assert ident["hq_country"] == "IND"
+    assert ident["registration_status"] == "LAPSED"
+
+
+def test_node_properties_outside_the_schema_never_reach_the_event():
+    """The lookup returns properties(c), which includes bookkeeping the
+    schema does not allow (name_clean, last_consolidated_at). The schema
+    is additionalProperties:false, so a stray key fails validation --
+    loudly, but only after the event is built."""
+    payloads, _, _ = rsc.load_from_neo4j(_neo4j([_SHAKTI]), [_SHAKTI["gmr_id"]])
+    p = payloads[0]
+    flat = set(p) | set(p["identity"])
+    assert "name_clean" not in flat
+    assert "last_consolidated_at" not in flat
+
+
+def test_the_built_payload_validates_against_the_real_schema():
+    """The check that would have caught both earlier gaps at once. The
+    UpsertCompany schema is additionalProperties:false, so building the
+    actual event from a real prod node and validating it proves every
+    field is one the schema knows, under the name it expects."""
+    from fontem_event_schemas import validate  # pylint: disable=import-outside-toplevel
+    from fontem_event_schemas import builders  # pylint: disable=import-outside-toplevel
+    payloads, _, _ = rsc.load_from_neo4j(_neo4j([_SHAKTI]), [_SHAKTI["gmr_id"]])
+    event_payload = builders.upsert_company(**payloads[0])
+    validate("UpsertCompany", 1, event_payload)
+    assert event_payload["city"] == "ALIGARH"
+    assert event_payload["aliases"] == ["GAURAV MITTAL"]
+    assert "entity_kind" not in event_payload
+
+
+def test_a_thin_company_still_validates():
+    """Most of the stripped set carries only name/country/active. Their
+    identity block is all None, which the builder drops -- the payload
+    must still be valid, not fail on an empty mapping."""
+    from fontem_event_schemas import validate  # pylint: disable=import-outside-toplevel
+    from fontem_event_schemas import builders  # pylint: disable=import-outside-toplevel
+    thin = {"gmr_id": "0000a491-707c-55ed-a0bc-dc35e9f282ea",
+            "labels": ["Company"], "name": "Autocares La Inmaculada, SL",
+            "name_clean": "autocareslainmaculadasl", "country": "ESP",
+            "active": True}
+    payloads, _, _ = rsc.load_from_neo4j(_neo4j([thin]), [thin["gmr_id"]])
+    event_payload = builders.upsert_company(**payloads[0])
+    validate("UpsertCompany", 1, event_payload)
+    assert set(event_payload) == {"gmr_id", "name", "country", "active"}
