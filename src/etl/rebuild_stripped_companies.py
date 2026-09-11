@@ -138,6 +138,32 @@ ORDER BY ?s LIMIT {page}
             return found
 
 
+#: Looked up one label at a time, never label-less. Both labels carry a
+#: gmr_id index (company_gmr_id, investmentfund_gmr_id), and only a
+#: labelled MATCH can use one. The first version matched `(c)` with no
+#: label so it would find funds too; Neo4j planned that as an
+#: AllNodesScan -- every node in prod, per 500-id batch, on the instance
+#: serving the live API. The prod dry run sat at ~1 core for 18 minutes
+#: without finishing the first phase. Per label it is a NodeIndexSeek.
+_LOOKUP_LABELS = ("Company", "InvestmentFund")
+
+
+def _is_fund(row: dict) -> bool:
+    return ("InvestmentFund" in (row.get("labels") or [])
+            or row.get("entity_kind") == "FUND")
+
+
+def _lookup_query(label: str) -> str:
+    return (
+        f"MATCH (c:{label}) WHERE c.gmr_id IN $ids "
+        "RETURN c.gmr_id AS gmr_id, labels(c) AS labels, "
+        "  c.name AS name, c.country AS country, c.lei AS lei, "
+        "  c.vat AS vat, c.cik AS cik, c.active AS active, "
+        "  c.entity_kind AS entity_kind, "
+        "  c.legal_form AS legal_form, c.postal_code AS postal_code"
+    )
+
+
 def load_from_neo4j(neo4j: Neo4jClient, gmr_ids: list[str],
                     batch: int = 500) -> tuple[list[dict], list[str], list[str]]:
     """Return (payloads, missing_ids, fund_ids).
@@ -153,20 +179,19 @@ def load_from_neo4j(neo4j: Neo4jClient, gmr_ids: list[str],
     with neo4j.session() as session:
         for start in range(0, len(gmr_ids), batch):
             chunk = gmr_ids[start:start + batch]
-            rows = session.run(
-                "MATCH (c) WHERE c.gmr_id IN $ids "
-                "RETURN c.gmr_id AS gmr_id, labels(c) AS labels, "
-                "  c.name AS name, c.country AS country, c.lei AS lei, "
-                "  c.vat AS vat, c.cik AS cik, c.active AS active, "
-                "  c.entity_kind AS entity_kind, "
-                "  c.legal_form AS legal_form, c.postal_code AS postal_code",
-                ids=chunk,
-            ).data()
-            seen = set()
-            for r in rows:
-                seen.add(r["gmr_id"])
-                if ("InvestmentFund" in (r.get("labels") or [])
-                        or r.get("entity_kind") == "FUND"):
+            # One row per gmr_id. Querying per label means a node that
+            # carries BOTH labels comes back twice; fund classification
+            # wins, because repairing a fund as a Company is the silent
+            # no-op the module docstring warns about.
+            by_id: dict[str, dict] = {}
+            for label in _LOOKUP_LABELS:
+                for r in session.run(_lookup_query(label), ids=chunk).data():
+                    prev = by_id.get(r["gmr_id"])
+                    if prev is None or _is_fund(r):
+                        by_id[r["gmr_id"]] = r
+            seen = set(by_id)
+            for r in by_id.values():
+                if _is_fund(r):
                     funds.append(r["gmr_id"])
                     continue
                 if not r.get("name"):

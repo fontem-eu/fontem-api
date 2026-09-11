@@ -32,12 +32,23 @@ class _Virtuoso:
         return [{"s": r} for r in rows[:self._cap]]
 
 
-def _neo4j(records):
+def _neo4j(records, seen_queries=None):
+    """Answers each labelled lookup with the records carrying that label,
+    the way the real index seek would."""
     client = MagicMock()
     session = client.session.return_value
     session.__enter__ = lambda s: s
     session.__exit__ = lambda s, *a: None
-    session.run.return_value.data.return_value = records
+
+    def _run(query, **_kw):
+        if seen_queries is not None:
+            seen_queries.append(query)
+        label = query.split("MATCH (c:")[1].split(")")[0]
+        res = MagicMock()
+        res.data.return_value = [r for r in records if label in (r.get("labels") or [])]
+        return res
+
+    session.run.side_effect = _run
     return client
 
 
@@ -180,3 +191,33 @@ def test_dry_run_emits_nothing(monkeypatch):
     monkeypatch.setattr(rsc, "EventLog", event_log_cls)
     rsc.main([])
     event_log_cls.from_env.assert_not_called()
+
+
+def test_every_lookup_is_labelled_so_it_can_use_an_index():
+    """The regression. The first version matched `(c)` with no label so it
+    would find funds too, and Neo4j planned that as an AllNodesScan --
+    every node in prod, per 500-id batch, on the instance serving the
+    live API. The prod dry run sat at ~1 core for 18 minutes without
+    finishing. A labelled MATCH is a NodeIndexSeek (company_gmr_id,
+    investmentfund_gmr_id)."""
+    queries = []
+    rsc.load_from_neo4j(_neo4j([], seen_queries=queries), ["a"])
+    assert queries, "no lookup ran"
+    for q in queries:
+        assert "MATCH (c:" in q, f"label-less lookup would scan every node: {q}"
+    labels = {q.split("MATCH (c:")[1].split(")")[0] for q in queries}
+    assert labels == {"Company", "InvestmentFund"}
+
+
+def test_a_node_with_both_labels_is_classified_once_as_a_fund():
+    """Querying per label returns a dual-labelled node twice. It must
+    count once, and as a fund: repairing a fund as a Company leaves the
+    stripped Company subject stripped while reporting success."""
+    both = {"gmr_id": "d1", "labels": ["Company", "InvestmentFund"],
+            "name": "Dual", "country": "LUX", "entity_kind": None,
+            "lei": None, "vat": None, "cik": None, "active": True,
+            "legal_form": None, "postal_code": None}
+    payloads, missing, funds = rsc.load_from_neo4j(_neo4j([both]), ["d1"])
+    assert not payloads
+    assert funds == ["d1"]
+    assert not missing
