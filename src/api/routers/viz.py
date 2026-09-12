@@ -20,7 +20,7 @@ from src.data.graph._value_quality import canonical_predicate
 router = APIRouter(prefix="/viz", tags=["viz"])
 
 
-# Only canonical contracts (collapse_modifications): a modification notice
+# Only canonical contracts (one entity per contract): a modification notice
 # restates the same contract, so counting it again would inflate a bidder
 # bucket. Non-modification / stamped-canonical nodes only.
 _BIDDER_BREAKDOWN = f"""

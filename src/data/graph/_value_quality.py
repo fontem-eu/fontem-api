@@ -15,7 +15,7 @@ handles them identically:
    (``notice_type = 'can-modif'``) as its own :Contract node with its own
    ``AWARDED_TO`` edge and a *restated* (not incremental) value. Summing
    ``value_eur`` over a company's awards would count every restatement on top
-   of the original award. The ``collapse_modifications`` ETL pass materialises
+   of the original award. The neo4j sink maintains, per contract entity,
    ``current_value`` (the latest restated value) and ``is_current`` (exactly
    one canonical node per underlying contract). Aggregates therefore sum
    ``current_value`` over canonical nodes only.

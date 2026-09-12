@@ -2,11 +2,22 @@
 """
 TED Contract Awards → events.entity_events
 =============================================
-Downloads TED monthly/daily packages, parses eForms XML via the
+Parses TED notices (award + contract-modification) via the
 eforms-parser library, matches companies via the TedMatcher (which
 reads existing Companies from Neo4j to find a stable gmr_id), and
 emits ``UpsertCompany`` + ``UpsertAuthority`` + ``UpsertContract``
 events into the canonical event log.
+
+There is ONE ingest path — :func:`ingest_notice`. Notices reach it
+from two discovery mechanisms (a monthly archive, or TED's search API
+day by day) that differ only in how the XML is found. Every identity
+field on the event (publication number, procedure id, notice version,
+the modification back-link) is read from the notice XML by the parser,
+never from the search response, so the same notice produces the same
+event whichever way it arrived. Until 2026-09 the two paths stamped
+different keys (archive: notice UUID; search: procedure id) and an
+award and its later modification became two contracts — see
+gitops/docs/roadmap/contract-modifications-single-path.md.
 
 The CATEGORIZED_AS → CPV edge is dropped from this loader for now;
 ``cpv`` rides along as a property on the Contract event. A follow-up
@@ -28,7 +39,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date as _date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,7 +49,7 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 from neo4j import GraphDatabase
 
-from eforms.filters import awards_only
+from eforms.filters import awards_and_modifications
 from eforms.parser import parse as parse_notice_xml
 from eforms.stream import stream_notices
 
@@ -46,10 +57,8 @@ from src.data.ted_raw_store import TedRawStore, TedPackageStore
 from src.etl.data_description import DataDescription
 from ..services.currency.client import CurrencyClient
 from ..services.location_service import LocationService
-from ..services.ted_lookup import TedLookupError, resolve_publication_number
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
-from .collapse_modifications import derive_contract_key
 from .contract_confidence import score_contract_value
 from .scale_normalization import normalize_scale
 from . import value_review_queue
@@ -81,36 +90,6 @@ DESCRIPTION = DataDescription(
 
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_pub_num_or_none(notice_uuid: str) -> str | None:
-    """Resolve UUID → TED publication-number, returning None on any
-    miss instead of raising. Notices that are queued but not yet
-    published — or that TED's search returns no match for — get a
-    ``None`` so the row persists without a stored pub-num. A later
-    ETL pass (or the backfill) can refill it once TED has the data.
-
-    Transport-level errors (TED API down, DNS, timeout) are also
-    swallowed to None and logged at WARNING so a TED outage doesn't
-    poison the whole ETL run; the contracts still land with a null
-    pub-num and the runtime /api/contracts/<id>/ted-link redirector
-    becomes the path of last resort.
-
-    ``resolve_publication_number`` is LRU-cached, so this is O(1) for
-    notice UUIDs already resolved this run (multi-award notices
-    inside a single batch don't pay extra TED calls)."""
-    try:
-        return resolve_publication_number(notice_uuid)
-    except TedLookupError as exc:
-        logger.debug("no TED publication-number for %s: %s", notice_uuid, exc)
-        return None
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "TED search lookup transport error for %s (%s) — "
-            "storing null pub-num, runtime redirector will retry",
-            notice_uuid, exc,
-        )
-        return None
 
 
 def _as_day(raw: str | None) -> str | None:
@@ -230,95 +209,157 @@ def _download_monthly(year: int, month: int, dest: Path,
     return result
 
 
-def _already_loaded(session, ted_notice_id: str) -> bool:
-    """Return True if a Contract with this ``ted_notice_id`` already
-    exists in Neo4j. Cheap O(1) check thanks to the
-    ``Contract.ted_notice_id`` index. Used by ``load_contracts`` to
-    skip notices that were ingested in a prior run — turns a re-run
-    into a no-op for already-loaded notices instead of the previous
-    per-notice TED-search + per-notice transaction cost."""
-    row = session.run(
-        "MATCH (c:Contract {ted_notice_id: $nid}) "
-        "RETURN c.ted_notice_id LIMIT 1",
-        nid=ted_notice_id,
-    ).single()
-    return row is not None
+_LEGACY_OJS_ID = re.compile(r"^\d{4}/S \d")
 
 
-def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
+def notice_key(notice) -> str:
+    """The per-notice key (``ted_notice_id``): the eForms notice UUID, or
+    the publication number for a legacy TED_EXPORT notice, whose
+    ``notice_id`` is the human OJS reference (``2022/S 081-217109``) that
+    nothing else keys on."""
+    if notice.publication_number and _LEGACY_OJS_ID.match(notice.notice_id or ""):
+        return notice.publication_number
+    return notice.notice_id
+
+
+def derive_contract_key(
+    *,
+    procedure_id: str | None,
+    notice_kind: str,
+    modifies_publication_number: str | None,
+    ted_publication_number: str | None,
+    ted_notice_id: str,
+) -> str:
+    """The contract identity a notice groups under.
+
+    eForms: the procedure id (BT-04), which the award and every
+    modification of one procedure share. Legacy: a modification groups
+    under the publication number of the award it modifies, an award
+    under its own. The notice id is the last resort and means the XML
+    carried no identity at all. The sink may still move a modification
+    onto its root award's entity when the back-link resolves to an award
+    keyed differently (an eForms modification of a pre-eForms award).
+    """
+    if procedure_id:
+        return procedure_id
+    if notice_kind == "modification" and modifies_publication_number:
+        return modifies_publication_number
+    return ted_publication_number or ted_notice_id
+
+
+def _version_num(raw) -> int | None:
+    """``"01"`` (XML), ``1`` (search API) and ``None`` compare as one
+    thing: an integer version, or None when the notice has none."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+_INGEST_STATE = """
+OPTIONAL MATCH (n:Notice {ted_notice_id: $nid})
+OPTIONAL MATCH (c:Contract {ted_notice_id: $nid})
+WITH coalesce(n, c) AS x
+RETURN x IS NOT NULL AS present,
+       x.notice_version AS version,
+       x.procedure_id IS NOT NULL AS has_procedure_id,
+       x.ted_publication_number IS NOT NULL AS has_publication_number
+"""
+
+
+def _should_ingest(
+    session, ted_notice_id: str, notice_version, identity: str | None,
+) -> bool:
+    """Idempotency gate, one indexed lookup per notice.
+
+    A notice is re-ingested when it is not in the graph, when the graph
+    copy predates identity stamping (``identity`` names the property the
+    XML can give — ``procedure_id`` for eForms, ``ted_publication_number``
+    for legacy — and the node lacks it), or when the incoming notice is a
+    NEWER version than the stored one. Same or older version: skip. So a
+    re-run of an archive is O(1) per notice already at its current
+    version, and the identity repair is simply a re-run."""
+    row = session.run(_INGEST_STATE, nid=ted_notice_id).single()
+    if row is None or not row["present"]:
+        return True
+    if identity == "procedure_id" and not row["has_procedure_id"]:
+        return True
+    if identity == "ted_publication_number" and not row["has_publication_number"]:
+        return True
+    stored, incoming = _version_num(row["version"]), _version_num(notice_version)
+    return stored is not None and incoming is not None and incoming > stored
+
+
+def _identity_property(procedure_id, publication_number) -> str | None:
+    if procedure_id:
+        return "procedure_id"
+    if publication_number:
+        return "ted_publication_number"
+    return None
+
+
+@dataclass
+class IngestContext:
+    """What every notice of one run shares: the matcher (reads Neo4j for
+    stable gmr_ids), the currency service, the per-run parent dedup
+    sets, and whether already-loaded notices are re-emitted."""
+    matcher: TedMatcher
+    currency_svc: CurrencyClient | None = None
+    seen_authorities: set = field(default_factory=set)
+    seen_companies: set = field(default_factory=set)
+    rescore: bool = False
+
+
+def ingest_notice(notice, session, log: EventLog, ctx: IngestContext) -> str:
+    """The one ingest path. Returns ``"emitted"`` or ``"skipped"``.
+
+    Identity is whatever the parser read off the XML; the caller only
+    found the notice. Each notice is its own ``log.batch`` (TED's own
+    publish boundary), so committed rows are visible immediately and a
+    pod restart loses at most one notice."""
+    ted_notice_id = notice_key(notice)
+    if not ctx.rescore and not _should_ingest(
+        session, ted_notice_id, notice.notice_version,
+        _identity_property(notice.procedure_id, notice.publication_number),
+    ):
+        return "skipped"
+    with log.batch(uuid.uuid4(), producer="load_ted_contracts") as emit:
+        _emit_notice(
+            notice, emit, ctx.matcher,
+            ctx.seen_authorities, ctx.seen_companies, ctx.currency_svc,
+        )
+    return "emitted"
+
+
+def load_contracts(
     driver,
     log: EventLog,
     archive_path: Path,
     currency_svc: CurrencyClient | None = None,
-    skip_pub_num_lookup: bool = False,
     rescore: bool = False,
 ):
-    """Parse a TED archive and emit Authority/Contract/Company events.
+    """Discover notices in a TED monthly archive and ingest each one.
 
-    The Neo4j driver is used by ``TedMatcher`` to resolve each
-    contractor to a stable gmr_id, and by an idempotency check to
-    skip notices already ingested in a prior run; the actual writes
-    go through the event log.
-
-    Two commit-granularity changes from the previous shape:
-
-    1. **Per-notice transactions.** The whole-archive batch was
-       converted to one ``log.batch(...)`` per notice so committed
-       rows are visible immediately (sinks + dashboards see progress
-       in real time, not at end-of-month). The old shape held a
-       single Postgres transaction open for hours, blocked
-       autovacuum, hid progress from sinks, and lost everything if
-       the pod restarted mid-archive. Each notice is now its own
-       atomic unit, which matches TED's own publish boundary.
-
-    2. **Skip-already-loaded.** Before processing a notice's awards
-       we look up ``Contract.ted_notice_id`` in Neo4j. If the
-       contract exists, the notice was loaded in a prior run and
-       we skip it entirely — no TED-search call, no eForms parse
-       awards loop, no emit. Re-runs of the same archive are O(1)
-       per existing notice.
-
-    ``skip_pub_num_lookup=True`` short-circuits the per-notice
-    TED v3 search call (~500ms each) — useful for bulk historical
-    loads where the publication-number is backfilled later by
-    ``src.etl.backfill_ted_publication_numbers``. Without it, the
-    loader rate is bounded by TED's API; with it, by archive
-    parse + Neo4j sink throughput (~10x faster)."""
+    Awards AND modifications: a modification found in an archive keys
+    its contract exactly as one found through the search API would,
+    because both go through :func:`ingest_notice`. ``rescore`` bypasses
+    the already-loaded skip so every notice is re-emitted (the sinks
+    MERGE, so values overwrite in place)."""
     total = 0
     skipped = 0
     t0 = time.time()
-    loaded_at = datetime.now().astimezone().isoformat()  # pylint: disable=unused-variable
-    seen_authorities: set[str] = set()
-    seen_companies: set[str] = set()
-
     with driver.session() as session:
-        matcher = TedMatcher(session)
-
-        for notice in awards_only(stream_notices(archive_path)):
-            # Idempotency gate — cheap pre-check before any TED
-            # call or event emission. Notices already in Neo4j get
-            # skipped wholesale; re-running an archive is now safe
-            # AND fast.
-            # rescore re-ingests notices already in the graph so the
-            # confidence scorer (and any other loader change) re-runs
-            # over them via the normal ETL+sink flow; the sink MERGEs,
-            # so values overwrite in place.
-            if not rescore and _already_loaded(session, notice.notice_id):
+        ctx = IngestContext(
+            matcher=TedMatcher(session), currency_svc=currency_svc,
+            rescore=rescore,
+        )
+        for notice in awards_and_modifications(stream_notices(archive_path)):
+            if ingest_notice(notice, session, log, ctx) == "skipped":
                 skipped += 1
                 continue
-
-            # Per-notice transaction: events for THIS notice land
-            # atomically. The whole-archive batch was hiding hours
-            # of work in one open transaction.
-            with log.batch(
-                uuid.uuid4(), producer="load_ted_contracts",
-            ) as emit:
-                _emit_notice(
-                    notice, emit, matcher,
-                    seen_authorities, seen_companies,
-                    currency_svc, skip_pub_num_lookup,
-                )
-                total += 1
+            total += 1
             if total % 200 == 0:
                 elapsed = time.time() - t0
                 rate = total / elapsed if elapsed else 0
@@ -332,9 +373,9 @@ def load_contracts(  # pylint: disable=too-many-locals,too-many-branches,too-man
         "Done: %d notices emitted, %d skipped in %.0fs",
         total, skipped, elapsed,
     )
-    logger.info("Match quality: %s", matcher.stats.summary())
+    logger.info("Match quality: %s", ctx.matcher.stats.summary())
     return {"total": total, "skipped": skipped, "elapsed_s": elapsed,
-            "match_stats": matcher.stats.summary()}
+            "match_stats": ctx.matcher.stats.summary()}
 
 
 def _award_lot_estimate(notice, award):
@@ -529,11 +570,7 @@ def _winner_value_inputs(notice, resolved):
 
 
 def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
-    notice, emit, matcher, seen_authorities, seen_companies,
-    currency_svc, skip_pub_num_lookup: bool,
-    *, pub_num_override: str | None = None,
-    notice_id_override: str | None = None,
-    extra_props: dict | None = None,
+    notice, emit, matcher, seen_authorities, seen_companies, currency_svc,
 ):
     """Process a single TED notice within an already-open
     ``log.batch(...)`` context — the caller owns commit semantics.
@@ -547,12 +584,10 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         publishes is resolved and listed in ``parties[]``; the
         top-level company/match fields stay the primary winner's.
 
-    ``skip_pub_num_lookup``: when True, skip the per-notice TED v3
-    search call and emit Contracts with ``ted_publication_number=None``.
-    The backfill (``src.etl.backfill_ted_publication_numbers``) fills
-    it in later, in parallel, in 6–12 hours for the whole graph.
-    Without skip, each notice pays ~500ms in the TED API and the
-    loader is bottlenecked by that.
+    Everything about the notice's identity comes from the parsed
+    notice: there is no override, no search-record stamp and no
+    out-of-band lookup, so the event is the same whichever way the
+    notice was discovered.
     """
     buyer = notice.buyer()
     if not buyer:
@@ -585,26 +620,12 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         )
         seen_authorities.add(authority_id)
 
-    # Legacy TED notices carry no eForms UUID; the incremental loader
-    # passes the machine publication-number as the key so the Contract
-    # IRI + ted_notice_id stay stable and match the _already_loaded
-    # pre-check. For eForms this override equals notice.notice_id, so
-    # it is a no-op there.
-    ted_notice_id = notice_id_override or notice.notice_id
-    # Pub-num lookup is per-notice, not per-award — the LRU cache
-    # would coalesce repeated awards anyway, but doing it here also
-    # avoids paying it before the first award when skip_pub_num_lookup
-    # is False. With the flag, this is always None and the backfill
-    # picks it up later.
-    if pub_num_override is not None:
-        # The incremental search-API path already carries the
-        # publication-number from the search response — no per-notice
-        # UUID->pub-num lookup needed.
-        ted_publication_number = pub_num_override
-    elif skip_pub_num_lookup:
-        ted_publication_number = None
-    else:
-        ted_publication_number = _resolve_pub_num_or_none(ted_notice_id)
+    # eForms UUID, or the publication number for a legacy notice (whose
+    # notice_id is the human OJS reference). The publication number
+    # itself is on the XML (efbc:NoticePublicationID / NO_DOC_OJS); a
+    # notice TED has not published yet simply has none.
+    ted_notice_id = notice_key(notice)
+    ted_publication_number = notice.publication_number
 
     # Every named supplier — winners AND named tenderers — resolves
     # through the consolidator; unmatched ones mint a new node
@@ -763,45 +784,32 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         match_tier = match_confidence = None
         company_gmr_id = match_layer = None
 
-    # Incremental stamps (procedure_id / notice_type /
-    # modifies_publication_number) arrive via ``extra_props`` from the
-    # search-API path; the bulk-archive path falls back to what the
-    # parser read off the notice itself. contract_key / notice_kind
-    # are derived with the shared helper so the producer stamp, the
-    # sink's native Contract/Notice model and collapse_modifications'
-    # Cypher grouping all agree on contract identity. (Bulk historical
-    # loads with skip_pub_num_lookup stamp the notice UUID; the
-    # collapse pass re-derives from node props once the
-    # publication-number backfill has run.)
-    stamps = extra_props or {}
-    procedure_id = stamps.get("procedure_id")
-    # When TED published the notice, in preference order: the search
-    # record (authoritative, already fetched), then efbc:PublicationDate
-    # off the notice XML, then cbc:IssueDate as a last resort. The first
-    # two mean "public on this date"; issue_date is when the buyer wrote
-    # it, which runs 1-3 days earlier and is the wrong answer for anything
-    # ordering or windowing by recency.
+    # Identity, all from the XML: procedure id (BT-04), the notice
+    # version (BT-757) and, on a modification, the back-link (BT-1501)
+    # in whichever of its two forms the buyer wrote it. contract_key is
+    # derived here so the producer stamp and the sink's native
+    # Contract/Notice model agree on what a contract is.
+    procedure_id = notice.procedure_id
+    # When TED published the notice: efbc:PublicationDate off the XML,
+    # then cbc:IssueDate as a last resort. issue_date is when the buyer
+    # wrote it, which runs 1-3 days earlier and is the wrong answer for
+    # anything ordering or windowing by recency.
     publication_date = (
-        _as_day(stamps.get("publication_date"))
-        or _as_day(getattr(notice, "publication_date", None))
+        _as_day(getattr(notice, "publication_date", None))
         or _as_day(notice.issue_date)
     )
-    notice_type = (
-        stamps.get("notice_type") or getattr(notice, "notice_type", None)
-    )
+    notice_type = getattr(notice, "notice_type", None)
     notice_kind = (
         "modification" if notice_type == _MODIFICATION_NOTICE_TYPE
         else "award"
     )
-    modifies_publication_number = None
+    modifies_publication_number = modifies_notice_id = None
     if notice_kind == "modification":
-        modifies_publication_number = (
-            stamps.get("modifies_publication_number")
-            or getattr(notice, "modifies_publication_number", None)
-        )
+        modifies_publication_number = notice.modifies_publication_number
+        modifies_notice_id = notice.modifies_notice_id
     contract_key = derive_contract_key(
         procedure_id=procedure_id,
-        notice_type=notice_type,
+        notice_kind=notice_kind,
         modifies_publication_number=modifies_publication_number,
         ted_publication_number=ted_publication_number,
         ted_notice_id=ted_notice_id,
@@ -862,9 +870,12 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         eu_funded=notice.eu_funded,
         funding_programme=notice.funding_programme,
         procedure_id=procedure_id,
+        legacy_procedure_id=notice.legacy_procedure_id,
         notice_type=notice_type,
+        notice_version=notice.notice_version,
         notice_kind=notice_kind,
         modifies_publication_number=modifies_publication_number,
+        modifies_notice_id=modifies_notice_id,
         contract_key=contract_key,
         parties=_build_parties(resolved),
     )
@@ -914,27 +925,28 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     notice_types: tuple[str, ...] = ted_search.NOTICE_TYPES,
     watermark_id: str = _WATERMARK_ID,
 ):
-    """Incrementally load award + modification notices via TED's search
-    API, one calendar day at a time from ``since`` to ``until`` inclusive.
+    """Discover award + modification notices through TED's search API,
+    one calendar day at a time from ``since`` to ``until`` inclusive,
+    and ingest each one.
 
-    Per day: query the search API, skip notices already in the graph
-    (cheap pre-check by notice-identifier), download + parse the rest, and
-    emit Authority/Company/Contract events. Each contract is stamped with
-    its publication-number (free from the search response), procedure_id,
-    and notice_type; modifications also carry modifies_publication_number.
-    The watermark advances one day at a time, only after that day fully
-    loads, so an interrupted run resumes from the next unfinished day. A
-    day that errors on *every* notice (e.g. API outage) stops the run
-    without advancing, so we never silently skip a date.
+    The search API is DISCOVERY ONLY: its record tells us a notice
+    exists, where its XML is, and — so we can skip without downloading —
+    its identifier and version. Nothing from the record lands on the
+    event; :func:`ingest_notice` reads identity from the XML like it
+    does for an archive. The watermark advances one day at a time, only
+    after that day fully loads, so an interrupted run resumes from the
+    next unfinished day. A day that errors on *every* notice (e.g. API
+    outage) stops the run without advancing, so we never silently skip
+    a date.
     """
     totals = {"days": 0, "emitted": 0, "skipped": 0, "modifications": 0, "errors": 0}
     raw_store = TedRawStore.from_env()
     http = httpx.Client(timeout=ted_search.SEARCH_TIMEOUT)
     try:
         with driver.session() as session:
-            matcher = TedMatcher(session)
-            seen_authorities: set[str] = set()
-            seen_companies: set[str] = set()
+            ctx = IngestContext(
+                matcher=TedMatcher(session), currency_svc=currency_svc,
+            )
             day = since
             while day <= until:
                 ymd = day.strftime("%Y%m%d")
@@ -942,13 +954,20 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                 t0 = time.time()
                 d_emit = d_skip = d_mod = d_err = 0
                 for rec in ted_search.search_day(ymd, notice_types, client=http):
-                    # Legacy TED notices have no notice-identifier (UUID);
-                    # fall back to the publication-number as the stable key.
+                    # Pre-download skip, on the same rule ingest_notice
+                    # applies after parsing: legacy notices have no
+                    # notice-identifier and key on the publication number.
                     nid = (
                         rec.get("notice-identifier")
                         or rec.get("publication-number")
                     )
-                    if nid and _already_loaded(session, nid):
+                    if nid and not _should_ingest(
+                        session, nid, rec.get("notice-version"),
+                        _identity_property(
+                            rec.get("procedure-identifier"),
+                            rec.get("publication-number"),
+                        ),
+                    ):
                         d_skip += 1
                         continue
                     url = ted_search.xml_url(rec)
@@ -966,30 +985,9 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                                 rec.get("publication-number") or nid, xml_bytes,
                             )
                         notice = parse_notice_xml(xml_bytes)
-                        extra = {
-                            "procedure_id": rec.get("procedure-identifier"),
-                            "notice_type": rec.get("notice-type"),
-                            "publication_date": rec.get("publication-date"),
-                            "modifies_publication_number": (
-                                (ted_search.modifies_publication_number(rec)
-                                 or getattr(
-                                     notice, "modifies_publication_number",
-                                     None,
-                                 ))
-                                if is_mod else None
-                            ),
-                        }
-                        with log.batch(
-                            uuid.uuid4(), producer="load_ted_contracts",
-                        ) as emit:
-                            _emit_notice(
-                                notice, emit, matcher,
-                                seen_authorities, seen_companies, currency_svc,
-                                skip_pub_num_lookup=True,
-                                pub_num_override=rec.get("publication-number"),
-                                notice_id_override=nid,
-                                extra_props=extra,
-                            )
+                        if ingest_notice(notice, session, log, ctx) == "skipped":
+                            d_skip += 1
+                            continue
                         d_emit += 1
                         d_mod += 1 if is_mod else 0
                     except Exception:  # pylint: disable=broad-except
@@ -1024,8 +1022,8 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
         totals["days"], totals["emitted"], totals["modifications"],
         totals["skipped"], totals["errors"],
     )
-    logger.info("Match quality: %s", matcher.stats.summary())
-    totals["match_stats"] = matcher.stats.summary()
+    logger.info("Match quality: %s", ctx.matcher.stats.summary())
+    totals["match_stats"] = ctx.matcher.stats.summary()
     return totals
 
 
@@ -1066,19 +1064,6 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
             "http://fontem-currency.currency-service.svc.cluster.local",
         ),
         help="Base URL of the fontem-currency HTTP service",
-    )
-    parser.add_argument(
-        "--skip-pub-num-lookup",
-        action="store_true",
-        default=os.environ.get("TED_SKIP_PUB_NUM_LOOKUP", "").lower()
-        in ("1", "true", "yes"),
-        help=(
-            "Skip the per-notice TED v3 search call that resolves "
-            "ted_publication_number. Contracts are emitted with "
-            "ted_publication_number=None; backfill via "
-            "src.etl.backfill_ted_publication_numbers later. ~10x "
-            "faster for bulk historical loads."
-        ),
     )
     parser.add_argument(
         "--since", help="Incremental start date YYYY-MM-DD (overrides watermark)",
@@ -1160,7 +1145,6 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
                     )
                 load_contracts(
                     driver, log, archive, currency_svc=currency_svc,
-                    skip_pub_num_lookup=args.skip_pub_num_lookup,
                     rescore=args.rescore,
                 )
                 # Free disk between months (packages are >1 GB); the

@@ -10,26 +10,13 @@ from src.etl.ted_matcher import MatchResult
 
 
 @pytest.fixture(autouse=True)
-def _stub_ted_lookup(monkeypatch):
-    """The ETL now resolves the publication-number via TED's v3 search
-    on every iteration; pin the helper to a stable value so tests
-    don't hit the network. The default — "295342-2026" — mirrors the
-    real shape; individual tests can re-patch for None or exception
-    paths."""
+def _stub_should_ingest(monkeypatch):
+    """Idempotency gate: default to "ingest" so the happy-path tests
+    exercise the emit pipeline. Tests that want the skip path re-patch
+    this to return False."""
     monkeypatch.setattr(
-        "src.etl.load_ted_contracts._resolve_pub_num_or_none",
-        lambda _uuid: "295342-2026",
-    )
-
-
-@pytest.fixture(autouse=True)
-def _stub_already_loaded(monkeypatch):
-    """Idempotency gate: default to "not yet loaded" so existing happy-
-    path tests exercise the emit pipeline. Tests that want to assert the
-    skip path re-patch this to return True."""
-    monkeypatch.setattr(
-        "src.etl.load_ted_contracts._already_loaded",
-        lambda _session, _nid: False,
+        "src.etl.load_ted_contracts._should_ingest",
+        lambda _session, _nid, _version, _identity: True,
     )
 
 
@@ -90,12 +77,16 @@ def _stub_award(currency="EUR", value=1000.0, contractor_org_id="O1",  # pylint:
 
 def _stub_notice(*, awards, organizations):
     notice = MagicMock()
-    # Match real eForms parsing: publication_number is never populated
-    # by the parser (TED assigns it post-ingest), only notice_id is.
-    # The ETL now uses notice_id directly as ted_notice_id and
-    # resolves publication-number out-of-band via TED's v3 search API.
-    notice.publication_number = None
+    # Identity as the parser reads it off the XML (eforms-parser 0.11):
+    # the notice UUID and, once TED has published it, the publication
+    # number. The defaults model a just-published award; tests set
+    # procedure_id / notice_version / back-links as they need.
+    notice.publication_number = "295342-2026"
     notice.notice_id = "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+    notice.procedure_id = None
+    notice.notice_version = None
+    notice.modifies_notice_id = None
+    notice.legacy_procedure_id = None
     notice.title = "Some contract"
     notice.description = "Procurement of stuff"
     notice.issue_date = "2025-09-01"
@@ -325,108 +316,6 @@ def test_contract_iri_keyed_on_uuid_not_publication_number(
 
 @patch("src.etl.load_ted_contracts.stream_notices")
 @patch("src.etl.load_ted_contracts.TedMatcher")
-def test_contract_publication_number_null_when_lookup_returns_none(
-    mock_matcher_cls, mock_stream, monkeypatch,
-):
-    """Notices whose TED publication-number can't be resolved at ETL
-    time — TED hasn't assigned one yet, or the search API returned
-    no match — emit the Contract with ``ted_publication_number=None``.
-    The builder strips None values, so the field is just absent from
-    the payload (not the empty string). The runtime /ted-link
-    redirector then falls back to its own live lookup on click."""
-    monkeypatch.setattr(
-        "src.etl.load_ted_contracts._resolve_pub_num_or_none",
-        lambda _uuid: None,
-    )
-    mock_matcher_cls.return_value = _mock_matcher(
-        stub_authority_id="auth-1",
-        stub_company_gmr="company-1",
-    )
-    contractor = MagicMock()
-    contractor.name = "Adyen N.V."
-    contractor.country = "NL"
-    contractor.legal_id = None
-    mock_stream.return_value = iter([
-        _stub_notice(
-            awards=[_stub_award()],
-            organizations={"O1": contractor},
-        ),
-    ])
-
-    driver, _session = _mock_driver_and_session()
-    log, emit = _mock_log()
-    load_contracts(driver, log, "/fake/path.tar.gz")
-
-    contract_call = next(
-        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
-    )
-    payload = contract_call.kwargs["payload"]
-    assert "ted_publication_number" not in payload, (
-        "builder must elide None — leaving the field absent so the "
-        f"sink doesn't write a null property; got payload keys "
-        f"{list(payload)}"
-    )
-
-
-def test_resolve_pub_num_or_none_swallows_transport_errors(
-    monkeypatch,
-):
-    """ETL must never fail a contract row because TED's search API
-    is unreachable — the deeper fontem-events transaction would
-    rollback the whole batch. Wrapper returns None on httpx errors
-    so the row persists with no pub-num and the runtime redirector
-    picks up the slack."""
-    import httpx  # pylint: disable=import-outside-toplevel
-    import importlib  # pylint: disable=import-outside-toplevel
-    from src.services import ted_lookup  # pylint: disable=import-outside-toplevel
-    ted_lookup.resolve_publication_number.cache_clear()
-
-    # The autouse fixture stubs _resolve_pub_num_or_none itself —
-    # undo it on this module attribute so we exercise the real
-    # wrapper below.
-    monkeypatch.undo()
-    importlib.reload(load_ted_contracts)
-
-    def _explode(_uuid):
-        raise httpx.ConnectError("TED is down")
-
-    monkeypatch.setattr(
-        "src.etl.load_ted_contracts.resolve_publication_number",
-        _explode,
-    )
-    out = load_ted_contracts._resolve_pub_num_or_none(  # pylint: disable=protected-access
-        "912f1717-1ace-413d-aa61-cd21cd6b95e7",
-    )
-    assert out is None
-
-
-def test_resolve_pub_num_or_none_returns_none_on_no_match(monkeypatch):
-    """TedLookupError (TED has no record of the UUID) → None, same as
-    the transport-error path. The row persists; the redirector
-    surfaces the 404 from its own lookup on click."""
-    import importlib  # pylint: disable=import-outside-toplevel
-    from src.services import ted_lookup  # pylint: disable=import-outside-toplevel
-    from src.services.ted_lookup import TedLookupError  # pylint: disable=import-outside-toplevel
-    ted_lookup.resolve_publication_number.cache_clear()
-
-    monkeypatch.undo()
-    importlib.reload(load_ted_contracts)
-
-    def _no_match(_uuid):
-        raise TedLookupError("TED has no published notice for X")
-
-    monkeypatch.setattr(
-        "src.etl.load_ted_contracts.resolve_publication_number",
-        _no_match,
-    )
-    out = load_ted_contracts._resolve_pub_num_or_none(  # pylint: disable=protected-access
-        "912f1717-1ace-413d-aa61-cd21cd6b95e7",
-    )
-    assert out is None
-
-
-@patch("src.etl.load_ted_contracts.stream_notices")
-@patch("src.etl.load_ted_contracts.TedMatcher")
 def test_skips_award_with_unknown_contractor(
     mock_matcher_cls, mock_stream,
 ):
@@ -475,8 +364,8 @@ def test_skips_notice_already_in_neo4j(
     that re-running the same month is O(1)-per-notice instead of
     paying the full per-notice cost again."""
     monkeypatch.setattr(
-        "src.etl.load_ted_contracts._already_loaded",
-        lambda _session, _nid: True,
+        "src.etl.load_ted_contracts._should_ingest",
+        lambda _session, _nid, _version, _identity: False,
     )
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1",
@@ -515,8 +404,8 @@ def test_rescore_reingests_already_loaded_notice(
     notice is re-parsed and re-emitted (the backfill path). The sink
     MERGEs, so values overwrite in place."""
     monkeypatch.setattr(
-        "src.etl.load_ted_contracts._already_loaded",
-        lambda _session, _nid: True,  # pretend it is already in Neo4j
+        "src.etl.load_ted_contracts._should_ingest",
+        lambda _session, _nid, _version, _identity: False,  # pretend it is already in Neo4j
     )
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
@@ -570,60 +459,6 @@ def test_per_notice_transactions_one_batch_per_notice(
     load_contracts(driver, log, "/fake/path.tar.gz")
 
     assert len(log.batch.call_args_list) == 2
-
-
-@patch("src.etl.load_ted_contracts.stream_notices")
-@patch("src.etl.load_ted_contracts.TedMatcher")
-def test_skip_pub_num_lookup_skips_ted_v3_search(
-    mock_matcher_cls, mock_stream, monkeypatch,
-):
-    """``skip_pub_num_lookup=True`` short-circuits the per-notice TED
-    v3 search and emits Contracts with no ``ted_publication_number``.
-    The builder strips None so the property is absent — the
-    backfill job fills it in later. The bulk historical loader
-    flips this on to avoid paying ~500ms × millions of notices to
-    TED's API for a value that backfill can do in parallel."""
-    called: list[str] = []
-
-    def _should_not_be_called(_uuid):
-        called.append(_uuid)
-        return "should-not-appear"
-
-    monkeypatch.setattr(
-        "src.etl.load_ted_contracts._resolve_pub_num_or_none",
-        _should_not_be_called,
-    )
-
-    mock_matcher_cls.return_value = _mock_matcher(
-        stub_authority_id="auth-1",
-        stub_company_gmr="company-1",
-    )
-    contractor = MagicMock()
-    contractor.name = "Adyen N.V."
-    contractor.country = "NL"
-    contractor.legal_id = None
-    mock_stream.return_value = iter([
-        _stub_notice(
-            awards=[_stub_award()],
-            organizations={"O1": contractor},
-        ),
-    ])
-
-    driver, _session = _mock_driver_and_session()
-    log, emit = _mock_log()
-    load_contracts(
-        driver, log, "/fake/path.tar.gz",
-        skip_pub_num_lookup=True,
-    )
-
-    assert not called, (
-        "skip_pub_num_lookup=True must not call _resolve_pub_num_or_none"
-    )
-    contract_call = next(
-        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
-    )
-    payload = contract_call.kwargs["payload"]
-    assert "ted_publication_number" not in payload
 
 
 # ── --year/--month default to current calendar month ────────────────
@@ -1051,59 +886,6 @@ def test_value_typical_contract_unaffected(
     assert payload["value_eur"] == 207_117.44
 
 
-def test_emit_notice_uses_notice_id_override_for_key():
-    """Legacy TED (<TED_EXPORT>) notices carry no eForms UUID; the
-    incremental loader passes the machine publication-number as
-    notice_id_override. _emit_notice must key the Contract IRI and
-    ted_notice_id on the override, not the parsed notice.notice_id
-    (which for legacy is the human OJS number, not a stable key)."""
-    contractor = MagicMock()
-    contractor.name = "S.C. Fortat-House S.R.L."
-    contractor.country = "RO"
-    contractor.legal_id = None
-    notice = _stub_notice(
-        awards=[_stub_award()], organizations={"O1": contractor},
-    )
-    notice.notice_id = "2024/S 010-024047"  # legacy OJS ref, not a UUID
-    emit = MagicMock()
-    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-        pub_num_override="24047-2024",
-        notice_id_override="24047-2024",
-    )
-    contract_call = next(
-        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
-    )
-    assert contract_call.kwargs["iri"].endswith("/24047-2024")
-    assert contract_call.kwargs["payload"]["ted_notice_id"] == "24047-2024"
-
-
-def test_emit_notice_without_override_keeps_notice_id_key():
-    """eForms (the default path) still keys on notice.notice_id — the
-    override defaults to None and must not shift existing Contract IRIs."""
-    contractor = MagicMock()
-    contractor.name = "Adyen N.V."
-    contractor.country = "NL"
-    contractor.legal_id = None
-    notice = _stub_notice(
-        awards=[_stub_award()], organizations={"O1": contractor},
-    )
-    emit = MagicMock()
-    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-    )
-    contract_call = next(
-        c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
-    )
-    assert contract_call.kwargs["iri"].endswith(
-        "/912f1717-1ace-413d-aa61-cd21cd6b95e7"
-    )
-    assert contract_call.kwargs["payload"]["ted_notice_id"] == \
-        "912f1717-1ace-413d-aa61-cd21cd6b95e7"
-
-
 def test_emit_notice_stamps_match_provenance():
     """A resolver match's tier/confidence/layer are threaded onto the
     Contract payload so the sink can put them on the AWARDED_TO edge —
@@ -1122,7 +904,7 @@ def test_emit_notice_stamps_match_provenance():
     )
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        notice, emit, matcher, set(), set(), None,
     )
     payload = next(
         c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
@@ -1149,7 +931,7 @@ def test_emit_notice_new_node_has_no_match_tier():
     )
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        notice, emit, matcher, set(), set(), None,
     )
     payload = next(
         c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
@@ -1177,7 +959,7 @@ def test_emit_notice_stamps_modification_before_value():
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
         notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
+        set(), set(), None,
     )
     payload = next(
         c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
@@ -1198,7 +980,7 @@ def test_emit_notice_no_before_value_for_plain_contract():
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
         notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
+        set(), set(), None,
     )
     payload = next(
         c for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract"
@@ -1235,97 +1017,113 @@ def _contract_payload(emit):
     ).kwargs["payload"]
 
 
-def test_contract_key_prefers_procedure_id():
-    """An award that carries a procedure_id groups under it — same
-    coalesce order as collapse_modifications' Cypher."""
-    notice = _stub_notice(
-        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
-    )
+def _emit(notice):
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
         notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-        pub_num_override="100-2026",
-        extra_props={"procedure_id": "PROC-7", "notice_type": "can-standard",
-                     "modifies_publication_number": None},
+        set(), set(), None,
     )
-    payload = _contract_payload(emit)
+    return _contract_payload(emit)
+
+
+def _vendor_notice(**overrides):
+    notice = _stub_notice(
+        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
+    )
+    for k, v in overrides.items():
+        setattr(notice, k, v)
+    return notice
+
+
+def test_contract_key_prefers_procedure_id():
+    """An eForms award groups under its procedure id (BT-04), the one
+    thing it shares with every later modification of the procedure."""
+    payload = _emit(_vendor_notice(procedure_id="PROC-7"))
     assert payload["contract_key"] == "PROC-7"
+    assert payload["procedure_id"] == "PROC-7"
     assert payload["notice_kind"] == "award"
 
 
 def test_contract_key_award_falls_back_to_publication_number():
-    """No procedure_id: an award groups under its own publication-number
-    (coalesce(procedure_id, ted_publication_number, ted_notice_id))."""
-    notice = _stub_notice(
-        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
-    )
-    emit = MagicMock()
-    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-        pub_num_override="24047-2024",
-    )
-    payload = _contract_payload(emit)
+    """No procedure id (a legacy award): its own publication number."""
+    payload = _emit(_vendor_notice(publication_number="24047-2024"))
     assert payload["contract_key"] == "24047-2024"
+    assert payload["ted_publication_number"] == "24047-2024"
     assert payload["notice_kind"] == "award"
 
 
-def test_contract_key_modification_uses_modifies_ref():
-    """A can-modif notice groups under the publication-number of the
-    notice it modifies, never its own — otherwise every modification
+def test_contract_key_legacy_modification_uses_modifies_ref():
+    """A legacy F20 modification groups under the publication number of
+    the award it modifies, never its own — otherwise every modification
     would become its own 'contract' and totals double-count."""
-    notice = _stub_notice(
-        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
-    )
-    emit = MagicMock()
-    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-        pub_num_override="555-2026",
-        extra_props={"procedure_id": None, "notice_type": "can-modif",
-                     "modifies_publication_number": "111-2024"},
-    )
-    payload = _contract_payload(emit)
+    payload = _emit(_vendor_notice(
+        notice_type="can-modif", publication_number="555-2026",
+        modifies_publication_number="111-2024",
+    ))
     assert payload["contract_key"] == "111-2024"
     assert payload["notice_kind"] == "modification"
     assert payload["notice_type"] == "can-modif"
     assert payload["modifies_publication_number"] == "111-2024"
+    assert "modifies_notice_id" not in payload
 
 
-def test_contract_key_modification_parsed_fallback():
-    """The bulk path has no search-API stamps: a parsed legacy F20
-    modification still derives kind + key from what the parser read
-    off the notice itself."""
-    notice = _stub_notice(
-        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
-    )
-    notice.notice_type = "can-modif"
-    notice.modifies_publication_number = "111-2020"
-    emit = MagicMock()
-    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-    )
-    payload = _contract_payload(emit)
-    assert payload["notice_kind"] == "modification"
-    assert payload["contract_key"] == "111-2020"
+def test_contract_key_eforms_modification_is_its_procedure_id():
+    """An eForms modification keys on its procedure id like its award;
+    the back-link still travels so the sink can resolve the chain (and
+    adopt the award's entity when that award was keyed differently)."""
+    payload = _emit(_vendor_notice(
+        notice_type="can-modif", procedure_id="PROC-9",
+        modifies_publication_number="549184-2020",
+    ))
+    assert payload["contract_key"] == "PROC-9"
+    assert payload["modifies_publication_number"] == "549184-2020"
+
+
+def test_modification_back_link_as_notice_id_travels_on_payload():
+    """The buyer wrote the back-link as '<uuid>-01': the parser hands
+    over the bare uuid and the loader passes it through untouched."""
+    payload = _emit(_vendor_notice(
+        notice_type="can-modif", procedure_id="PROC-9",
+        modifies_notice_id="a64a67f4-a562-4014-ae25-232da2f4fa1c",
+    ))
+    assert payload["modifies_notice_id"] == "a64a67f4-a562-4014-ae25-232da2f4fa1c"
+    assert "modifies_publication_number" not in payload
+
+
+def test_award_never_carries_back_links():
+    payload = _emit(_vendor_notice(
+        modifies_publication_number="111-2024", modifies_notice_id="x",
+    ))
+    assert "modifies_publication_number" not in payload
+    assert "modifies_notice_id" not in payload
 
 
 def test_contract_key_falls_back_to_notice_uuid():
-    """Historical bulk loads (skip_pub_num_lookup) have neither a
-    procedure_id nor a publication-number yet: the notice UUID is the
-    last-resort key, mirroring the Cypher coalesce."""
-    notice = _stub_notice(
-        awards=[_stub_award()], organizations={"O1": _org("Vendor Kft.")},
-    )
-    emit = MagicMock()
-    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-    )
-    payload = _contract_payload(emit)
+    """No identity on the XML at all (TED has not published it yet and
+    there is no procedure id): the notice UUID is the last resort."""
+    payload = _emit(_vendor_notice(publication_number=None))
     assert payload["contract_key"] == "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+    assert "ted_publication_number" not in payload
+
+
+def test_identity_stamps_travel_on_payload():
+    payload = _emit(_vendor_notice(
+        notice_version="01", legacy_procedure_id="EKR001152382021",
+    ))
+    assert payload["notice_version"] == "01"
+    assert payload["legacy_procedure_id"] == "EKR001152382021"
+
+
+def test_legacy_notice_keys_on_publication_number():
+    """A legacy TED_EXPORT notice's notice_id is the human OJS reference
+    ('2024/S 010-024047'); the Contract IRI and ted_notice_id key on the
+    publication number the parser read from the same XML, so the key is
+    the same whichever way the notice was discovered."""
+    payload = _emit(_vendor_notice(
+        notice_id="2024/S 010-024047", publication_number="24047-2024",
+    ))
+    assert payload["ted_notice_id"] == "24047-2024"
+    assert payload["contract_key"] == "24047-2024"
 
 
 def test_parties_mixed_winner_loser_consortium():
@@ -1358,7 +1156,7 @@ def test_parties_mixed_winner_loser_consortium():
     })
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        notice, emit, matcher, set(), set(), None,
     )
     payload = _contract_payload(emit)
 
@@ -1421,7 +1219,7 @@ def test_value_excludes_loser_bids():
     })
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        notice, emit, matcher, set(), set(), None,
     )
     payload = _contract_payload(emit)
     assert payload["value_eur"] == 500.0
@@ -1455,7 +1253,7 @@ def test_multi_winner_total_not_attributed():
     })
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        notice, emit, matcher, set(), set(), None,
     )
     payload = _contract_payload(emit)
     assert payload["value_payable_eur"] == 300.0
@@ -1481,7 +1279,7 @@ def test_no_winner_notice_emits_named_tenderers_only():
     })
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        notice, emit, matcher, set(), set(), None,
     )
     payload = _contract_payload(emit)
     assert "company_gmr_id" not in payload
@@ -1509,7 +1307,7 @@ def test_parties_dedupe_supplier_winning_several_lots():
     })
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
+        notice, emit, matcher, set(), set(), None,
     )
     payload = _contract_payload(emit)
     assert len(payload["parties"]) == 1
@@ -1532,6 +1330,8 @@ def test_legacy_single_contractor_path_unchanged():
                                                   country="RO")},
     )
     notice.total_value = 1000.0
+    notice.notice_id = "2024/S 010-024047"
+    notice.publication_number = "24047-2024"
     matcher = _mock_matcher("auth-1", "company-1")
     matcher.match_company.return_value = MatchResult(
         gmr_id="company-1", layer=2, confidence=0.95,
@@ -1539,8 +1339,7 @@ def test_legacy_single_contractor_path_unchanged():
     )
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
-        pub_num_override="24047-2024", notice_id_override="24047-2024",
+        notice, emit, matcher, set(), set(), None,
     )
     payload = _contract_payload(emit)
     # Top-level shape is byte-for-byte the pre-parties contract.
@@ -1589,13 +1388,11 @@ def test_emitted_payload_validates_against_schema():
                 gmr_id="00040372-dad6-5d34-882c-8b8624b4e735", layer=5,
                 confidence=0.0, created_new=True),
         })
+    notice.procedure_id = "PROC-1"
+    notice.notice_version = "01"
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, matcher, set(), set(), None, skip_pub_num_lookup=True,
-        pub_num_override="295342-2026",
-        extra_props={"procedure_id": "PROC-1",
-                     "notice_type": "can-standard",
-                     "modifies_publication_number": None},
+        notice, emit, matcher, set(), set(), None,
     )
     for call in emit.upsert.call_args_list:
         event_type = call.args[0]
@@ -1715,29 +1512,13 @@ def test_as_day_rejects_non_dates_and_sentinels():
     assert as_day("1900-01-01") is None
 
 
-def test_emit_notice_prefers_search_record_publication_date():
-    """The search record is authoritative: it is what TED published on."""
-    notice = _notice_with_contractor()
-    emit = MagicMock()
-    load_ted_contracts._emit_notice(  # pylint: disable=protected-access
-        notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
-        extra_props={"publication_date": "2026-08-25+02:00"},
-    )
-    payload = next(
-        c for c in emit.upsert.call_args_list
-        if c.args[0] == "UpsertContract"
-    ).kwargs["payload"]
-    assert payload["publication_date"] == "2026-08-25"
-
-
 def test_emit_notice_falls_back_to_parsed_publication_date():
     """No search record (bulk archive path): use efbc:PublicationDate."""
     notice = _notice_with_contractor()
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
         notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
+        set(), set(), None,
     )
     payload = next(
         c for c in emit.upsert.call_args_list
@@ -1753,10 +1534,182 @@ def test_emit_notice_falls_back_to_issue_date_when_unpublished():
     emit = MagicMock()
     load_ted_contracts._emit_notice(  # pylint: disable=protected-access
         notice, emit, _mock_matcher("auth-1", "company-1"),
-        set(), set(), None, skip_pub_num_lookup=True,
+        set(), set(), None,
     )
     payload = next(
         c for c in emit.upsert.call_args_list
         if c.args[0] == "UpsertContract"
     ).kwargs["payload"]
     assert payload["publication_date"] == "2025-09-01"
+
+
+# ── one ingest path: the idempotency gate and the two discovery paths ──
+
+
+def _session_with_state(row):
+    """A Neo4j session stand-in whose single() returns ``row`` (a dict
+    shaped like _INGEST_STATE's RETURN) or None."""
+    session = MagicMock()
+    session.run.return_value.single.return_value = row
+    return session
+
+
+def _state(present=True, version=None, has_procedure_id=True,
+           has_publication_number=True):
+    return {
+        "present": present, "version": version,
+        "has_procedure_id": has_procedure_id,
+        "has_publication_number": has_publication_number,
+    }
+
+
+def test_should_ingest_when_absent(monkeypatch):
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    assert should(_session_with_state(None), "n1", "01", "procedure_id")
+    assert should(_session_with_state(_state(present=False)), "n1", "01",
+                  "procedure_id")
+
+
+def test_should_ingest_skips_same_or_older_version(monkeypatch):
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    assert not should(_session_with_state(_state(version="01")), "n1", "01",
+                      "procedure_id")
+    # search API hands the version over as an int; XML as "01"
+    assert not should(_session_with_state(_state(version="02")), "n1", 2,
+                      "procedure_id")
+    assert not should(_session_with_state(_state(version="02")), "n1", "01",
+                      "procedure_id")
+    # neither side versioned (legacy): present + stamped is enough
+    assert not should(_session_with_state(_state()), "n1", None,
+                      "ted_publication_number")
+
+
+def test_should_ingest_newer_version(monkeypatch):
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    assert should(_session_with_state(_state(version="01")), "n1", "02",
+                  "procedure_id")
+    assert should(_session_with_state(_state(version=1)), "n1", "02",
+                  "procedure_id")
+
+
+def test_should_ingest_restamps_node_loaded_before_identity(monkeypatch):
+    """The repair is a re-run: a node the old archive path wrote without
+    a procedure id (or a legacy one without its publication number) is
+    ingested again, even at the same version."""
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    assert should(_session_with_state(_state(version="01", has_procedure_id=False)),
+                  "n1", "01", "procedure_id")
+    assert should(_session_with_state(_state(has_publication_number=False)),
+                  "24047-2024", None, "ted_publication_number")
+    # ...but a legacy node lacking a procedure id is not "unstamped":
+    # legacy notices never have one.
+    assert not should(_session_with_state(_state(has_procedure_id=False)),
+                      "24047-2024", None, "ted_publication_number")
+    # a notice with no identity at all cannot be re-stamped: skip
+    assert not should(_session_with_state(_state(has_procedure_id=False,
+                                                 has_publication_number=False)),
+                      "n1", None, None)
+
+
+def test_notice_key_and_identity_property():
+    notice = MagicMock()
+    notice.notice_id = "2022/S 081-217109"
+    notice.publication_number = "217109-2022"
+    assert load_ted_contracts.notice_key(notice) == "217109-2022"
+    notice.notice_id = "912f1717-1ace-413d-aa61-cd21cd6b95e7"
+    assert load_ted_contracts.notice_key(notice) == notice.notice_id
+    identity = load_ted_contracts._identity_property  # pylint: disable=protected-access
+    assert identity("PROC", "1-2026") == "procedure_id"
+    assert identity(None, "1-2026") == "ted_publication_number"
+    assert identity(None, None) is None
+
+
+def test_version_num_normalises_xml_and_search_forms():
+    v = load_ted_contracts._version_num  # pylint: disable=protected-access
+    assert v("01") == 1 and v(1) == 1 and v("12") == 12
+    assert v(None) is None and v("") is None and v("x") is None
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_archive_path_ingests_modifications_too(mock_matcher_cls, mock_stream):
+    """A modification found in a monthly archive keys its contract the
+    same way one found through the search API does — both go through
+    ingest_notice — so the archive path can no longer produce an award
+    the modification cannot join."""
+    mock_matcher_cls.return_value = _mock_matcher("auth-1", "company-1")
+    award = _vendor_notice(procedure_id="PROC-1", notice_version="01")
+    award.notice_id = "11111111-1111-1111-1111-111111111111"
+    modification = _vendor_notice(
+        procedure_id="PROC-1", notice_type="can-modif", notice_version="01",
+        modifies_notice_id="11111111-1111-1111-1111-111111111111",
+    )
+    modification.notice_id = "22222222-2222-2222-2222-222222222222"
+    other = _vendor_notice(notice_type="cn-standard")  # a call: not loaded
+    mock_stream.return_value = iter([award, modification, other])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    res = load_contracts(driver, log, "/fake/path.tar.gz")
+
+    assert res["total"] == 2
+    payloads = [c.kwargs["payload"] for c in emit.upsert.call_args_list
+                if c.args[0] == "UpsertContract"]
+    assert [p["notice_kind"] for p in payloads] == ["award", "modification"]
+    assert {p["contract_key"] for p in payloads} == {"PROC-1"}
+
+
+@patch("src.etl.load_ted_contracts.TedRawStore")
+@patch("src.etl.load_ted_contracts.parse_notice_xml")
+@patch("src.etl.load_ted_contracts.ted_search")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_search_path_is_discovery_only(mock_matcher_cls, mock_search,
+                                       mock_parse, mock_raw_store, monkeypatch):
+    """The search record locates the XML; identity comes from the parsed
+    notice. A record whose stamps disagree with the XML changes nothing
+    on the event, and the pre-download skip uses the record's
+    identifier + version."""
+    from datetime import date  # pylint: disable=import-outside-toplevel
+    mock_matcher_cls.return_value = _mock_matcher("auth-1", "company-1")
+    mock_raw_store.from_env.return_value = None
+    mock_search.NOTICE_TYPES = ("can-standard", "can-modif")
+    mock_search.SEARCH_TIMEOUT = 1
+    mock_search.search_day.return_value = iter([
+        {"notice-identifier": "912f1717-1ace-413d-aa61-cd21cd6b95e7",
+         "publication-number": "999999-2026",  # record lies
+         "notice-version": 1, "notice-type": "can-standard",
+         "procedure-identifier": "RECORD-PROC",
+         "publication-date": "2026-01-01+01:00",
+         "links": {"xml": {"MUL": "https://ted/x.xml"}}},
+        {"notice-identifier": "skip-me", "notice-version": 1,
+         "procedure-identifier": "P", "publication-number": "1-2026",
+         "links": {"xml": {"MUL": "https://ted/y.xml"}}},
+    ])
+    mock_search.xml_url.side_effect = lambda rec: rec["links"]["xml"]["MUL"]
+    mock_search.fetch_xml.return_value = b"<xml/>"
+    mock_parse.return_value = _vendor_notice(
+        procedure_id="XML-PROC", notice_version="01",
+    )
+    seen = []
+
+    def _gate(_session, nid, version, identity):
+        seen.append((nid, version, identity))
+        return nid != "skip-me"
+    monkeypatch.setattr("src.etl.load_ted_contracts._should_ingest", _gate)
+
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    totals = load_ted_contracts.load_contracts_incremental(
+        driver, log, date(2026, 1, 1), date(2026, 1, 1),
+    )
+
+    assert totals["emitted"] == 1 and totals["skipped"] == 1
+    assert mock_search.fetch_xml.call_count == 1  # skipped before download
+    assert seen[0] == ("912f1717-1ace-413d-aa61-cd21cd6b95e7", 1, "procedure_id")
+    payload = _contract_payload(emit)
+    assert payload["contract_key"] == "XML-PROC"
+    assert payload["ted_publication_number"] == "295342-2026"
+    assert payload["publication_date"] == "2025-09-04"
