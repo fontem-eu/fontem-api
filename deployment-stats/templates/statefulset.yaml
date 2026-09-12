@@ -90,7 +90,7 @@ spec:
             limits: { cpu: 200m, memory: 64Mi }
       containers:
         - name: postgres
-          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}{{ with .Values.image.digest }}@{{ . }}{{ end }}
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}@{{ .Values.image.digest }}
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
           # Apply our custom settings via individual `-c name=value`
           # flags. We discovered the hard way that

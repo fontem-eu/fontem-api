@@ -111,8 +111,17 @@ jobs:
           python3 - <<'PY'
           import fnmatch, glob, os, re, sys, yaml
 
+          # Mirrors the cluster's restrict-image-registries allowlist.
+          # The void42 hosts are the Nexus pull-through proxies; the bare
+          # entries below them are legacy escape hatches the policy still
+          # carries (docker.io/*, neo4j:*, ...). Pull through a mirror in
+          # new work: a public pin only runs while the layers are cached.
           ALLOWLIST = [
               "contribute.void42.internal/*",
+              "dockerhub.void42.internal/*", "mcr.void42.internal/*",
+              "lscr.void42.internal/*", "ghcr.void42.internal/*",
+              "cgr.void42.internal/*", "quay.void42.internal/*",
+              "l5d.void42.internal/*",
               "neo4j:*", "postgres:*", "minio/*", "nginx:*",
               "ghcr.io/*", "docker.io/*", "cr.l5d.io/*",
           ]

@@ -16,8 +16,9 @@
 #
 # `digest` pins what the tag resolved to when we moved to the mirror:
 # `pg16` floats, so a bare repoint would have upgraded the stats database
-# as a side effect of changing where the bytes come from. Clear it (or
-# bump it) deliberately to take a newer image.
+# as a side effect of changing where the bytes come from. It is REQUIRED
+# (the template renders `repository:tag@digest`); bump tag and digest
+# together to take a newer image.
 image:
   repository: dockerhub.void42.internal/timescale/timescaledb-ha
   tag: pg16
