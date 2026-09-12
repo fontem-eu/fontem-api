@@ -127,7 +127,14 @@ dqAssert:
 # templates/job-ted-backfill.yaml.
 tedBackfill:
   enabled: false
-  year: 2026
+  # One Job per range; see templates/job-ted-backfill.yaml. rescore
+  # re-emits every notice in the range instead of only the ones the
+  # graph lacks or holds unstamped.
+  ranges: []
+  #  - {from: "2019-01", to: "2019-12"}
+  #  - {from: "2024-01", to: "2024-12", rescore: true}
+  # Legacy single-month form, used only when `ranges` is empty.
+  year: null
   month: 1
-  rescore: true
-  deadlineSeconds: 14400
+  rescore: false
+  deadlineSeconds: 172800

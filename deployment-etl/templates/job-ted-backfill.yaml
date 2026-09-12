@@ -1,32 +1,53 @@
 {{/*
-One-off TED contract backfill / re-ingest Job.
+TED contract backfill / re-ingest Jobs — one per month range.
 
-Same image + secrets as the etl-ted-contracts CronJob, but a one-shot
-Job that re-emits a SPECIFIC year+month into the event log — used after
-a parser fix (e.g. the 0-tenders-unrecorded guard) to correct already-
-ingested contracts without waiting for the daily schedule. Emit-only:
-the loader writes events.entity_events; the sinks materialise them.
+Same image + secrets as the etl-ted-contracts CronJob, but one-shot Jobs
+that walk a range of monthly archives through the ONE ingest path
+(src.etl.load_ted_contracts --from YYYY-MM --to YYYY-MM). Emit-only: the
+loader writes events.entity_events; the sinks materialise them. Since
+the single-ingest-path change the loader skips every notice the graph
+already holds at its current version with its identity stamped, so a
+plain re-run is exactly the identity repair: only notices the old
+archive path wrote without a procedure id / publication number are
+re-emitted. `rescore: true` bypasses that skip and re-emits everything
+in the range (needed once for the eForms era, whose modification
+notices carry the back-link in the wrong field).
 
-  helm template fontem-api-etl deployment-etl/ \
-    --set tedBackfill.enabled=true --set version=<image-tag> \
-    --set tedBackfill.year=2026 --set tedBackfill.month=1 \
-    -s templates/job-ted-backfill.yaml | kubectl -n <namespace> apply -f -
+Values:
 
-Run once per month (Jan..Jun for the 2026 backfill). Each Job name is
-keyed by year+month so months don't collide; bump or delete to re-run.
-Always run against fontem-shared (staging) first — never prod directly.
+  tedBackfill:
+    enabled: true
+    ranges:
+      - {from: "2019-01", to: "2019-12"}
+      - {from: "2024-01", to: "2024-12", rescore: true}
+    deadlineSeconds: 172800
+
+Each Job is named by its range so ranges don't collide; edit or remove
+a range to re-run. The legacy single-month form (year/month/rescore)
+still renders one Job. Always run against fontem-shared (staging)
+first — never prod directly.
 */}}
 {{- if .Values.tedBackfill.enabled }}
+{{- $ranges := list }}
+{{- range .Values.tedBackfill.ranges }}
+{{- $ranges = append $ranges (dict "from" .from "to" (.to | default .from) "rescore" (.rescore | default false)) }}
+{{- end }}
+{{- if and (not .Values.tedBackfill.ranges) .Values.tedBackfill.year }}
+{{- $ym := printf "%d-%02d" (int .Values.tedBackfill.year) (int .Values.tedBackfill.month) }}
+{{- $ranges = append $ranges (dict "from" $ym "to" $ym "rescore" .Values.tedBackfill.rescore) }}
+{{- end }}
+{{- range $r := $ranges }}
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ted-backfill-{{ .Values.tedBackfill.year }}-{{ printf "%02d" (int .Values.tedBackfill.month) }}
+  name: ted-backfill-{{ $r.from }}-{{ $r.to }}
   labels:
     app: ted-backfill
     component: etl
 spec:
   ttlSecondsAfterFinished: 3600
-  activeDeadlineSeconds: {{ .Values.tedBackfill.deadlineSeconds | default 14400 }}
+  activeDeadlineSeconds: {{ $.Values.tedBackfill.deadlineSeconds | default 172800 }}
   backoffLimit: 0
   template:
     metadata:
@@ -41,7 +62,7 @@ spec:
         - name: regcred
       containers:
         - name: ted-backfill
-          image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
+          image: contribute.void42.internal/fontem/fontem-api:{{ $.Values.version }}
           imagePullPolicy: Always
           env:
             - name: NEO4J_URI
@@ -65,9 +86,9 @@ spec:
                   name: fontem-postgres-credentials
                   key: EVENTS_DATABASE_URL
             - name: CRONJOB_NAME
-              value: "etl-ted-contracts-backfill"
+              value: "etl-ted-contracts-backfill-{{ $r.from }}-{{ $r.to }}"
             - name: IMAGE_TAG
-              value: {{ .Values.version | quote }}
+              value: {{ $.Values.version | quote }}
           resources:
             requests:
               cpu: "500m"
@@ -78,12 +99,14 @@ spec:
           command:
             - python
             - -m
+            - src.etl._run_wrapper
             - src.etl.load_ted_contracts
-            - --year
-            - {{ .Values.tedBackfill.year | quote }}
-            - --month
-            - {{ .Values.tedBackfill.month | quote }}
-            {{- if .Values.tedBackfill.rescore }}
+            - --from
+            - {{ $r.from | quote }}
+            - --to
+            - {{ $r.to | quote }}
+            {{- if $r.rescore }}
             - --rescore
             {{- end }}
+{{- end }}
 {{- end }}
