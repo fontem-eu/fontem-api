@@ -1713,3 +1713,69 @@ def test_search_path_is_discovery_only(mock_matcher_cls, mock_search,
     assert payload["contract_key"] == "XML-PROC"
     assert payload["ted_publication_number"] == "295342-2026"
     assert payload["publication_date"] == "2025-09-04"
+
+
+
+# ── resilience: transient Neo4j errors and bad notices ─────────────
+
+
+def test_transient_neo4j_error_is_retried(monkeypatch):
+    """BookmarkTimeout under a busy sink ended the first 2026-06 range Job
+    in fontem-shared after 16 minutes. Transient errors are retried with
+    backoff; the notice is emitted on the attempt that succeeds."""
+    from neo4j.exceptions import TransientError  # pylint: disable=import-outside-toplevel
+    monkeypatch.setattr(load_ted_contracts.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def _flaky(_session, _nid, _version, _identity):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TransientError("Neo.TransientError.Transaction.BookmarkTimeout")
+        return True
+    monkeypatch.setattr("src.etl.load_ted_contracts._should_ingest", _flaky)
+    log, emit = _mock_log()
+    ctx = load_ted_contracts.IngestContext(matcher=_mock_matcher("auth-1", "company-1"))
+    out = load_ted_contracts.ingest_notice(_vendor_notice(), MagicMock(), log, ctx)
+    assert out == "emitted"
+    assert calls["n"] == 3
+    assert any(c.args[0] == "UpsertContract" for c in emit.upsert.call_args_list)
+
+
+def test_transient_neo4j_error_gives_up_after_retries(monkeypatch):
+    from neo4j.exceptions import TransientError  # pylint: disable=import-outside-toplevel
+    monkeypatch.setattr(load_ted_contracts.time, "sleep", lambda _s: None)
+
+    def _always(_session, _nid, _version, _identity):
+        raise TransientError("Neo.TransientError.Transaction.BookmarkTimeout")
+    monkeypatch.setattr("src.etl.load_ted_contracts._should_ingest", _always)
+    log, _emit = _mock_log()
+    ctx = load_ted_contracts.IngestContext(matcher=_mock_matcher("auth-1", "company-1"))
+    with pytest.raises(TransientError):
+        load_ted_contracts.ingest_notice(_vendor_notice(), MagicMock(), log, ctx)
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_archive_run_counts_a_failed_notice_and_continues(
+    mock_matcher_cls, mock_stream, monkeypatch,
+):
+    """A notice that fails for good is logged and counted; the range
+    Job goes on with the next one instead of dying days in."""
+    mock_matcher_cls.return_value = _mock_matcher("auth-1", "company-1")
+    bad = _vendor_notice()
+    bad.notice_id = "bad-1"
+    good = _vendor_notice()
+    good.notice_id = "good-1"
+    mock_stream.return_value = iter([bad, good])
+    real = load_ted_contracts.ingest_notice
+
+    def _explode_on_bad(notice, session, log, ctx):
+        if notice.notice_id == "bad-1":
+            raise RuntimeError("parser choked")
+        return real(notice, session, log, ctx)
+    monkeypatch.setattr("src.etl.load_ted_contracts.ingest_notice", _explode_on_bad)
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    res = load_contracts(driver, log, "/fake/path.tar.gz")
+    assert res["errors"] == 1 and res["total"] == 1
+    assert sum(1 for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract") == 1

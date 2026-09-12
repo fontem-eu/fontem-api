@@ -48,6 +48,7 @@ import httpx
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 from neo4j import GraphDatabase
+from neo4j.exceptions import TransientError
 
 from eforms.filters import awards_and_modifications
 from eforms.parser import parse as parse_notice_xml
@@ -312,25 +313,47 @@ class IngestContext:
     rescore: bool = False
 
 
+_TRANSIENT_RETRIES = 4
+_TRANSIENT_BACKOFF_S = 2.0
+
+
 def ingest_notice(notice, session, log: EventLog, ctx: IngestContext) -> str:
     """The one ingest path. Returns ``"emitted"`` or ``"skipped"``.
 
     Identity is whatever the parser read off the XML; the caller only
     found the notice. Each notice is its own ``log.batch`` (TED's own
     publish boundary), so committed rows are visible immediately and a
-    pod restart loses at most one notice."""
+    pod restart loses at most one notice.
+
+    Neo4j's transient errors (BookmarkTimeout under a busy sink, a
+    deadlock, a leader switch) are retried with backoff rather than
+    ending a multi-day range Job on one notice: the reads are the
+    idempotency gate and the matcher, and the per-notice batch rolls
+    back on the way out, so a retry starts clean."""
     ted_notice_id = notice_key(notice)
-    if not ctx.rescore and not _should_ingest(
-        session, ted_notice_id, notice.notice_version,
-        _identity_property(notice.procedure_id, notice.publication_number),
-    ):
-        return "skipped"
-    with log.batch(uuid.uuid4(), producer="load_ted_contracts") as emit:
-        _emit_notice(
-            notice, emit, ctx.matcher,
-            ctx.seen_authorities, ctx.seen_companies, ctx.currency_svc,
-        )
-    return "emitted"
+    for attempt in range(1, _TRANSIENT_RETRIES + 1):
+        try:
+            if not ctx.rescore and not _should_ingest(
+                session, ted_notice_id, notice.notice_version,
+                _identity_property(notice.procedure_id, notice.publication_number),
+            ):
+                return "skipped"
+            with log.batch(uuid.uuid4(), producer="load_ted_contracts") as emit:
+                _emit_notice(
+                    notice, emit, ctx.matcher,
+                    ctx.seen_authorities, ctx.seen_companies, ctx.currency_svc,
+                )
+            return "emitted"
+        except TransientError as exc:
+            if attempt == _TRANSIENT_RETRIES:
+                raise
+            wait = _TRANSIENT_BACKOFF_S * 2 ** (attempt - 1)
+            logger.warning(
+                "notice %s: transient Neo4j error (%s), retry %d/%d in %.0fs",
+                ted_notice_id, exc.code, attempt, _TRANSIENT_RETRIES - 1, wait,
+            )
+            time.sleep(wait)
+    return "emitted"  # unreachable; keeps the type checker honest
 
 
 def load_contracts(
@@ -349,6 +372,7 @@ def load_contracts(
     MERGE, so values overwrite in place)."""
     total = 0
     skipped = 0
+    errors = 0
     t0 = time.time()
     with driver.session() as session:
         ctx = IngestContext(
@@ -356,7 +380,16 @@ def load_contracts(
             rescore=rescore,
         )
         for notice in awards_and_modifications(stream_notices(archive_path)):
-            if ingest_notice(notice, session, log, ctx) == "skipped":
+            try:
+                outcome = ingest_notice(notice, session, log, ctx)
+            except Exception:  # pylint: disable=broad-except
+                # One bad notice must not end a range Job that took days;
+                # it is logged with its id, counted, and the next run
+                # (no skip stamp for it) picks it up again.
+                errors += 1
+                logger.exception("FAILED notice %s", notice_key(notice))
+                continue
+            if outcome == "skipped":
                 skipped += 1
                 continue
             total += 1
@@ -370,12 +403,12 @@ def load_contracts(
 
     elapsed = time.time() - t0
     logger.info(
-        "Done: %d notices emitted, %d skipped in %.0fs",
-        total, skipped, elapsed,
+        "Done: %d notices emitted, %d skipped, %d failed in %.0fs",
+        total, skipped, errors, elapsed,
     )
     logger.info("Match quality: %s", ctx.matcher.stats.summary())
-    return {"total": total, "skipped": skipped, "elapsed_s": elapsed,
-            "match_stats": ctx.matcher.stats.summary()}
+    return {"total": total, "skipped": skipped, "errors": errors,
+            "elapsed_s": elapsed, "match_stats": ctx.matcher.stats.summary()}
 
 
 def _award_lot_estimate(notice, award):
