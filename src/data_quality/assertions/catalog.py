@@ -415,6 +415,59 @@ ASSERTIONS: list[Assertion] = [
         "Regression guard for the sink label-promotion fix (backlog #23).",
     ),
 
+    # ---- Contract-modification meters (P0 of the single-path plan) ------
+    # RED on purpose today. They measure the damage described in gitops
+    # docs/roadmap/contract-modifications-single-path.md and must burn down
+    # to zero as P1-P6 land; the last one is the definition of done for P6.
+    # WARN, not BLOCK, because they report a known state, not a regression;
+    # promote to BLOCK once P6 has run. Baselines measured on prod 2026-09-12.
+    Assertion(
+        "grain.eforms_entity_without_procedure_id", GRAIN,
+        "eForms-era contract entities carry procedure_id", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= '2024-01-01' "
+        "AND c.contract_key =~ '[0-9a-f-]{36}' AND c.procedure_id IS NULL "
+        "RETURN count(*) AS violations",
+        zero_violations("eForms entities without procedure_id"),
+        "Identity derives from procedure_id first. An eForms-era entity "
+        "without one was stamped by the transport that delivered it (the "
+        "monthly archive path), not from the notice, and is keyed by its "
+        "notice UUID, a key no later modification can match. Baseline 751,437.",
+    ),
+    Assertion(
+        "grain.split_modifications", GRAIN,
+        "Modification notices resolve to their award's entity", WARN, "cypher",
+        "MATCH (m:Notice) WHERE m.notice_type = 'can-modif' "
+        "AND m.modifies_publication_number IS NOT NULL "
+        "WITH m, CASE WHEN m.modifies_publication_number =~ '[0-9a-f-]{36}-[0-9]+' "
+        "THEN left(m.modifies_publication_number, 36) END AS ref_uuid, "
+        "CASE WHEN m.modifies_publication_number =~ '[0-9]+-[0-9]{4}' "
+        "THEN m.modifies_publication_number END AS ref_pub "
+        "OPTIONAL MATCH (a1:Notice {ted_notice_id: ref_uuid}) "
+        "OPTIONAL MATCH (a2:Notice {ted_publication_number: ref_pub}) "
+        "WITH m, coalesce(a1, a2) AS a "
+        "RETURN count(*) AS total, "
+        "sum(CASE WHEN a IS NOT NULL AND a.contract_key <> m.contract_key "
+        "THEN 1 ELSE 0 END) AS violations",
+        zero_violations("modifications whose award sits under another key"),
+        "A back-link is a TED publication number or the award's versioned "
+        "notice UUID; both are seekable since the 2026-09-12 indexes. A "
+        "resolvable back-link whose award carries a different contract_key "
+        "is one real contract counted twice. Baseline 11,349.",
+    ),
+    Assertion(
+        "grain.modification_only_entities", GRAIN,
+        "No eForms-era entity is built from modifications alone", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= '2024-01-01' "
+        "AND EXISTS { (:Notice)-[:NOTICE_OF]->(c) } "
+        "AND NOT EXISTS { (n:Notice)-[:NOTICE_OF]->(c) WHERE n.notice_type <> 'can-modif' } "
+        "RETURN count(*) AS violations",
+        zero_violations("entities with no award notice behind them"),
+        "Such an entity either duplicates an award held under another key or "
+        "stands in for an award never ingested. After P6 the first class is "
+        "merged and the second carries award_ingested=false and is excluded "
+        "here. Baseline 29,144.",
+    ),
+
     # ---- Family B: referential integrity (BLOCK) --------------------------
     Assertion(
         "refs.contract_has_authority", REFS,
