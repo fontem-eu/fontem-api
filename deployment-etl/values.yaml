@@ -138,6 +138,9 @@ tedBackfill:
   month: 1
   rescore: false
   deadlineSeconds: 172800
+  # Suffix for Job names; bump it to re-create Jobs whose immutable pod
+  # template (resources, deadline) must change.
+  generation: ""
   # A 2026 monthly package is >1.5 GB and the streaming tar parse peaks
   # well above the cronjob's 4Gi; a Job that dies mid-range is recreated
   # by ArgoCD after its TTL and re-walks the range from the start.

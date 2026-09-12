@@ -36,12 +36,16 @@ first — never prod directly.
 {{- $ym := printf "%d-%02d" (int .Values.tedBackfill.year) (int .Values.tedBackfill.month) }}
 {{- $ranges = append $ranges (dict "from" $ym "to" $ym "rescore" .Values.tedBackfill.rescore) }}
 {{- end }}
+{{- $gen := $.Values.tedBackfill.generation | default "" }}
 {{- range $r := $ranges }}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ted-backfill-{{ $r.from }}-{{ $r.to }}
+  # A Job's pod template is immutable: to change resources or deadline of
+  # a range already created, bump tedBackfill.generation — the new name
+  # creates a fresh Job and ArgoCD prunes the old one.
+  name: ted-backfill-{{ $r.from }}-{{ $r.to }}{{ if $gen }}-{{ $gen }}{{ end }}
   labels:
     app: ted-backfill
     component: etl
@@ -58,6 +62,14 @@ spec:
         linkerd.io/inject: disabled
     spec:
       restartPolicy: Never
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       imagePullSecrets:
         - name: regcred
       containers:
@@ -86,7 +98,7 @@ spec:
                   name: fontem-postgres-credentials
                   key: EVENTS_DATABASE_URL
             - name: CRONJOB_NAME
-              value: "etl-ted-contracts-backfill-{{ $r.from }}-{{ $r.to }}"
+              value: "etl-ted-contracts-backfill-{{ $r.from }}-{{ $r.to }}{{ if $gen }}-{{ $gen }}{{ end }}"
             - name: IMAGE_TAG
               value: {{ $.Values.version | quote }}
           resources:
