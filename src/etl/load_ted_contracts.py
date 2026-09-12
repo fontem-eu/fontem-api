@@ -1187,19 +1187,10 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
                     currency_svc=currency_svc, notice_types=notice_types,
                     watermark_id=args.watermark_id,
                 )
-                # Link the freshly-loaded modifications to their awards.
-                from .link_ted_modifications import (  # pylint: disable=import-outside-toplevel
-                    link_modifications,
-                )
-                link_modifications(driver, log)
-                # collapse_modifications / project_contracts are retired as
-                # post-load hooks: the neo4j sink writes the Contract/Notice
-                # model natively (contract_key + notice_kind travel in the
-                # event payload). Running the batch projection concurrently
-                # with the native sink could relabel a Contract entity whose
-                # first NOTICE_OF edge has not landed yet. project_contracts
-                # remains available as a manual one-time converter for graphs
-                # ingested before the native sink.
+                # Nothing runs after the load: the neo4j sink links each
+                # modification to its award and maintains the contract
+                # entity on write (link_ted_modifications and
+                # collapse_modifications are retired).
     finally:
         currency_svc.close()
         log.close()

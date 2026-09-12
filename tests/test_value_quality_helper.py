@@ -32,11 +32,13 @@ def test_cast_wraps_in_tofloat():
     assert "coalesce(coalesce(ct.current_value, ct.value_eur), 0)" not in frag
 
 
-def test_canonical_predicate_excludes_raw_modifications():
+def test_canonical_predicate_is_is_current_only():
+    """The sink maintains is_current on every contract entity; the old
+    notice_type fallback (a raw can-modif notice is not canonical) is
+    gone because modifications are :Notice nodes, never :Contract."""
     pred = canonical_predicate("ct")
-    # stamped canonical wins; else anything that is not a raw can-modif notice
-    assert "ct.is_current" in pred
-    assert "ct.notice_type <> 'can-modif'" in pred
+    assert pred == "ct.is_current = true"
+    assert "notice_type" not in pred
 
 
 def test_canonical_count_is_a_sum_over_canonical_nodes():

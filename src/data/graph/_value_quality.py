@@ -32,14 +32,14 @@ from __future__ import annotations
 def canonical_predicate(binding: str = "ct") -> str:
     """Boolean Cypher: is this the single canonical node for its contract?
 
-    True for the collapse-pass canonical node (``is_current = true``), and —
-    when ``is_current`` is absent — for any node that is not itself a raw
-    modification notice. Superseded modifications are excluded.
+    One :Contract entity per underlying contract, and the sink stamps
+    ``is_current = true`` on every entity it maintains (award, or the
+    chain of award + modifications, or a modification-only contract
+    whose award was never ingested). Modification notices are :Notice
+    nodes, never :Contract, so nothing here needs to look at
+    ``notice_type`` any more: ``is_current`` is the whole predicate.
     """
-    return (
-        f"coalesce({binding}.is_current, "
-        f"({binding}.notice_type IS NULL OR {binding}.notice_type <> 'can-modif'))"
-    )
+    return f"{binding}.is_current = true"
 
 
 def _current_value(binding: str, *, cast: bool) -> str:
