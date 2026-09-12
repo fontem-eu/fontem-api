@@ -36,7 +36,7 @@ spec:
       serviceAccountName: fontem-prefill-hook
       containers:
         - name: refresh
-          image: python:3.12-alpine
+          image: dockerhub.void42.internal/library/python:3.12-alpine
           command: ["sh", "-c"]
           args:
             - |

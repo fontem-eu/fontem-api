@@ -51,7 +51,7 @@ spec:
         # writes through the NFS export's `no_root_squash`. Idempotent:
         # re-runs are a no-op once ownership already matches.
         - name: chown-data
-          image: docker.io/library/busybox:1.37
+          image: dockerhub.void42.internal/library/busybox:1.37
           command: ["sh", "-c"]
           args:
             - |
@@ -90,7 +90,7 @@ spec:
             limits: { cpu: 200m, memory: 64Mi }
       containers:
         - name: postgres
-          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}@{{ .Values.image.digest }}
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
           # Apply our custom settings via individual `-c name=value`
           # flags. We discovered the hard way that
