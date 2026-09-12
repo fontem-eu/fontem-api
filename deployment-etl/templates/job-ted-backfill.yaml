@@ -91,11 +91,11 @@ spec:
               value: {{ $.Values.version | quote }}
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: {{ $.Values.tedBackfill.cpuRequest | default "500m" | quote }}
+              memory: {{ $.Values.tedBackfill.memRequest | default "2Gi" | quote }}
             limits:
-              cpu: "2"
-              memory: "4Gi"
+              cpu: {{ $.Values.tedBackfill.cpuLimit | default "2" | quote }}
+              memory: {{ $.Values.tedBackfill.memLimit | default "8Gi" | quote }}
           command:
             - python
             - -m
