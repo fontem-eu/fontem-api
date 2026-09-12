@@ -82,3 +82,45 @@ def test_the_search_migration_carries_every_column_the_sink_writes():
     for column in ("name_lex_i18n tsvector", "parts jsonb"):
         assert f"ADD COLUMN IF NOT EXISTS {column}" in hook, \
             f"search-migrate does not add {column}"
+
+
+#: Registries a Pod may pull from: our own, and the Nexus pull-through
+#: mirrors. Everything else runs only while its layers happen to be cached
+#: on the node -- which is how minio went ImagePullBackOff in fontem-shared
+#: (2026-09-12) once Docker Hub stopped serving it anonymously, taking the
+#: shared environment's health, and every prod promotion, with it.
+_MIRRORS = (
+    "contribute.void42.internal/", "dockerhub.void42.internal/",
+    "mcr.void42.internal/", "lscr.void42.internal/", "ghcr.void42.internal/",
+    "cgr.void42.internal/", "quay.void42.internal/", "l5d.void42.internal/",
+)
+
+
+def _image_ref(line: str) -> "str | None":
+    """The concrete image in an `image:` / `repository:` line, if any.
+    Templated values resolve to a values entry this same scan covers."""
+    stripped = line.strip()
+    for key in ("image:", "repository:"):
+        if stripped.startswith(key):
+            ref = stripped[len(key):].strip().strip("\"'")
+            return ref if ref and "{{" not in ref else None
+    return None
+
+
+def _declared_images() -> list[tuple[pathlib.Path, str]]:
+    """Every concrete image reference in every chart."""
+    files = sorted(f for chart in pathlib.Path(".").glob("deployment*/")
+                   for f in chart.rglob("*.yaml"))
+    return [(f, ref) for f in files
+            for ref in [_image_ref(line) for line in f.read_text(encoding="utf-8").splitlines()]
+            if ref]
+
+
+def test_every_chart_image_comes_from_an_internal_mirror():
+    """A public-registry pin is a time bomb: it works until the node loses
+    the layers. Add the image to a Nexus proxy (or mirror it into
+    contribute.void42.internal) rather than widening this list."""
+    images = _declared_images()
+    assert images, "found no image references to check"
+    offenders = [(str(f), ref) for f, ref in images if not ref.startswith(_MIRRORS)]
+    assert not offenders, f"images not pulled through a mirror: {offenders}"

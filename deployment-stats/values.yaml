@@ -9,13 +9,19 @@
 # bundled in the -ha variant; we don't enable Patroni clustering features.
 # Override `image.tag` per-env in gitops/<env>/fontem-stats.yaml.
 #
-# Fully-qualified `docker.io/...` form is required: the cluster's
-# Kyverno restrict-image-registries policy allowlists `docker.io/*` but
-# not bare-namespace short forms (containerd resolves both to the same
-# image, but Kyverno sees the literal string in the Pod spec).
+# Pulled through the Nexus mirror rather than docker.io: an image pinned
+# to a public registry runs only while its layers are cached, and the
+# node restart that drops them is when you find out (minio, 2026-09-12).
+# The proxies allow anonymous pulls, so no imagePullSecrets are needed.
+#
+# `digest` pins what the tag resolved to when we moved to the mirror:
+# `pg16` floats, so a bare repoint would have upgraded the stats database
+# as a side effect of changing where the bytes come from. Clear it (or
+# bump it) deliberately to take a newer image.
 image:
-  repository: docker.io/timescale/timescaledb-ha
+  repository: dockerhub.void42.internal/timescale/timescaledb-ha
   tag: pg16
+  digest: sha256:0bb4a5e5c0e24119852612dee28694d71333820b33fafeb7968497e1faf4c182
   pullPolicy: IfNotPresent
 
 replicas: 1

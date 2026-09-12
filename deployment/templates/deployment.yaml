@@ -50,7 +50,7 @@ spec:
         # just falls back to "country: null" and the frontend asks
         # for a country pick.
         - name: geoip-download
-          image: docker.io/curlimages/curl:8.10.1
+          image: dockerhub.void42.internal/curlimages/curl:8.10.1
           command: ["/bin/sh", "-c"]
           args:
             - |
