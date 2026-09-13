@@ -50,7 +50,10 @@ metadata:
     app: ted-backfill
     component: etl
 spec:
-  ttlSecondsAfterFinished: 3600
+  # No ttlSecondsAfterFinished: a finished Job that the TTL garbage-collects
+  # is re-created by ArgoCD (selfHeal) and re-walks its range — every hour,
+  # downloading the packages again. Finished Jobs stay until their range is
+  # removed from values, which prunes them.
   activeDeadlineSeconds: {{ $.Values.tedBackfill.deadlineSeconds | default 172800 }}
   backoffLimit: 0
   template:
