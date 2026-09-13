@@ -278,10 +278,12 @@ def _should_ingest(
     A notice is re-ingested when it is not in the graph, when the graph
     copy predates identity stamping (``identity`` names the property the
     XML can give — ``procedure_id`` for eForms, ``ted_publication_number``
-    for legacy — and the node lacks it), or when the incoming notice is a
-    NEWER version than the stored one. Same or older version: skip. So a
-    re-run of an archive is O(1) per notice already at its current
-    version, and the identity repair is simply a re-run."""
+    for legacy — and the node lacks it), when a versioned notice's graph
+    copy carries no version (written by the pre-single-path loader), or
+    when the incoming notice is a NEWER version than the stored one. Same
+    or older version: skip. So a re-run of an archive is O(1) per notice
+    this loader already wrote, and the identity repair is simply a
+    re-run — no ``rescore`` needed, and a restarted range Job resumes."""
     row = session.run(_INGEST_STATE, nid=ted_notice_id).single()
     if row is None or not row["present"]:
         return True
@@ -290,6 +292,14 @@ def _should_ingest(
     if identity == "ted_publication_number" and not row["has_publication_number"]:
         return True
     stored, incoming = _version_num(row["version"]), _version_num(notice_version)
+    if incoming is not None and stored is None:
+        # A versioned (eForms) notice whose graph copy carries no version
+        # was written before the single ingest path: its stamps may be
+        # right by accident (the search-API path stamped procedure_id)
+        # but its back-link is in the wrong field. Re-stamp it. This is
+        # what makes a range Job resumable and the repair a plain re-run:
+        # notices this loader wrote carry the version and are skipped.
+        return True
     return stored is not None and incoming is not None and incoming > stored
 
 

@@ -1586,6 +1586,19 @@ def test_should_ingest_skips_same_or_older_version(monkeypatch):
                       "ted_publication_number")
 
 
+def test_should_ingest_restamps_versionless_copy_of_versioned_notice(monkeypatch):
+    """An eForms notice whose graph node has no notice_version was
+    written by the old loader (search-API stamps, back-link in the wrong
+    field): re-stamp it even though procedure_id is present. Legacy
+    notices (no version on either side) are unaffected."""
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    assert should(_session_with_state(_state(version=None)), "n1", "01",
+                  "procedure_id")
+    assert not should(_session_with_state(_state(version=None)), "24047-2024",
+                      None, "ted_publication_number")
+
+
 def test_should_ingest_newer_version(monkeypatch):
     monkeypatch.undo()
     should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
