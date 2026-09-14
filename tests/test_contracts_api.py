@@ -578,6 +578,58 @@ def test_get_contract_detail_authority_id_is_none_when_absent():
     assert out["authority"]["authority_id"] is None
 
 
+def _detail_source(row):
+    from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+        GraphContractSource)
+    src = GraphContractSource(MagicMock())
+    session = MagicMock()
+    session.run.return_value.single.return_value = row
+    src._neo4j.session.return_value.__enter__ = MagicMock(return_value=session)
+    src._neo4j.session.return_value.__exit__ = MagicMock(return_value=False)
+    return src, session
+
+
+def test_get_contract_detail_resolves_a_superseded_notice_id():
+    """A link that names an older notice of the contract still opens it.
+
+    The Contract's ted_notice_id follows its current notice, so a feed card
+    made before a republication names a notice the contract no longer
+    carries: the shared graph held 30,773 such ids on 2026-09-13, and a
+    briefing card for one of them 404'd (BRIEF-LINK-5). There is no graph
+    behind this mock, so the query is pinned by its text: the lookup must
+    also go through the superseded :Notice's NOTICE_OF edge.
+    """
+    src, session = _detail_source({
+        "ct": {"ted_notice_id": "current", "title": "Los 23"},
+        "a": {"name": "Universität"},
+        "c": {"gmr_id": "g1", "name": "ASI"},
+        "cpv": None,
+    })
+    out = src.get_contract_detail("superseded")
+    cypher = session.run.call_args.args[0]
+    assert session.run.call_args.kwargs["nid"] == "superseded"
+    assert "MATCH (:Notice {ted_notice_id: $nid})-[:NOTICE_OF]->(ct:Contract)" in cypher
+    assert out["ted_notice_id"] == "current"
+
+
+def test_get_contract_detail_without_an_awardee_is_not_a_404():
+    """663 current contracts in the shared graph have no AWARDED_TO edge.
+
+    The feed lists them as awarded to "an undisclosed supplier", so the page
+    must open, with no contractor rather than none at all.
+    """
+    src, session = _detail_source({
+        "ct": {"ted_notice_id": "n1", "title": "Works"},
+        "a": {"name": "Exploateringskontoret"},
+        "c": None,
+        "cpv": None,
+    })
+    out = src.get_contract_detail("n1")
+    assert out is not None
+    assert out["contractor"] is None
+    assert "OPTIONAL MATCH (ct)-[:AWARDED_TO]->(c:Company)" in session.run.call_args.args[0]
+
+
 def test_get_contract_detail_missing_returns_none():
     """A missing contract row yields None (404 path)."""
     from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel

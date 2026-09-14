@@ -321,11 +321,32 @@ class GraphContractSource(ContractDataSource):
     def get_contract_detail(
         self, notice_id: str, lang: str | None = None,
     ) -> dict | None:
-        """Return full detail for a single contract."""
+        """Return full detail for a single contract.
+
+        ``notice_id`` may name any notice of the contract, not only the
+        current one. A :Contract carries the ted_notice_id of its current
+        notice, and that id moves whenever a newer notice (a modification,
+        a republication) joins the chain — so a link made earlier, in a
+        feed card, a bookmark or a search index, would 404 on a contract
+        that is still there. The superseded :Notice keeps its own id and
+        its NOTICE_OF edge, which is what resolves it; both lookups are
+        index seeks. The page is always the contract's current state.
+
+        The awardee is optional: a contract with no AWARDED_TO edge is
+        still a contract, and the briefing feed lists those as awarded to
+        "an undisclosed supplier".
+        """
         with self._neo4j.session() as session:
             row = session.run(
-                "MATCH (a:Authority)-[:AWARDED]->(ct:Contract "
-                "{ted_notice_id: $nid})-[:AWARDED_TO]->(c:Company) "
+                "CALL { "
+                "  MATCH (ct:Contract {ted_notice_id: $nid}) RETURN ct "
+                "  UNION "
+                "  MATCH (:Notice {ted_notice_id: $nid})"
+                "-[:NOTICE_OF]->(ct:Contract) RETURN ct "
+                "} "
+                "WITH ct LIMIT 1 "
+                "MATCH (a:Authority)-[:AWARDED]->(ct) "
+                "OPTIONAL MATCH (ct)-[:AWARDED_TO]->(c:Company) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN ct, a, c, cpv",
                 nid=notice_id,
@@ -374,7 +395,7 @@ class GraphContractSource(ContractDataSource):
                 "gmr_id": row["c"]["gmr_id"],
                 "name": row["c"]["name"],
                 "country": row["c"].get("country"),
-            },
+            } if row["c"] is not None else None,
             # Tender-integrity: the raw eForms fields + the shared keystone's
             # derived red flags (single-bidder etc.), computed on the fly so
             # the detail page works even before the sink re-materialises them.
