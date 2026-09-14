@@ -21,12 +21,14 @@ per subscriber. The Data Studio benefits too.
 """
 from __future__ import annotations
 
+from collections import defaultdict
 import datetime as _dt
 import decimal
 import json
 import re
 import logging
 import os
+import threading
 import time
 from typing import Annotated
 
@@ -413,16 +415,27 @@ def sql_query(body: Annotated[dict, Body(...)]) -> dict:
 # (Virtuoso) are expensive to introspect.
 _SCHEMA_CACHE: dict = {}
 _SCHEMA_TTL = 600  # seconds
+# One lock per store. The Studio asks for the schema from several places as a
+# page opens, so an expired entry used to be rebuilt by every concurrent
+# caller at once; now the first builds it and the rest wait for that result.
+_SCHEMA_LOCKS: dict = defaultdict(threading.Lock)
 
 
 def _cached(key, builder):
-    now = time.time()
     hit = _SCHEMA_CACHE.get(key)
-    if hit and now - hit[0] < _SCHEMA_TTL:
+    if hit and time.time() - hit[0] < _SCHEMA_TTL:
         return hit[1]
-    payload = builder()
-    _SCHEMA_CACHE[key] = (now, payload)
-    return payload
+    with _SCHEMA_LOCKS[key]:
+        hit = _SCHEMA_CACHE.get(key)
+        if hit and time.time() - hit[0] < _SCHEMA_TTL:
+            return hit[1]
+        payload = builder()
+        _SCHEMA_CACHE[key] = (time.time(), payload)
+        return payload
+
+
+#: Nodes read per label to list that label's properties for autocomplete.
+_SCHEMA_SAMPLE = 200
 
 
 def _cypher_schema(neo4j: Neo4jClient) -> dict:
@@ -435,16 +448,19 @@ def _cypher_schema(neo4j: Neo4jClient) -> dict:
                 tx.run("CALL db.relationshipTypes() YIELD relationshipType "
                        "RETURN relationshipType ORDER BY relationshipType")]
 
-    def _node_props(tx):
+    def _node_props(tx, labels):
+        # Sampled, not db.schema.nodeTypeProperties(): that procedure scans
+        # every node in the store, which took 125-150 s per call on the shared
+        # graph and held Neo4j busy while the Studio's own query ran. A few
+        # hundred nodes per label is enough to autocomplete with; the complete
+        # key list still comes from db.propertyKeys() below.
         out: dict = {}
-        for r in tx.run("CALL db.schema.nodeTypeProperties() YIELD nodeLabels, propertyName "
-                        "RETURN nodeLabels, propertyName"):
-            name = r["propertyName"]
-            if not name:
-                continue
-            for lbl in (r["nodeLabels"] or []):
-                out.setdefault(lbl, set()).add(name)
-        return {k: sorted(v) for k, v in out.items()}
+        for lbl in labels:
+            name = lbl.replace("`", "``")
+            out[lbl] = [r["k"] for r in tx.run(
+                f"MATCH (n:`{name}`) WITH n LIMIT {_SCHEMA_SAMPLE} "
+                "UNWIND keys(n) AS k RETURN DISTINCT k ORDER BY k")]
+        return {k: v for k, v in out.items() if v}
 
     def _keys(tx):
         return [r["propertyKey"] for r in tx.run(
@@ -453,13 +469,8 @@ def _cypher_schema(neo4j: Neo4jClient) -> dict:
     with neo4j.session() as session:
         labels = session.execute_read(_labels)
         rels = session.execute_read(_rels)
-        try:
-            label_props = session.execute_read(_node_props)
-        except Exception:  # pylint: disable=broad-exception-caught
-            label_props = {}  # proc unavailable on this Neo4j version
-        props = sorted({p for ps in label_props.values() for p in ps})
-        if not props:
-            props = session.execute_read(_keys)
+        label_props = session.execute_read(_node_props, labels)
+        props = session.execute_read(_keys)
     return {"lang": "cypher", "labels": labels, "relationshipTypes": rels,
             "labelProperties": label_props, "properties": props}
 
