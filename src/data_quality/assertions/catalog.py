@@ -717,15 +717,6 @@ ASSERTIONS: list[Assertion] = [
         "The served graph is the neo4j_sink projection; large lag means the graph is stale.",
     ),
     Assertion(
-        "pipeline.virtuoso_sink_lag", PIPELINE,
-        "virtuoso_sink is caught up to the events head", WARN, "sql",
-        "SELECT (SELECT max(seq) FROM events.entity_events) - last_seq AS lag "
-        "FROM events.consumer_offsets WHERE consumer_name = 'virtuoso_sink'",
-        le_threshold("lag", 10000, "lag"),
-        "The RDF mirror trails the event log when the sink stalls; sustained lag means SPARQL "
-        "surfaces serve stale data.",
-    ),
-    Assertion(
         "pipeline.neo4j_deadletter", PIPELINE,
         "neo4j_sink has no dead-lettered events", WARN, "sql",
         "SELECT count(*) AS violations FROM events.dead_letter WHERE consumer = 'neo4j_sink'",
@@ -1030,26 +1021,6 @@ ASSERTIONS: list[Assertion] = [
         "A mismatch is mirror loss or source-side drift since the "
         "snapshot; the detail names the record either way.",
     ),
-    Assertion(
-        "consistency.contract_neo4j_virtuoso", CONSISTENCY,
-        "Random contracts render identically in Neo4j + Virtuoso", WARN,
-        "consistency", "Contract",
-        zero_with_detail("inconsistent contracts (of 12 sampled)"),
-        "Both sinks project the same events.entity_events stream, so a "
-        "sampled contract whose value/currency/procedure/bidders/cpv differ "
-        "across stores means a sink dropped, lagged, or mis-rendered an event. "
-        "Sampling spot-check (random dozen) -> WARN, not BLOCK.",
-    ),
-    Assertion(
-        "consistency.company_neo4j_virtuoso", CONSISTENCY,
-        "Random companies render identically in Neo4j + Virtuoso", WARN,
-        "consistency", "Company",
-        zero_with_detail("inconsistent companies (of 12 sampled)"),
-        "Sampled companies must agree on name + country across stores. LEI and "
-        "other GLEIF enrichment are intentionally excluded -- that is a load-"
-        "coverage question (Neo4j leads Virtuoso by ~3.8% on LEI), not a sink-"
-        "render inconsistency.",
-    ),
     # ── Value quarantine (withheld bad values stay withheld) ──────────
     Assertion(
         "values.quarantined_carries_no_value", VALUES,
@@ -1302,15 +1273,6 @@ ASSERTIONS: list[Assertion] = [
         "momentum charts. Missing rows mean the 05:10 cron failed and the "
         "series has a hole it can never backfill (supporter counts are "
         "only observable live).",
-    ),
-    Assertion(
-        "consistency.petitions_neo4j_virtuoso", CONSISTENCY,
-        "Petition counts match across Neo4j and Virtuoso", WARN,
-        "consistency", "PetitionParity",
-        zero_violations("petition count drift across stores"),
-        "Both sinks project the same UpsertPetition stream; a drift means "
-        "one sink dropped or lagged events (no graph-replace bracket is "
-        "involved, so counts must match exactly once drained).",
     ),
     Assertion(
         "consistency.legal_act_spine", CONSISTENCY,

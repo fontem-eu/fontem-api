@@ -70,10 +70,10 @@ def _build_sql_runner(dsn: str | None):
 
 
 def _build_consistency_runner(client: Neo4jClient):
-    # Cross-store engine needs Neo4j (multi-row sample) + Virtuoso (SPARQL).
-    # Lazy imports keep this off the hot path; returns None when Virtuoso is
-    # unconfigured, so the runner reports the consistency assertions as WARN
-    # rather than failing.
+    # The mirror checks need Virtuoso (SPARQL) and, for the :LegalAct spine,
+    # Neo4j. Lazy imports keep this off the hot path; returns None when
+    # Virtuoso is unconfigured, so the runner reports the consistency
+    # assertions as WARN rather than failing.
     from src.data.sparql.virtuoso_client import VirtuosoClient  # pylint: disable=import-outside-toplevel
     from src.data_quality.assertions import consistency  # pylint: disable=import-outside-toplevel
     virtuoso = VirtuosoClient.from_env()
@@ -91,13 +91,11 @@ def _build_consistency_runner(client: Neo4jClient):
         if entity_type == "CellarMirror":
             return consistency.cellar_mirror_check(
                 os.environ["VIRTUOSO_SPARQL_URL"], _http_get)
-        if entity_type == "PetitionParity":
-            return consistency.petition_parity_check(client, virtuoso)
         if entity_type == "LegislativeSpine":
             return consistency.legal_act_spine_check(client, virtuoso)
         if entity_type == "CellarFtIndex":
             return consistency.cellar_ft_index_check(virtuoso)
-        return consistency.check(client, virtuoso, entity_type)
+        raise ValueError(f"unknown consistency check: {entity_type}")
     return _run
 
 

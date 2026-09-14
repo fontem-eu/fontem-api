@@ -1,6 +1,8 @@
 <h1>The RDF store (SPARQL)</h1>
-<p>Virtuoso, queried with SPARQL. It holds the same entities as the graph,
-expressed as RDF against the platform's own ontology, plus links out to Wikidata.</p>
+<p>Virtuoso, queried with SPARQL. It holds the reference mirrors (Wikidata,
+EU legislation from CELLAR and the EuroVoc thesaurus) alongside a copy of the
+platform's entities, expressed as RDF against the platform's own ontology. The
+graph is the source of truth: the RDF copy is taken from it and can trail it.</p>
 <h2>Prefixes</h2>
 <pre><code>PREFIX f:    &lt;http://data.fontem.eu/ontology#&gt;
 PREFIX wdt:  &lt;http://www.wikidata.org/prop/direct/&gt;

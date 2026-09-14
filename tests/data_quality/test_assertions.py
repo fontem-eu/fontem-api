@@ -434,58 +434,7 @@ def test_critical_indexes_count_matches_pairs():
     )
 
 
-# ── cross-store consistency engine ────────────────────────────────────────
-_ONT = "http://data.fontem.eu/ontology#"
-
-
-class _FakeNeoSession:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def run(self, query):  # noqa: ARG002 - fake ignores the query
-        return iter(self._rows)
-
-
-class _FakeNeoClient:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def session(self):
-        return _FakeNeoSession(self._rows)
-
-
-class _FakeVirtuoso:
-    def __init__(self, by_iri):
-        self._by_iri = by_iri
-
-    def query(self, q):
-        m = re.search(r"<([^>]+)>", q)
-        return self._by_iri.get(m.group(1) if m else "", [])
-
-
-def test_consistency_check_passes_when_aligned_flags_when_not():
-    neo = _FakeNeoClient([
-        {"_key": "n1", "value_eur": 100.0, "procedure_type": "open"},   # aligned
-        {"_key": "n2", "value_eur": 200.0, "procedure_type": "open"},   # proc mismatch
-        {"_key": "n3", "value_eur": 300.0, "procedure_type": "open"},   # absent
-    ])
-    virt = _FakeVirtuoso({
-        "http://data.fontem.eu/id/Contract/n1": [
-            {"p": _ONT + "valueEur", "o": 100.0}, {"p": _ONT + "procedureType", "o": "open"}],
-        "http://data.fontem.eu/id/Contract/n2": [
-            {"p": _ONT + "valueEur", "o": 200.0}, {"p": _ONT + "procedureType", "o": "restricted"}],
-        # n3 has no triples -> absent
-    })
-    res = consistency.check(neo, virt, "Contract", n=3)
-    assert res["total"] == 3
-    assert res["violations"] == 2          # n2 (mismatch) + n3 (absent)
-    assert "n2.procedure_type" in res["detail"]
+# ── consistency engine ────────────────────────────────────────────────────
 
 
 def test_consistency_engine_dispatch_and_missing_runner():
@@ -690,14 +639,6 @@ class _PetFakeVirtuoso:
 
     def query(self, _q):
         return [{"n": str(self._n)}]
-
-
-def test_petition_parity_check():
-    ok = consistency.petition_parity_check(_PetFakeNeo4j(132), _PetFakeVirtuoso(132))
-    assert ok["violations"] == 0
-    drift = consistency.petition_parity_check(_PetFakeNeo4j(132), _PetFakeVirtuoso(120))
-    assert drift["violations"] == 12
-    assert "neo4j=132" in drift["detail"]
 
 
 def test_legal_act_spine_check_tolerates_5pct_lag():

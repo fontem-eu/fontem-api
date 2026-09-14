@@ -28,11 +28,11 @@ _TRUSTED_VALUE_SUM = trusted_value_sum("ct")
 # `MATCH (n)` so each per-label query uses the label-scan index and
 # the result ordering is deterministic.
 #
-# SanctionedEntity (Phase 2) and FinancialYear (Phase 3) were
-# removed from Neo4j; their counts come from Virtuoso, reported
-# in their own panels. Connectedness is a Neo4j-only metric — it
-# measures node degree inside the Cypher graph — so labels that
-# no longer live in Neo4j are dropped from this list.
+# SanctionedEntity and FinancialYear are left out on purpose: a
+# FinancialYear always hangs off exactly one Company, and a
+# SanctionedEntity only gains an edge when a company matches it, so
+# their degree says nothing about how well the graph is connected.
+# Both are reported in their own panels.
 _CONNECTEDNESS_LABELS = (
     "Company", "Listing",
     "Contract", "Authority", "CPV",
@@ -41,42 +41,29 @@ _CONNECTEDNESS_LABELS = (
     "CohesionProject", "Person",
 )
 
-# Sanctions live in this named graph in Virtuoso. The DQ dashboard
-# queries this graph for entity totals + regime breakdown; the
-# matched-companies count still comes from Neo4j (the SANCTIONED
-# edge stayed Neo4j-side because it's a Company-relationship and
-# Companies haven't migrated yet).
-SANCTIONS_GRAPH_IRI = "http://data.fontem.eu/graph/sanctions"
+# FinancialYear properties the EDGAR / ESEF panels report coverage for.
+# The dashboard labels come from these names, so they stay snake_case.
+_FILING_FIELDS = (
+    "revenue", "net_income", "total_assets", "equity", "operating_cashflow",
+)
 
-# fontem:Filing nodes for the FinancialYear domain. One named
-# graph per source so the loaders can PUT-replace independently.
-FILINGS_EDGAR_GRAPH_IRI = "http://data.fontem.eu/graph/financials/edgar"
-FILINGS_ESEF_GRAPH_IRI = "http://data.fontem.eu/graph/financials/esef"
-
-# Property URIs we ask the SPARQL endpoint to filter on. Picking
-# them up as constants here so a typo in `revenue` is caught at
-# the boundary rather than silently producing a 0%.
-_FONTEM = "http://data.fontem.eu/ontology#"
-_FILING_FIELD_URIS = {
-    "revenue":           _FONTEM + "revenue",
-    "net_income":        _FONTEM + "netIncome",
-    "total_assets":      _FONTEM + "totalAssets",
-    "equity":            _FONTEM + "equity",
-    "operating_cashflow": _FONTEM + "operatingCashflow",
-}
+# EU member states, alpha-3 like every country code in the graph.
+_EU_MEMBERS = (
+    "AUT", "BEL", "BGR", "HRV", "CYP", "CZE", "DNK", "EST", "FIN",
+    "FRA", "DEU", "GRC", "HUN", "IRL", "ITA", "LVA", "LTU", "LUX",
+    "MLT", "NLD", "POL", "PRT", "ROU", "SVK", "SVN", "ESP", "SWE",
+)
 
 _CONNECTEDNESS_TTL_SECONDS = 3600
 
 
 class GraphDataQualitySource(DataQualitySource):
-    """Production data quality source backed by Neo4j (and, for
-    the sanctions panel, by Virtuoso since the Phase 2 cutover).
+    """Production data quality source backed by Neo4j.
 
-    Pass an optional ``virtuoso_client`` to enable the
-    Virtuoso-backed sanctions reads. When None, sanctions stats
-    return zero — the API still boots, but the dashboard panel
-    shows an empty state. This is the staging fallback for envs
-    that haven't enabled Virtuoso yet.
+    ``virtuoso_client`` is only used for the RDF store snapshot
+    (``get_triples_stats``): the mirrors and whatever else sits in the
+    store. Every other panel reads Neo4j. When None, the snapshot
+    reports itself unavailable.
     """
 
     def __init__(
@@ -92,14 +79,7 @@ class GraphDataQualitySource(DataQualitySource):
         self._connectedness_cache: tuple[float, dict] | None = None
 
     def get_graph_stats(self) -> dict:
-        """Return node/relationship counts by label.
-
-        SanctionedEntity (Phase 2) and FinancialYear (Phase 3)
-        moved to Virtuoso. We keep both keys in the response so
-        the UI's grid layout doesn't lose rows; their values come
-        from SPARQL queries against the corresponding named
-        graphs.
-        """
+        """Return node/relationship counts by label."""
         with self._neo4j.session() as session:
             labels = {}
             for label in [
@@ -107,16 +87,12 @@ class GraphDataQualitySource(DataQualitySource):
                 "Contract", "Authority", "CPV",
                 "Lobbyist", "LobbyInterest",
                 "NUTSRegion", "CohesionProject",
+                "SanctionedEntity", "FinancialYear",
             ]:
                 n = session.run(
                     f"MATCH (n:{label}) RETURN count(n) AS n"
                 ).single()["n"]
                 labels[label] = n
-            labels["SanctionedEntity"] = self._sanctions_count_from_virtuoso()
-            labels["FinancialYear"] = (
-                self._filings_count(FILINGS_EDGAR_GRAPH_IRI)
-                + self._filings_count(FILINGS_ESEF_GRAPH_IRI)
-            )
 
             rels = session.run(
                 "MATCH ()-[r]->() RETURN count(r) AS n"
@@ -419,12 +395,7 @@ class GraphDataQualitySource(DataQualitySource):
             }
 
     def get_edgar_stats(self) -> dict:
-        """US EDGAR financial data stats — sourced from Virtuoso
-        post Phase 3 cutover.
-
-        ``companies`` still queries Neo4j (Companies haven't
-        migrated yet); the rest comes from the EDGAR named graph.
-        """
+        """US EDGAR financial data stats."""
         with self._neo4j.session() as session:
             companies = session.run(
                 "MATCH (c:Company)-[:LISTED_AS]->(l:Listing {exchange: 'US'}) "
@@ -432,147 +403,67 @@ class GraphDataQualitySource(DataQualitySource):
             ).single()["n"]
         return {
             "companies": companies,
-            **self._filings_stats(FILINGS_EDGAR_GRAPH_IRI),
+            **self._filings_stats("edgar"),
         }
-
-    _EU_MEMBERS = (
-        "'AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR',"
-        "'HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK',"
-        "'SI','ES','SE'"
-    )
 
     def get_esef_stats(self) -> dict:
-        """EU ESEF financial data stats (EU members only) —
-        Virtuoso for the filings, Neo4j for the country
-        breakdown.
-
-        Companies still live in Neo4j, so by_country and the
-        distinct-companies count run there. Filings (totals,
-        year breakdown, field coverage) come from the ESEF
-        named graph in Virtuoso. The two halves are joined on
-        the Filing's filedBy IRI: ``Company/<gmr_id>``.
-        """
-        if self._virtuoso is None:
-            return {
-                "companies": 0, "financial_years": 0,
-                "by_year": [], "by_country": [],
-                "field_coverage": {f: 0.0 for f in _FILING_FIELD_URIS},
-            }
-        graph = FILINGS_ESEF_GRAPH_IRI
-
-        # Filings totals + by-year + field coverage from Virtuoso.
-        base = self._filings_stats(graph)
-
-        # Companies + by-country: join Virtuoso (which gmr_ids
-        # filed ESEF) against Neo4j (country lookup, EU filter).
-        # First grab the gmr_id list — small enough to round-trip.
-        company_rows = self._virtuoso.query(
-            f"""
-            PREFIX fontem: <http://data.fontem.eu/ontology#>
-            SELECT DISTINCT ?company WHERE {{
-                GRAPH <{graph}> {{
-                    ?f a fontem:Filing ;
-                       fontem:filedBy ?company .
-                }}
-            }}
-            """
-        )
-        gmr_ids = [
-            r["company"].rsplit("/", 1)[-1] for r in company_rows
-        ]
-        if not gmr_ids:
-            return {
-                **base, "companies": 0, "by_country": [],
-            }
-
-        eu_filter = f"AND c.country IN [{self._EU_MEMBERS}]"
+        """EU ESEF financial data stats. Company counts cover EU member
+        states only."""
+        base = self._filings_stats("esef")
         with self._neo4j.session() as session:
             companies = session.run(
-                f"MATCH (c:Company) WHERE c.gmr_id IN $ids {eu_filter} "
-                "RETURN count(DISTINCT c) AS n",
-                ids=gmr_ids,
+                "MATCH (c:Company)-[:REPORTED]->"
+                "(:FinancialYear {source: 'esef'}) "
+                "WITH DISTINCT c WHERE c.country IN $eu "
+                "RETURN count(c) AS n",
+                eu=list(_EU_MEMBERS),
             ).single()["n"]
             by_country = session.run(
-                f"MATCH (c:Company) WHERE c.gmr_id IN $ids {eu_filter} "
+                "MATCH (c:Company)-[:REPORTED]->"
+                "(:FinancialYear {source: 'esef'}) "
+                "WITH DISTINCT c WHERE c.country IN $eu "
                 "RETURN c.country AS country, count(c) AS count "
                 "ORDER BY count DESC LIMIT 20",
-                ids=gmr_ids,
+                eu=list(_EU_MEMBERS),
             ).data()
-        return {
-            **base,
-            "companies": companies,
-            "by_country": by_country,
-        }
+        return {**base, "companies": companies, "by_country": by_country}
 
-    # ── Filings SPARQL helpers ───────────────────────────────────
+    # ── Filings helpers ──────────────────────────────────────────
 
-    def _filings_stats(self, graph_iri: str) -> dict:
-        """Filing-graph stats common to EDGAR + ESEF.
+    def _filings_stats(self, source: str) -> dict:
+        """FinancialYear stats common to EDGAR + ESEF.
 
-        Returns ``{financial_years, by_year, field_coverage}``.
-        Caller layers on the cross-store companies count.
+        Returns ``{financial_years, by_year, field_coverage}``; the
+        callers add their own company counts.
         """
-        if self._virtuoso is None:
-            return {
-                "financial_years": 0, "by_year": [],
-                "field_coverage": {f: 0.0 for f in _FILING_FIELD_URIS},
-            }
-        graph = graph_iri
-
-        rows = self._virtuoso.query(
-            f"""
-            PREFIX fontem: <http://data.fontem.eu/ontology#>
-            SELECT (COUNT(DISTINCT ?f) AS ?n) WHERE {{
-                GRAPH <{graph}> {{ ?f a fontem:Filing }}
-            }}
-            """
-        )
-        fin_years = int(rows[0]["n"]) if rows else 0
-
-        # by_year — group by fiscalYear, format as "YYYY-01-01" so
-        # the dashboard's existing Date axis renders unchanged.
-        year_rows = self._virtuoso.query(
-            f"""
-            PREFIX fontem: <http://data.fontem.eu/ontology#>
-            SELECT ?yr (COUNT(DISTINCT ?f) AS ?n) WHERE {{
-                GRAPH <{graph}> {{
-                    ?f a fontem:Filing ;
-                       fontem:fiscalYear ?yr .
-                }}
-                FILTER (xsd:integer(STR(?yr)) >= 1990 &&
-                        xsd:integer(STR(?yr)) <= 2030)
-            }}
-            GROUP BY ?yr
-            ORDER BY ?yr
-            """
-        )
-        by_year = [
-            {
-                "date": f"{r['yr']}-01-01",
-                "value": int(r["n"]),
-            }
-            for r in year_rows
-        ]
-
-        coverage: dict[str, float] = {}
-        for field, prop in _FILING_FIELD_URIS.items():
-            cov_rows = self._virtuoso.query(
-                f"""
-                PREFIX fontem: <http://data.fontem.eu/ontology#>
-                SELECT (COUNT(DISTINCT ?f) AS ?n) WHERE {{
-                    GRAPH <{graph}> {{
-                        ?f a fontem:Filing ;
-                           <{prop}> ?v .
-                    }}
-                }}
-                """
-            )
-            n = int(cov_rows[0]["n"]) if cov_rows else 0
-            coverage[field] = round(n / max(fin_years, 1) * 100, 1)
+        with self._neo4j.session() as session:
+            fin_years = session.run(
+                "MATCH (f:FinancialYear {source: $source}) "
+                "RETURN count(f) AS n",
+                source=source,
+            ).single()["n"]
+            # "YYYY-01-01" so the dashboard's Date axis renders unchanged.
+            by_year = [
+                {"date": f"{r['yr']}-01-01", "value": r["n"]}
+                for r in session.run(
+                    "MATCH (f:FinancialYear {source: $source}) "
+                    "WHERE f.year >= 1990 AND f.year <= 2030 "
+                    "RETURN f.year AS yr, count(f) AS n ORDER BY yr",
+                    source=source,
+                ).data()
+            ]
+            present = session.run(
+                "MATCH (f:FinancialYear {source: $source}) RETURN "
+                + ", ".join(f"count(f.{p}) AS {p}" for p in _FILING_FIELDS),
+                source=source,
+            ).single()
         return {
             "financial_years": fin_years,
             "by_year": by_year,
-            "field_coverage": coverage,
+            "field_coverage": {
+                p: round(present[p] / max(fin_years, 1) * 100, 1)
+                for p in _FILING_FIELDS
+            },
         }
 
     def get_lobbying_stats(self) -> dict:
@@ -750,111 +641,39 @@ class GraphDataQualitySource(DataQualitySource):
                 "total": pending + declined + asserted,
             }
 
-    def _filings_count(self, graph_iri: str) -> int:
-        """Count distinct fontem:Filing in a single named graph."""
-        if self._virtuoso is None:
-            return 0
-        rows = self._virtuoso.query(
-            f"""
-            PREFIX fontem: <http://data.fontem.eu/ontology#>
-            SELECT (COUNT(DISTINCT ?f) AS ?n) WHERE {{
-                GRAPH <{graph_iri}> {{ ?f a fontem:Filing }}
-            }}
-            """
-        )
-        return int(rows[0]["n"]) if rows else 0
-
-    def _sanctions_count_from_virtuoso(
-        self, *, extra_clause: str = ""
-    ) -> int:
-        """Count fontem:SanctionedEntity instances in the sanctions
-        graph, optionally narrowed by an extra clause.
-
-        Used by graph_stats, field_completeness, coverage, and
-        sanctions_stats — the same query shape with different
-        guards. ``extra_clause`` is interpolated raw into the
-        WHERE block; only the DataQuality module composes it
-        (no user input ever reaches this).
-        """
-        if self._virtuoso is None:
-            return 0
-        graph = SANCTIONS_GRAPH_IRI
-        rows = self._virtuoso.query(
-            f"""
-            PREFIX fontem: <http://data.fontem.eu/ontology#>
-            SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{
-                GRAPH <{graph}> {{
-                    ?s a fontem:SanctionedEntity .
-                    {extra_clause}
-                }}
-            }}
-            """
-        )
-        return int(rows[0]["n"]) if rows else 0
-
-    def get_sanctions_stats(self) -> dict:
-        """Sanctions list stats — Virtuoso for the entity body,
-        Neo4j for the matched-companies count.
-
-        After the Phase 2 cutover the Neo4j SanctionedEntity nodes
-        are gone; the only thing left in Neo4j is the SANCTIONED
-        edge from Company. The edge endpoint changed from
-        ``:SanctionedEntity`` (full body) to a stub ``:SanctionRef``
-        (IRI only); the matched-count query is rewritten to that
-        new shape.
-        """
-        if self._virtuoso is None:
-            # Boot-time fallback — no Virtuoso configured. Empty
-            # sanctions panel rather than a 500 on the dashboard.
-            return {
-                "total": 0, "persons": 0, "entities": 0,
-                "matched_to_companies": 0, "top_regimes": [],
-            }
-
-        graph = SANCTIONS_GRAPH_IRI
-        rows = self._virtuoso.query(
-            f"""
-            PREFIX fontem: <http://data.fontem.eu/ontology#>
-            SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{
-                GRAPH <{graph}> {{ ?s a fontem:SanctionedEntity }}
-            }}
-            """
-        )
-        entities = int(rows[0]["n"]) if rows else 0
-
-        regime_rows = self._virtuoso.query(
-            f"""
-            PREFIX fontem: <http://data.fontem.eu/ontology#>
-            SELECT ?regime (COUNT(DISTINCT ?s) AS ?n) WHERE {{
-                GRAPH <{graph}> {{
-                    ?s a fontem:SanctionedEntity ;
-                       fontem:sanctionRegime ?regime .
-                }}
-            }}
-            GROUP BY ?regime
-            ORDER BY DESC(?n) LIMIT 10
-            """
-        )
-        regimes = [{"regime": r["regime"], "n": r["n"]} for r in regime_rows]
-
-        # Persons are no longer stored anywhere — the GDPR posture
-        # filters them out at the loader. Reporting 0 keeps the
-        # dashboard column wired without resurrecting deleted data.
-        persons = 0
-
-        # Matched-companies still lives in Neo4j on the SANCTIONED
-        # edge. After cutover the edge points at a :SanctionRef
-        # stub; the count is the same shape either way.
+    def _sanctions_count(self, where: str = "") -> int:
+        """Count :SanctionedEntity nodes, optionally narrowed by a WHERE
+        clause over ``s``. Only this module composes ``where``; no user
+        input reaches it."""
         with self._neo4j.session() as session:
-            matched = session.run(
-                "MATCH (:Company)-[:SANCTIONED]->(s) "
-                "RETURN count(DISTINCT s) AS n"
+            return session.run(
+                f"MATCH (s:SanctionedEntity) {where} RETURN count(s) AS n"
             ).single()["n"]
 
+    def get_sanctions_stats(self) -> dict:
+        """EU sanctions list stats."""
+        with self._neo4j.session() as session:
+            counts = session.run(
+                "MATCH (s:SanctionedEntity) "
+                "RETURN count(s) AS total, "
+                "count(CASE WHEN s.subject_type = 'person' THEN 1 END) "
+                "AS persons"
+            ).single()
+            regimes = session.run(
+                "MATCH (s:SanctionedEntity) "
+                "WHERE s.sanction_regime IS NOT NULL "
+                "RETURN s.sanction_regime AS regime, count(s) AS n "
+                "ORDER BY n DESC LIMIT 10"
+            ).data()
+            matched = session.run(
+                "MATCH (:Company)-[:SANCTIONED]->(s:SanctionedEntity) "
+                "RETURN count(DISTINCT s) AS n"
+            ).single()["n"]
+        total, persons = counts["total"], counts["persons"]
         return {
-            "total": entities + persons,
+            "total": total,
             "persons": persons,
-            "entities": entities,
+            "entities": total - persons,
             "matched_to_companies": matched,
             "top_regimes": regimes,
         }
@@ -1156,22 +975,12 @@ class GraphDataQualitySource(DataQualitySource):
         }
 
     def get_field_completeness(self) -> dict:
-        """Per-source field completeness percentages.
-
-        Sanctions completeness is sourced from Virtuoso post-
-        cutover. Every entity is required by the SHACL shape to
-        carry rdfs:label and fontem:sanctionRegime, so the
-        coverage is always 100% — but we emit the metric anyway
-        because the dashboard panel expects it, and dropping it
-        to zero would look like a regression.
-        """
-        se_total = self._sanctions_count_from_virtuoso()
-        se_name = self._sanctions_count_from_virtuoso(
-            extra_clause="?s <http://www.w3.org/2000/01/rdf-schema#label> ?label"
-        )
-        se_regime = self._sanctions_count_from_virtuoso(
-            extra_clause="?s <http://data.fontem.eu/ontology#sanctionRegime> ?regime"
-        )
+        """Per-source field completeness percentages."""
+        se_total = self._sanctions_count()
+        se_name = self._sanctions_count(
+            "WHERE s.name IS NOT NULL AND s.name <> ''")
+        se_regime = self._sanctions_count(
+            "WHERE s.sanction_regime IS NOT NULL")
 
         with self._neo4j.session() as session:
 
@@ -1305,9 +1114,6 @@ class GraphDataQualitySource(DataQualitySource):
                 "ORDER BY lobbyists DESC LIMIT 10"
             ).data()
 
-            # SanctionedEntity moved to Virtuoso during Phase 2;
-            # the count comes from the SPARQL helper below. The
-            # remaining counts stay in Neo4j inside this session.
             nuts_count = session.run(
                 "MATCH (n:NUTSRegion) RETURN count(n) AS n"
             ).single()["n"]
@@ -1315,7 +1121,7 @@ class GraphDataQualitySource(DataQualitySource):
                 "MATCH (d:Disclosure {system: 'eu-cohesion'}) "
                 "RETURN count(d) AS n"
             ).single()["n"]
-        sanctioned = self._sanctions_count_from_virtuoso()
+        sanctioned = self._sanctions_count()
 
         return {
             "companies_with_contracts": companies_with_contracts,
@@ -1441,8 +1247,8 @@ class GraphDataQualitySource(DataQualitySource):
         """Snapshot of the Virtuoso RDF store.
 
         Returns ``{"available": False, ...}`` when no Virtuoso
-        client is configured (e.g. on envs that haven't enabled the
-        sanctions cutover) so the frontend can render an explicit
+        client is configured (e.g. an env without Virtuoso) so the
+        frontend can render an explicit
         "Virtuoso not configured" state instead of erroring.
         """
         if self._virtuoso is None:
