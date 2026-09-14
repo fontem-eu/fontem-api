@@ -144,21 +144,21 @@ class _SchemaTx:
             return _SchemaResult(["label"], [{"label": "Company"}, {"label": "Contract"}])
         if "relationshiptypes" in q:
             return _SchemaResult(["relationshipType"], [{"relationshipType": "AWARDED_TO"}])
-        if "nodetypeproperties" in q:
-            return _SchemaResult(
-                ["nodeLabels", "propertyName"],
-                [{"nodeLabels": ["Company"], "propertyName": "name"},
-                 {"nodeLabels": ["Company"], "propertyName": "lei"},
-                 {"nodeLabels": ["Contract"], "propertyName": "value"}],
-            )
+        # The full-store scan must never come back: it took 125-150 s a call.
+        assert "nodetypeproperties" not in q, query
+        if "unwind keys(n)" in q:
+            sampled = {"company": ["lei", "name"], "contract": ["value"]}
+            label = q.split("(n:`", 1)[1].split("`", 1)[0]
+            return _SchemaResult(["k"], [{"k": k} for k in sampled.get(label, [])])
         if "propertykeys" in q:
-            return _SchemaResult(["propertyKey"], [{"propertyKey": "name"}])
+            return _SchemaResult(["propertyKey"], [{"propertyKey": k}
+                                                   for k in ("lei", "name", "value")])
         return _SchemaResult([], [])
 
 
 class _SchemaSession:
-    def execute_read(self, fn):
-        return fn(_SchemaTx())
+    def execute_read(self, fn, *args):
+        return fn(_SchemaTx(), *args)
 
     def __enter__(self):
         return self
@@ -198,10 +198,40 @@ def test_cypher_schema_introspection():
         b = r.json()
         assert b["labels"] == ["Company", "Contract"]
         assert b["relationshipTypes"] == ["AWARDED_TO"]
-        assert b["labelProperties"]["Company"] == ["lei", "name"]
-        assert "value" in b["properties"] and "name" in b["properties"]
+        assert b["labelProperties"] == {"Company": ["lei", "name"], "Contract": ["value"]}
+        assert b["properties"] == ["lei", "name", "value"]
     finally:
         cleanup_dishka()
+
+
+def test_schema_cache_builds_once_for_concurrent_callers():
+    """An expired entry is rebuilt by one caller; the others wait for it.
+
+    Each rebuild of the Cypher schema used to scan the whole store, and the
+    Studio asks for it from several places as a page opens, so every opener
+    ran its own scan in parallel.
+    """
+    import threading  # pylint: disable=import-outside-toplevel
+    import time  # pylint: disable=import-outside-toplevel
+    from src.api.routers.query import _cached  # pylint: disable=import-outside-toplevel
+    _clear_schema_cache()
+    builds = []
+
+    def builder():
+        builds.append(1)
+        time.sleep(0.2)
+        return {"built": len(builds)}
+
+    results = []
+    callers = [threading.Thread(target=lambda: results.append(_cached("concurrency", builder)))
+               for _ in range(8)]
+    for t in callers:
+        t.start()
+    for t in callers:
+        t.join()
+    assert len(builds) == 1
+    assert results == [{"built": 1}] * 8
+    _clear_schema_cache()
 
 
 def test_sparql_schema_with_client_and_without():
