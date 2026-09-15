@@ -286,6 +286,7 @@ def test_cypher_rejects_admin_procedures():
         cleanup_dishka()
 
 
+
 def test_sql_rejects_filesystem_functions():
     """Pentest CRITICAL (DAST): `pg_read_file('/etc/passwd')` read server files +
     `/proc/1/environ` secrets under the old superuser DSN. The least-privilege

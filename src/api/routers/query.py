@@ -62,7 +62,39 @@ _SQL_FORBIDDEN = (
 # Neo4j admin / file-access procedures — a reader-role Neo4j user can't call
 # them, but block by name too so it holds on Community (no RBAC). Safe read
 # procedures (db.labels / db.relationshipTypes for schema) keep the `db.` prefix.
-_CYPHER_PROC_DENY = re.compile(r"\b(dbms|apoc)\s*\.", re.IGNORECASE)
+# gds.* too: prod loads Graph Data Science, whose export procedures write files.
+_CYPHER_PROC_DENY = re.compile(r"\b(dbms|apoc|gds)\s*\.", re.IGNORECASE)
+
+# Clauses that reach OUTSIDE reading the graph. Unlike writes, the read
+# transaction does not stop these — fetching a URL is not a write — so for
+# them this check is the control, not a second layer.
+#
+# `LOAD CSV FROM 'file:///…'` reads the server's disk; `FROM 'http://…'` makes
+# Neo4j request any address it can reach, cluster-internal services included,
+# and hands the body back as rows. PERIODIC COMMIT and IN TRANSACTIONS exist
+# to batch exactly that import (anchored on the subquery's closing brace, so
+# a variable called `transactions` is not mistaken for one). TERMINATE stops
+# other callers' queries.
+_CYPHER_REACH_DENY = re.compile(
+    r"\bLOAD\s+CSV\b"
+    r"|\bPERIODIC\s+COMMIT\b"
+    r"|\}\s*IN\s+(?:[$\w]+\s+)?(?:CONCURRENT\s+)?TRANSACTIONS\b"
+    r"|(?<![.\w$])TERMINATE\b",
+    re.IGNORECASE,
+)
+
+# SHOW is for schema listings only. SHOW SETTINGS discloses the same server
+# configuration dbms.listConfig() did, and SHOW TRANSACTIONS the text and
+# parameters of other callers' queries. An allow-list, because Neo4j keeps
+# adding SHOW commands and a deny-list would not hear about them.
+_CYPHER_SHOW = re.compile(r"(?<![.\w$])SHOW\b", re.IGNORECASE)
+_CYPHER_SHOW_ALLOWED = re.compile(
+    r"SHOW\s+"
+    r"(?:(?:ALL|BUILT|IN|USER|DEFINED|RANGE|FULLTEXT|TEXT|POINT|VECTOR|LOOKUP|"
+    r"NODE|RELATIONSHIP|REL|UNIQUE|UNIQUENESS|EXIST|EXISTENCE|KEY|PROPERTY|PROP|TYPE)\s+)*"
+    r"(?:INDEX|INDEXES|CONSTRAINT|CONSTRAINTS|PROCEDURE|PROCEDURES|FUNCTION|FUNCTIONS)\b",
+    re.IGNORECASE,
+)
 
 
 #: Line-comment markers per language. `#` is deliberately absent: it starts
@@ -71,7 +103,34 @@ _CYPHER_PROC_DENY = re.compile(r"\b(dbms|apoc)\s*\.", re.IGNORECASE)
 _LINE_COMMENT = {"Cypher": ("//",), "SQL": ("--",)}
 
 
-def _strip_noncode(query: str, lang: str) -> str:
+def _literal_end(query: str, start: int, lang: str) -> int:
+    r"""Index of the quote closing the literal opened at ``start``, or -1.
+
+    Cypher strings take backslash escapes, so ``'O\'Brien'`` is ONE string.
+    Ending it at the escaped quote ends it early for this scan but not for the
+    engine, and the stretch up to the next quote is then blanked as "string"
+    while Neo4j executes it:
+
+        WITH 'a\'b' AS x LOAD CSV FROM 'file:///etc/passwd' AS r RETURN r
+
+    Postgres standard strings have no backslash escape, so SQL keeps the plain
+    scan — honouring one there would open the same gap from the other side.
+    Backtick identifiers escape by doubling, never by backslash.
+    """
+    quote = query[start]
+    escapes = lang == "Cypher" and quote != "`"
+    j = start + 1
+    while j < len(query):
+        if escapes and query[j] == "\\":
+            j += 2
+            continue
+        if query[j] == quote:
+            return j
+        j += 1
+    return -1
+
+
+def _strip_noncode(query: str, lang: str, keep_identifiers: bool = False) -> str:
     """The query with comments and string literals blanked out.
 
     For SCANNING only — the engine is always sent the original. A keyword
@@ -92,6 +151,9 @@ def _strip_noncode(query: str, lang: str) -> str:
     the end of the input on an unclosed quote is exactly how a keyword after
     it would be hidden from this scan; such a query cannot parse anyway, so
     the conservative reading costs nothing real.
+
+    ``keep_identifiers`` blanks only the backticks of a quoted identifier and
+    keeps its name, for checks that match on names rather than clauses.
     """
     line_markers = _LINE_COMMENT.get(lang, ())
     out = list(query)
@@ -116,11 +178,14 @@ def _strip_noncode(query: str, lang: str) -> str:
             i = end
             continue
         if ch in ("'", '"', "`"):
-            end = query.find(ch, i + 1)
+            end = _literal_end(query, i, lang)
             if end == -1:
                 break                      # unterminated: leave the rest alone
-            for j in range(i, end + 1):
-                out[j] = " "
+            if ch == "`" and keep_identifiers:
+                out[i] = out[end] = " "
+            else:
+                for j in range(i, end + 1):
+                    out[j] = " "
             i = end + 1
             continue
         i += 1
@@ -146,6 +211,36 @@ def _validate(query: str, forbidden: tuple, lang: str) -> str:
             detail=f"{lang}: write/DDL keyword '{hit}' is not allowed (read-only studio).",
         )
     return query.strip()
+
+
+def _reject_cypher_reach(query: str) -> None:
+    """Refuse Cypher that does more than read the graph it is pointed at.
+
+    Scanned like the keyword check, comments and strings blanked, except that
+    backtick-quoted identifiers keep their names: ``CALL `dbms`.listConfig()``
+    calls the same procedure as ``CALL dbms.listConfig()``, and the backtick
+    between the name and the dot hid it from a check on the raw text.
+    """
+    scannable = _strip_noncode(query, "Cypher", keep_identifiers=True)
+    if _CYPHER_PROC_DENY.search(scannable):
+        raise HTTPException(
+            status_code=400,
+            detail="Cypher: dbms.*/apoc.*/gds.* procedures are not allowed (read-only studio).",
+        )
+    reach = _CYPHER_REACH_DENY.search(scannable)
+    if reach:
+        clause = " ".join(reach.group(0).lstrip("}").split()).upper()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cypher: '{clause}' is not allowed (read-only studio).",
+        )
+    for show in _CYPHER_SHOW.finditer(scannable):
+        if not _CYPHER_SHOW_ALLOWED.match(scannable, show.start()):
+            raise HTTPException(
+                status_code=400,
+                detail="Cypher: only SHOW INDEXES / CONSTRAINTS / PROCEDURES / FUNCTIONS "
+                       "are allowed (read-only studio).",
+            )
 
 
 # ── Bind parameters ─────────────────────────────────────────────────
@@ -300,11 +395,7 @@ def cypher_query(body: Annotated[dict, Body(...)], neo4j: FromDishka[Neo4jClient
     body = body or {}
     query = _validate(body.get("query") or "", _CYPHER_FORBIDDEN, "Cypher")
     params = _validate_params(body.get("params"))
-    if _CYPHER_PROC_DENY.search(query):
-        raise HTTPException(
-            status_code=400,
-            detail="Cypher: dbms.*/apoc.* procedures are not allowed (read-only studio).",
-        )
+    _reject_cypher_reach(query)
 
     def _run(tx):
         # `parameters=` (not **kwargs) so a caller-supplied bind can never
