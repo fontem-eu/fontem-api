@@ -55,7 +55,9 @@ spec:
   # downloading the packages again. Finished Jobs stay until their range is
   # removed from values, which prunes them.
   activeDeadlineSeconds: {{ $.Values.tedBackfill.deadlineSeconds | default 172800 }}
-  backoffLimit: 0
+  # A killed pod (node reboot, eviction) restarts and resumes through the
+  # loader's skip in minutes; with 0 the Job just fails and nobody restarts it.
+  backoffLimit: {{ $.Values.tedBackfill.backoffLimit | default 4 }}
   template:
     metadata:
       labels:
