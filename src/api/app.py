@@ -18,6 +18,7 @@ from dishka.integrations.fastapi import setup_dishka
 from fastapi import FastAPI, Request
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
+from starlette.middleware.gzip import GZipMiddleware
 
 from src.api.di import make_container
 
@@ -93,6 +94,15 @@ app = FastAPI(
     root_path="/api",
     lifespan=_lifespan,
 )
+
+
+# Region names, the catalogue and the data-quality payloads are hundreds of
+# kilobytes of highly repetitive JSON, and nothing in front of this app
+# compresses: /geo/nuts-regions went out as 229 KB where it gzips to 37 KB,
+# and the cross-language search index is 457 KB to 116 KB. No endpoint here
+# streams, so there is no response this can buffer that was not already
+# buffered.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 @app.middleware("http")
