@@ -86,7 +86,7 @@ def _public(response: Response) -> None:
     response.headers["Vary"] = "Accept-Encoding"
 
 
-@router.get("", response_model=ServiceInfo)
+@router.get("")
 def service_info(response: Response) -> ServiceInfo:
     """What this API serves, where each name came from, and how complete it is.
 
@@ -117,7 +117,7 @@ def service_info(response: Response) -> ServiceInfo:
     )
 
 
-@router.get("/regions", response_model=RegionPage)
+@router.get("/regions")
 def list_regions(
     response: Response,
     level: Annotated[int | None, Query(ge=0, le=3, description="NUTS level")] = None,
@@ -185,7 +185,7 @@ def gazetteer(response: Response) -> Response:
                     headers=dict(response.headers))
 
 
-@router.get("/search", response_model=SearchResults)
+@router.get("/search")
 def search_regions(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     response: Response,
     q: Annotated[str, Query(min_length=1, max_length=120,
@@ -217,7 +217,11 @@ def search_regions(  # pylint: disable=too-many-arguments,too-many-positional-ar
     return SearchResults(query=q, lang=language, total=total, matches=matches)
 
 
-@router.get("/regions/{code}", response_model=RegionDetail)
+@router.get("/regions/{code}",
+            responses={404: {"description": "No region with that code in this "
+                                            "NUTS vintage. Codes are retired and "
+                                            "renumbered between vintages — see "
+                                            "`nuts_version` on GET /nuts."}})
 def one_region(code: str, response: Response) -> RegionDetail:
     """One region, its parent chain and its direct children.
 
