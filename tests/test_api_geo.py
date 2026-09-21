@@ -428,6 +428,21 @@ def test_search_index_is_folded():
         cleanup_dishka()
 
 
+def test_large_geo_payloads_are_compressed():
+    """Nothing in front of this app compresses, and these are the largest
+    JSON responses it serves: 229 KB of region names and 457 KB of search
+    terms, both highly repetitive."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        for path in ("/geo/nuts-regions", "/geo/nuts-search-index"):
+            r = client.get(path, headers={"Accept-Encoding": "gzip"})
+            assert r.status_code == 200
+            assert r.headers.get("content-encoding") == "gzip", path
+            assert r.json()      # and it still decodes
+    finally:
+        cleanup_dishka()
+
+
 # ── /geo/nuts-boundaries ───────────────────────────────────────
 
 
