@@ -766,3 +766,119 @@ def test_plain_contract_has_no_before_value():
     }
     out = _source_returning_row(row).get_company_contracts("gmr-1")
     assert out["contracts"][0]["value_before_eur"] is None
+
+
+class TestContractListSorting:
+    """A contract list is ordered by the database, before LIMIT.
+
+    Sorting a page the client already holds cannot be right: the page is
+    the arbitrary slice the database happened to return, so "highest
+    value first" only ranks that slice. These tests pin the ordering
+    where it belongs — in the query — and pin the three properties that
+    made the lists look shuffled: missing data last, a tie-break, and
+    ordering by the projected aliases (RETURN DISTINCT refuses anything
+    else).
+    """
+
+    @staticmethod
+    def _capture(method, **kwargs):
+        """Run a source list method against a mock session; return the query."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            GraphContractSource)
+        src = GraphContractSource(MagicMock())
+        session = MagicMock()
+        session.run.return_value.single.return_value = {
+            "name": "X", "country": "DE", "total": 0, "cnt": 0}
+        session.run.return_value.data.return_value = []
+        src._neo4j.session.return_value.__enter__ = MagicMock(return_value=session)
+        src._neo4j.session.return_value.__exit__ = MagicMock(return_value=False)
+        getattr(src, method)("some-id", **kwargs)
+        return [c.args[0] for c in session.run.call_args_list if "LIMIT" in c.args[0]][0]
+
+    def test_both_endpoints_default_to_most_recent_first(self):
+        """No `sort` means newest award date first — the default the lists
+        are read with."""
+        mock = _mock_contract_source()
+        client = make_test_client(contract_source=mock)
+        assert client.get("/companies/abc/contracts").status_code == 200
+        assert client.get("/authorities/abc/contracts").status_code == 200
+        cleanup_dishka()
+        assert mock.get_company_contracts.call_args.kwargs["sort"] == "recent"
+        assert mock.get_authority_contracts.call_args.kwargs["sort"] == "recent"
+
+    def test_the_requested_sort_reaches_the_source(self):
+        mock = _mock_contract_source()
+        client = make_test_client(contract_source=mock)
+        for sort in ("recent", "oldest", "value_desc", "value_asc"):
+            assert client.get(
+                f"/companies/abc/contracts?sort={sort}").status_code == 200
+            assert mock.get_company_contracts.call_args.kwargs["sort"] == sort
+            assert client.get(
+                f"/authorities/abc/contracts?sort={sort}").status_code == 200
+            assert mock.get_authority_contracts.call_args.kwargs["sort"] == sort
+        cleanup_dishka()
+
+    def test_an_unknown_sort_is_refused(self):
+        """Rejected at the edge rather than silently falling back: a caller
+        asking for an ordering we do not have should hear so."""
+        mock = _mock_contract_source()
+        client = make_test_client(contract_source=mock)
+        resp = client.get("/companies/abc/contracts?sort=cheapest")
+        auth = client.get("/authorities/abc/contracts?sort=cheapest")
+        cleanup_dishka()
+        assert resp.status_code == 422 and auth.status_code == 422
+
+    def test_the_ordering_is_in_the_query_and_precedes_the_limit(self):
+        """Not sorted after the fact: LIMIT must take the top of the
+        ordering, or the page is an arbitrary slice."""
+        for method, key in (("get_company_contracts", "gmr_id"),
+                            ("get_authority_contracts", "authority_id")):
+            for sort in ("recent", "oldest", "value_desc", "value_asc"):
+                query = self._capture(method, sort=sort)
+                assert "ORDER BY" in query, (method, sort)
+                assert query.index("ORDER BY") < query.index("LIMIT"), (method, sort)
+            del key
+
+    def test_every_ordering_puts_missing_data_last(self):
+        """81 of 100 contracts on a real authority carry no value. Nulls
+        first would fill the top of "highest value" with blanks."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            CONTRACT_SORTS)
+        for sort, clause in CONTRACT_SORTS.items():
+            field = "value_eur" if sort.startswith("value") else "award_date"
+            assert clause.startswith(f"ORDER BY {field} IS NULL,"), sort
+
+    def test_every_ordering_ends_in_a_tie_break(self):
+        """Without it, equal rows come back in whatever order the database
+        produced them — the same page, shuffled between loads."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            CONTRACT_SORTS)
+        for sort, clause in CONTRACT_SORTS.items():
+            assert clause.endswith("notice_id"), sort
+
+    def test_the_orderings_name_projected_aliases_only(self):
+        """`RETURN DISTINCT` refuses to order by a property that is not
+        projected, so every clause has to use the aliases."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            CONTRACT_SORTS)
+        allowed = {"award_date", "value_eur", "notice_id"}
+        for sort, clause in CONTRACT_SORTS.items():
+            names = {w for w in clause.replace(",", " ").split()
+                     if w not in {"ORDER", "BY", "IS", "NULL", "DESC", "ASC"}}
+            assert names <= allowed, (sort, names - allowed)
+            assert "ct." not in clause, sort
+
+    def test_an_unknown_sort_falls_back_inside_the_source(self):
+        """The API validates; the source still must not 500 on a typo from
+        an internal caller."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            CONTRACT_SORTS, contract_order_by)
+        assert contract_order_by("nonsense") == CONTRACT_SORTS["recent"]
+        assert contract_order_by(None) == CONTRACT_SORTS["recent"]
+
+    def test_value_orderings_break_ties_by_date(self):
+        """Two contracts of the same value read best newest-first."""
+        from src.data.graph.graph_contract_source import (  # pylint: disable=import-outside-toplevel
+            CONTRACT_SORTS)
+        for sort in ("value_desc", "value_asc"):
+            assert "award_date DESC" in CONTRACT_SORTS[sort]

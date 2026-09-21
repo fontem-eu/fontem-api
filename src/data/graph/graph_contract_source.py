@@ -22,6 +22,39 @@ from .neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
 
+#: How a contract list may be ordered, as ORDER BY clauses over the
+#: projected aliases (ordering by an alias is always legal after
+#: RETURN DISTINCT; ordering by a bare property is not).
+#:
+#: Every clause puts missing data LAST — a contract with no value is the
+#: least useful row to open the list with — and ends on `notice_id` so
+#: equal rows keep a fixed order. Without that tie-break the same page
+#: could come back shuffled, which is what made these lists look
+#: randomly sorted: most rows carry no value at all (81 of 100 on a
+#: typical authority), so "sort by value" left almost everything tied.
+CONTRACT_SORTS = {
+    "recent": "ORDER BY award_date IS NULL, award_date DESC, notice_id",
+    "oldest": "ORDER BY award_date IS NULL, award_date ASC, notice_id",
+    "value_desc": (
+        "ORDER BY value_eur IS NULL, value_eur DESC, award_date DESC, notice_id"
+    ),
+    "value_asc": (
+        "ORDER BY value_eur IS NULL, value_eur ASC, award_date DESC, notice_id"
+    ),
+}
+DEFAULT_CONTRACT_SORT = "recent"
+
+
+def contract_order_by(sort: str | None) -> str:
+    """The ORDER BY clause for `sort`, defaulting to most recent first.
+
+    Unknown values fall back rather than raise: the API validates the
+    parameter, and a data source should not be the thing that 500s on a
+    typo from an internal caller.
+    """
+    return CONTRACT_SORTS.get(sort or DEFAULT_CONTRACT_SORT,
+                              CONTRACT_SORTS[DEFAULT_CONTRACT_SORT])
+
 
 class GraphContractSource(ContractDataSource):
     """Production contract data source backed by Neo4j."""
@@ -31,9 +64,10 @@ class GraphContractSource(ContractDataSource):
 
     def get_company_contracts(
         self, gmr_id: str, years: int = 5, limit: int = 50,
-        lang: str | None = None,
+        lang: str | None = None, sort: str | None = None,
     ) -> dict:
-        """Return contracts awarded to a company."""
+        """Return contracts awarded to a company, most recent first
+        unless `sort` says otherwise (see CONTRACT_SORTS)."""
         auth_name = authority_name_expr("a", lang)
         title_expr = contract_title_expr("ct", lang)
         with self._neo4j.session() as session:
@@ -98,7 +132,7 @@ class GraphContractSource(ContractDataSource):
                 # to Y's profile page.
                 "  a.authority_id AS authority_id, "
                 "  cpv.description AS cpv_description "
-                "ORDER BY ct.publication_date DESC LIMIT $limit",
+                + f" {contract_order_by(sort)} LIMIT $limit",
                 gid=gmr_id, limit=limit,
             ).data()
 
@@ -160,7 +194,7 @@ class GraphContractSource(ContractDataSource):
 
     def get_authority_contracts(
         self, authority_id: str, years: int = 5, limit: int = 50,
-        lang: str | None = None,
+        lang: str | None = None, sort: str | None = None,
     ) -> dict:
         """Return contracts issued by an authority."""
         auth_name = authority_name_expr("a", lang)
@@ -214,7 +248,7 @@ class GraphContractSource(ContractDataSource):
                 "  c.name AS contractor, c.country AS contractor_country, "
                 "  c.gmr_id AS contractor_gmr_id, "
                 "  cpv.description AS cpv_description "
-                "ORDER BY ct.publication_date DESC LIMIT $limit",
+                + f" {contract_order_by(sort)} LIMIT $limit",
                 aid=authority_id, limit=limit,
             ).data()
 
