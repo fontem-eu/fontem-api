@@ -155,10 +155,10 @@ def aggregate(  # pylint: disable=too-many-arguments
             "any entity of that country (e.g. RUS for geopolitical queries)."
         ),
     ),
-    lang: str | None = Query(
-        None, max_length=16,
+    lang: Annotated[str | None, Query(
+        max_length=16,
         description="Language for the region labels (EU-24 code). Default English.",
-    ),
+    )] = None,
     *,
     source: FromDishka[GeoSource],
 ):
@@ -197,10 +197,10 @@ def entity_aggregate(  # pylint: disable=too-many-arguments
             "starts with this prefix (e.g. 'DE' for all German regions)."
         ),
     ),
-    lang: str | None = Query(
-        None, max_length=16,
+    lang: Annotated[str | None, Query(
+        max_length=16,
         description="Language for the region labels (EU-24 code). Default English.",
-    ),
+    )] = None,
     *,
     source: FromDishka[GeoSource],
 ):
@@ -335,10 +335,10 @@ def _regions_from_boundaries(wanted: set[str] | None) -> list[dict]:
 @router.get("/nuts-boundaries")
 def nuts_boundaries(
     level: int = Query(0, ge=0, le=3),
-    lang: str | None = Query(
-        None, max_length=16,
+    lang: Annotated[str | None, Query(
+        max_length=16,
         description="Language for feature names (EU-24 code). Default English.",
-    ),
+    )] = None,
 ):
     """Return bundled GeoJSON boundaries for a NUTS level.
 
