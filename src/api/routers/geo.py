@@ -25,6 +25,7 @@ from src.data import geo_ip
 from src.services.location_service import LocationService
 
 
+from src.api import nuts_gazetteer
 from src.api.agent_tools import agent_tool
 
 router = APIRouter(prefix="/geo", tags=["geo"])
@@ -205,6 +206,7 @@ def entity_aggregate(
         name="list_nuts_regions",
         when="you need the NUTS code for a place before asking for regional statistics",
         group="geography",
+        params=("lang", "codes"),
         core=True),
 )
 def nuts_regions(
@@ -213,19 +215,28 @@ def nuts_regions(
                     "Omit for the full list.",
         max_length=2000,
     )] = None,
+    lang: Annotated[str | None, Query(
+        description="Language for the region names, as an EU-24 code "
+                    "(el, pt, fr...). Unknown or missing means English.",
+        max_length=16,
+    )] = None,
 ):
     """Flat, geometry-free list of NUTS regions across all bundled levels.
 
-    Returns ``{regions: [{code, name, level}]}`` — small enough (~1.8k rows)
-    to power a client-side cascading region picker without downloading the
-    full boundary GeoJSON. Levels/children are derivable from the codes
-    (a child's code is prefixed by its parent's).
+    Returns ``{regions: [{code, name, name_latn, name_native, name_source,
+    level}]}`` — small enough (~1.8k rows) to power a client-side region
+    picker without downloading the boundary GeoJSON. Levels/children are
+    derivable from the codes (a child's code is prefixed by its parent's).
+
+    ``name`` is the region's name in ``lang`` where one is known, else its
+    Latin transliteration, else the national-language name; ``name_source``
+    says which. Eurostat only publishes the last two, so the translations
+    come from the bundled gazetteer — see ``src.etl.build_nuts_gazetteer``
+    for where they come from and how complete they are.
 
     `codes` narrows that to the ones asked for. A caller that needs a
     handful of labels — a feed card naming the region a contract was
-    awarded in — should not pull 1,798 rows to find three of them; the
-    full list is ~91 KB and this endpoint rebuilds it from the boundary
-    files on every request.
+    awarded in — should not pull 1,798 rows to find three of them.
     """
     wanted = None
     if codes is not None:
@@ -236,6 +247,44 @@ def nuts_regions(
         if not wanted:
             return {"regions": []}
 
+    language = nuts_gazetteer.resolve_language(lang)
+    named = nuts_gazetteer.localised(language)
+    if not named:
+        # No gazetteer bundled (a partial image, or a checkout without the
+        # generated file): fall back to the boundary files, which carry the
+        # national-language name and nothing else.
+        return {"regions": _regions_from_boundaries(wanted)}
+
+    out = []
+    for code, entry in named.items():
+        if wanted is not None and code.upper() not in wanted:
+            continue
+        row = {"code": code, "name": entry["name"], "level": entry["level"],
+               "name_latn": entry["name_latn"], "name_native": entry["name_native"],
+               "name_source": entry["name_source"]}
+        out.append(row)
+    out.sort(key=lambda r: (r["level"], nuts_gazetteer.fold(r["name"])))
+    return {"regions": out, "lang": language}
+
+
+@router.get("/nuts-search-index")
+def nuts_search_index():
+    """``{terms: {code: "every name this region answers to"}}``.
+
+    The region picker filters client-side, so it needs the names in all 24
+    languages — not only the one on screen. Somebody reading the site in
+    Portuguese still types "Attica", and a Greek reader still types
+    "Αττική"; both have to hit ``EL3``.
+
+    Terms are folded (lowercased, diacritics stripped) and stripped of any
+    that another term already contains, which keeps the payload to ~130 KB
+    gzipped. Language-independent, so the picker fetches it once.
+    """
+    return {"terms": nuts_gazetteer.search_index()}
+
+
+def _regions_from_boundaries(wanted: set[str] | None) -> list[dict]:
+    """Code/level/name straight from the bundled boundary files."""
     out = []
     for level in range(4):
         path = os.path.abspath(
@@ -249,11 +298,12 @@ def nuts_regions(
             props = feat.get("properties") or {}
             code = props.get("nuts_code")
             if code and (wanted is None or code.upper() in wanted):
-                out.append(
-                    {"code": code, "name": props.get("name") or code, "level": level}
-                )
+                name = (props.get("name") or code).strip()
+                out.append({"code": code, "name": name, "level": level,
+                            "name_latn": "", "name_native": name,
+                            "name_source": "native"})
     out.sort(key=lambda r: (r["level"], r["name"]))
-    return {"regions": out}
+    return out
 
 
 @router.get("/nuts-boundaries")
