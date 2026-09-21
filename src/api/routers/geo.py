@@ -112,6 +112,24 @@ def client_region(request: Request, response: Response) -> dict:
 _BOUNDARIES_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 
+def _localise_labels(rows: list[dict], lang: str | None, key: str = "label") -> list[dict]:
+    """Rewrite region labels in the caller's language, in place.
+
+    The aggregate queries read `region.name` from the graph, which holds
+    Eurostat's Latin transliteration — so a choropleth said "Attiki" and
+    "Voreia Elláda" to a Greek reader and "Kentriki Elláda" to an English
+    one, while the region picker two clicks away said "Attica Region". Same
+    gazetteer, same answer everywhere. A code the gazetteer does not carry
+    (a retired vintage still in the data) keeps the label it came with.
+    """
+    named = nuts_gazetteer.localised(nuts_gazetteer.resolve_language(lang))
+    for row in rows:
+        entry = named.get(row.get("nuts_code") or "")
+        if entry:
+            row[key] = entry["name"]
+    return rows
+
+
 @router.get(
     "/aggregate",
     openapi_extra=agent_tool(
@@ -137,6 +155,10 @@ def aggregate(
             "any entity of that country (e.g. RUS for geopolitical queries)."
         ),
     ),
+    lang: str | None = Query(
+        None, max_length=16,
+        description="Language for the region labels (EU-24 code). Default English.",
+    ),
     *,
     source: FromDishka[GeoSource],
 ):
@@ -155,7 +177,7 @@ def aggregate(
         "metric": metric,
         "scope_nuts": scope_nuts,
         "connected_to_country": connected_to_country,
-        "regions": rows,
+        "regions": _localise_labels(rows, lang),
     }
 
 
@@ -174,6 +196,10 @@ def entity_aggregate(
             "Ancestor NUTS code — restrict results to regions whose code "
             "starts with this prefix (e.g. 'DE' for all German regions)."
         ),
+    ),
+    lang: str | None = Query(
+        None, max_length=16,
+        description="Language for the region labels (EU-24 code). Default English.",
     ),
     *,
     source: FromDishka[GeoSource],
@@ -196,7 +222,7 @@ def entity_aggregate(
         "level": level,
         "metric": metric,
         "scope_nuts": scope_nuts,
-        "regions": rows,
+        "regions": _localise_labels(rows, lang),
     }
 
 
@@ -309,8 +335,18 @@ def _regions_from_boundaries(wanted: set[str] | None) -> list[dict]:
 @router.get("/nuts-boundaries")
 def nuts_boundaries(
     level: int = Query(0, ge=0, le=3),
+    lang: str | None = Query(
+        None, max_length=16,
+        description="Language for feature names (EU-24 code). Default English.",
+    ),
 ):
-    """Return bundled GeoJSON boundaries for a NUTS level."""
+    """Return bundled GeoJSON boundaries for a NUTS level.
+
+    Feature names are localised from the gazetteer, with the Eurostat forms
+    kept alongside as `name_native` and `name_latn`. The files themselves
+    carry only the national-language name — and carry it with Eurostat's
+    stray whitespace, so a map label read "Αττική " with a trailing space.
+    """
     path = os.path.abspath(os.path.join(_BOUNDARIES_DIR, f"nuts{level}.geojson"))
     if not os.path.isfile(path):
         raise HTTPException(
@@ -322,9 +358,18 @@ def nuts_boundaries(
     # Enrich each feature with the country's alpha-3 code (derived from the NUTS
     # 2-letter prefix). Alpha-3 is the platform's canonical country key, so this
     # lets alpha-3 datasets join to boundaries — not only NUTS codes.
+    named = nuts_gazetteer.localised(nuts_gazetteer.resolve_language(lang))
     for feat in data.get("features", []):
-        code = (feat.get("properties") or {}).get("nuts_code") or ""
+        props = feat.get("properties") or {}
+        code = props.get("nuts_code") or ""
         a3 = LocationService.alpha2_to_alpha3(code[:2]) if len(code) >= 2 else None
         if a3:
-            feat["properties"]["country_a3"] = a3
+            props["country_a3"] = a3
+        entry = named.get(code)
+        if entry:
+            props["name"] = entry["name"]
+            props["name_native"] = entry["name_native"]
+            props["name_latn"] = entry["name_latn"]
+        elif props.get("name"):
+            props["name"] = props["name"].strip()
     return data
