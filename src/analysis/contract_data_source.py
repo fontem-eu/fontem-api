@@ -14,19 +14,23 @@ class ContractDataSource(ABC):
     @abstractmethod
     def get_company_contracts(
         self, gmr_id: str, years: int = 5, limit: int = 50,
-        lang: str | None = None,
+        lang: str | None = None, sort: str | None = None,
     ) -> dict:
         """Return contracts awarded to a company. `lang` picks the
         translated Authority name (`name_<lang>`) with a fallback to the
-        original `name` when the translation is missing."""
+        original `name` when the translation is missing. `sort` orders
+        the list server-side — the ordering has to happen before
+        `limit`, or the page is an arbitrary slice that the caller then
+        sorts among itself."""
 
     @abstractmethod
     def get_authority_contracts(
         self, authority_id: str, years: int = 5, limit: int = 50,
-        lang: str | None = None,
+        lang: str | None = None, sort: str | None = None,
     ) -> dict:
         """Return contracts issued by an authority. `lang` → translated
-        name coalesced with the stored original."""
+        name coalesced with the stored original. `sort` orders the list
+        server-side, before `limit` applies."""
 
     @abstractmethod
     def get_contract_detail(

@@ -7,7 +7,7 @@ contract detail, sector summary, and unified search.
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from dishka.integrations.fastapi import FromDishka, inject
@@ -30,20 +30,35 @@ from src.api.agent_tools import agent_tool
 
 router = APIRouter(tags=["contracts"])
 
+#: Orderings a contract list accepts. Declared as a Literal so FastAPI
+#: rejects anything else at the edge and OpenAPI (and the agent tool
+#: description) lists the four by name.
+ContractSort = Literal["recent", "oldest", "value_desc", "value_asc"]
+
+_SORT_DOC = (
+    "Ordering: `recent` (default, newest award date first), `oldest`, "
+    "`value_desc` (largest contract value first) or `value_asc`. "
+    "Contracts with no date, or no value, sort last in every order. "
+    "Applied before `limit`, so the page is the top N of the whole "
+    "list rather than an arbitrary slice sorted afterwards."
+)
+
 
 @router.get(
     "/companies/{gmr_id}/contracts",
     openapi_extra=agent_tool(
         name="company_contracts",
         when="the user asks what a specific company won, after you have its id",
+        params=("limit", "sort"),
         group="contracts"),
 )
 @inject
-def company_contracts(
+def company_contracts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     gmr_id: str,
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
     lang: str | None = Query(None),
+    sort: ContractSort = Query("recent", description=_SORT_DOC),
     *,
     source: FromDishka[ContractDataSource],
 ):
@@ -51,7 +66,7 @@ def company_contracts(
     translated Authority name when available, falls back to the stored
     original."""
     return source.get_company_contracts(
-        gmr_id, years=years, limit=limit, lang=safe_lang(lang),
+        gmr_id, years=years, limit=limit, lang=safe_lang(lang), sort=sort,
     )
 
 
@@ -144,20 +159,22 @@ def company_profile(
     openapi_extra=agent_tool(
         name="authority_contracts",
         when="the user asks what a public buyer purchased, after you have its id",
+        params=("limit", "sort"),
         group="contracts"),
 )
 @inject
-def authority_contracts(
+def authority_contracts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     authority_id: str,
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
     lang: str | None = Query(None),
+    sort: ContractSort = Query("recent", description=_SORT_DOC),
     *,
     source: FromDishka[ContractDataSource],
 ):
     """Contracts issued by an authority."""
     return source.get_authority_contracts(
-        authority_id, years=years, limit=limit, lang=safe_lang(lang),
+        authority_id, years=years, limit=limit, lang=safe_lang(lang), sort=sort,
     )
 
 
