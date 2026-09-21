@@ -58,7 +58,7 @@ def company_contracts(  # pylint: disable=too-many-arguments,too-many-positional
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
     lang: str | None = Query(None),
-    sort: ContractSort = Query("recent", description=_SORT_DOC),
+    sort: Annotated[ContractSort, Query(description=_SORT_DOC)] = "recent",
     *,
     source: FromDishka[ContractDataSource],
 ):
@@ -168,7 +168,7 @@ def authority_contracts(  # pylint: disable=too-many-arguments,too-many-position
     years: int = Query(5, ge=1, le=20),
     limit: int = Query(50, ge=1, le=200),
     lang: str | None = Query(None),
-    sort: ContractSort = Query("recent", description=_SORT_DOC),
+    sort: Annotated[ContractSort, Query(description=_SORT_DOC)] = "recent",
     *,
     source: FromDishka[ContractDataSource],
 ):
