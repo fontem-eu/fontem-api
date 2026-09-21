@@ -40,9 +40,13 @@ def test_the_listing_omits_bodies():
 
 
 def test_the_listing_is_grouped_so_a_model_can_choose():
+    """Grouped by section, and by the sections the manifest actually holds —
+    pinning the names here only means editing this test every time an article
+    is added, which says nothing about the grouping working."""
     body = client.get("/help").json()
     assert body["count"] == len(docs.all_articles())
-    assert set(body["sections"]) == {"Data Studio", "Data stores"}
+    assert set(body["sections"]) == {a.section for a in docs.all_articles()}
+    assert len(body["sections"]) > 1
 
 
 def test_one_article_comes_back_whole():

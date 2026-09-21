@@ -22,10 +22,10 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from src.analysis.geo_source import GeoSource
 from src.data import eu_gate as eu_gate_policy
 from src.data import geo_ip
+from src.data import nuts_gazetteer
 from src.services.location_service import LocationService
 
 
-from src.api import nuts_gazetteer
 from src.api.agent_tools import agent_tool
 
 router = APIRouter(prefix="/geo", tags=["geo"])

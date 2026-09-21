@@ -55,6 +55,7 @@ from src.api.routers.sparql import router as sparql_router
 from src.api.routers.search import router as search_router
 from src.api.routers.schema import router as schema_router
 from src.atlas_api import build_router as build_atlas_router
+from src.nuts_api import build_router as build_nuts_router
 from src.atlas_api.app import _attach_state as attach_atlas_state
 
 
@@ -163,6 +164,12 @@ app.include_router(schema_router)
 # a standalone service later — see src/atlas_api/README.md.
 attach_atlas_state(app)
 app.include_router(build_atlas_router(), prefix="/atlas", tags=["atlas"])
+
+# NUTS reference API — the region names in all 24 EU languages, published for
+# other people's code rather than only our own frontend. Self-contained and
+# stateless (it reads a bundled artifact), and it carries its own /nuts prefix
+# because that prefix is part of what callers depend on.
+app.include_router(build_nuts_router())
 
 # Expose Prometheus metrics at /metrics (scraped by ServiceMonitor)
 Instrumentator().instrument(app).expose(app)
