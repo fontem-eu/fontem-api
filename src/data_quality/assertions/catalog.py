@@ -438,6 +438,7 @@ ASSERTIONS: list[Assertion] = [
         "Modification notices resolve to their award's entity", WARN, "cypher",
         "MATCH (m:Notice) WHERE m.notice_type = 'can-modif' "
         "AND m.modifies_publication_number IS NOT NULL "
+        "AND coalesce(m.back_link_status, '') <> 'rejected' "
         "WITH m, CASE WHEN m.modifies_publication_number =~ '[0-9a-f-]{36}-[0-9]+' "
         "THEN left(m.modifies_publication_number, 36) END AS ref_uuid, "
         "CASE WHEN m.modifies_publication_number =~ '[0-9]+-[0-9]{4}' "
@@ -452,7 +453,52 @@ ASSERTIONS: list[Assertion] = [
         "A back-link is a TED publication number or the award's versioned "
         "notice UUID; both are seekable since the 2026-09-12 indexes. A "
         "resolvable back-link whose award carries a different contract_key "
-        "is one real contract counted twice. Baseline 11,349.",
+        "is one real contract counted twice. Baseline 11,349. A back-link "
+        "the sink REJECTED (a buyer's typo naming another country's "
+        "contract; fontem-neo4j-sink plausibility.py) is excluded: keeping "
+        "those two apart is the correct outcome, and "
+        "grain.rejected_back_link_still_joined watches them instead.",
+    ),
+    Assertion(
+        "grain.rejected_back_link_still_joined", GRAIN,
+        "A rejected back-link joins nothing", WARN, "cypher",
+        "MATCH (m:Notice { back_link_status: 'rejected' }) "
+        "WITH m, CASE WHEN m.modifies_publication_number =~ '[0-9]+-[0-9]{4}' "
+        "THEN m.modifies_publication_number END AS ref_pub, "
+        "coalesce(m.modifies_notice_id, CASE WHEN m.modifies_publication_number "
+        "=~ '[0-9a-f-]{36}-[0-9]+' THEN left(m.modifies_publication_number, 36) END) "
+        "AS ref_uuid "
+        "OPTIONAL MATCH (a1:Notice {ted_notice_id: ref_uuid}) "
+        "OPTIONAL MATCH (a2:Notice {ted_publication_number: ref_pub}) "
+        "WITH m, coalesce(a1, a2) AS a "
+        "RETURN count(*) AS total, "
+        "sum(CASE WHEN a IS NOT NULL AND (EXISTS { (m)-[:MODIFIES]->(a) } OR "
+        "EXISTS { (m)-[:NOTICE_OF]->(:Contract)<-[:NOTICE_OF]-(a) }) "
+        "THEN 1 ELSE 0 END) AS violations",
+        zero_violations("rejected back-links that still join two notices"),
+        "81781-2024, a Bulgarian lift-maintenance contract, publishes that it "
+        "modifies 037303-2022, a DB Netz rail notice; trusting it put 568 "
+        "German notices on a Bulgarian university's contract (190 entities "
+        "fused this way, rebuilt 2026-09-21 with `python -m "
+        "neo4j_sink.repair_chains`). The sink now refuses a back-link when "
+        "nothing carries over and the countries differ. A violation here "
+        "means a refused pair shares an entity or a MODIFIES edge again: "
+        "run repair_chains scan.",
+    ),
+    Assertion(
+        "grain.doubtful_back_links", GRAIN,
+        "Back-links with nothing in common stay rare", WARN, "cypher",
+        "MATCH (m:Notice { back_link_status: 'doubtful' }) "
+        "RETURN count(m) AS doubtful",
+        le_threshold("doubtful", 2000, "doubtful back-links"),
+        "Same country, but no procedure, buyer, contractor or title in "
+        "common. Kept linked on purpose — most are real contracts our entity "
+        "matching failed to recognise (Stuttgart 21 lots under a consortium's "
+        "name) and splitting them would under-report value — but some are "
+        "wrong numbers. Measured at 0.4 % of links (about 1,000 once every "
+        "notice has been through the link step); the ceiling is twice that. "
+        "Over it, either matching got worse or a producer started emitting "
+        "bad back-links.",
     ),
     Assertion(
         "grain.modification_only_entities", GRAIN,
