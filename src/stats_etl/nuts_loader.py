@@ -100,7 +100,11 @@ def run(version: str = "2024", src_dir: pathlib.Path | None = None) -> int:
                         "code": code,
                         "level": props.get("LEVL_CODE", level),
                         "name": props.get("NAME_LATN") or props.get("NUTS_NAME"),
-                        "name_native": props.get("NAME"),
+                        # GISCO calls the national-language name NUTS_NAME.
+                        # Reading "NAME" — which no GISCO file has — left
+                        # name_native NULL for all 1797 rows, and the graph
+                        # inherited the hole from here.
+                        "name_native": props.get("NUTS_NAME") or props.get("NAME"),
                         "parent": parent_code(code),
                         "country": (country_of(code) or "??").upper(),
                         "wkt": wkt,

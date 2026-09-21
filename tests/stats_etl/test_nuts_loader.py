@@ -158,6 +158,23 @@ def test_run_falls_back_to_nuts_name_when_latin_is_absent(tmp_path):
     assert cur.execute.call_args.args[1]["name"] == "Ελλάδα"
 
 
+def test_run_stores_the_national_language_name_as_native(tmp_path):
+    """GISCO calls it NUTS_NAME. Reading "NAME" — a property no GISCO file
+    has — left name_native NULL for all 1797 rows, and the graph inherited
+    the hole, which is why the region picker had no Greek names to search."""
+    _write_levels(tmp_path, {
+        0: [], 1: [{"properties": {"NUTS_ID": "EL3", "LEVL_CODE": 1,
+                                   "NAME_LATN": "Attiki",
+                                   "NUTS_NAME": "Αττική"},
+                    "geometry": _square()}],
+        2: [], 3: [],
+    })
+    _, cur, _ = _run_with(tmp_path)
+    params = cur.execute.call_args[0][1]
+    assert params["name"] == "Attiki"
+    assert params["name_native"] == "Αττική"
+
+
 def test_run_skips_features_without_a_code_or_geometry(tmp_path):
     """A feature with no NUTS_ID has no primary key, and one whose geometry
     will not coerce would insert NULL into a NOT NULL column."""

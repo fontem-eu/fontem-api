@@ -254,12 +254,15 @@ def test_nuts_regions_empty_codes_means_none_not_everything():
         cleanup_dishka()
 
 
+_ROW_FIELDS = {"code", "name", "level", "name_latn", "name_native", "name_source"}
+
+
 def test_nuts_regions_without_the_filter_is_unchanged():
     client = make_test_client(geo_source=_mock_geo_source([]))
     try:
         regions = client.get("/geo/nuts-regions").json()["regions"]
         assert len(regions) > 100
-        assert set(regions[0]) == {"code", "name", "level"}
+        assert set(regions[0]) == _ROW_FIELDS
     finally:
         cleanup_dishka()
 
@@ -271,15 +274,156 @@ def test_nuts_regions_returns_flat_list_all_levels():
         assert r.status_code == 200
         regions = r.json()["regions"]
         assert isinstance(regions, list) and len(regions) >= 30
-        # each row is a lightweight code/name/level record (no geometry)
+        # each row is a lightweight name record (no geometry)
         row = regions[0]
-        assert set(row) == {"code", "name", "level"}
+        assert set(row) == _ROW_FIELDS
         levels = {x["level"] for x in regions}
         assert 0 in levels
         # a child code is prefixed by its parent (hierarchy derivable client-side)
         codes = {x["code"] for x in regions}
         children = [c for c in codes if len(c) == 3]
         assert any(c[:2] in codes for c in children)
+    finally:
+        cleanup_dishka()
+
+
+# ── /geo/nuts-regions: names in the 24 languages ───────────────
+
+
+def _by_code(client, query=""):
+    rows = client.get(f"/geo/nuts-regions{query}").json()["regions"]
+    return {r["code"]: r for r in rows}
+
+
+def test_nuts_regions_are_named_in_the_requested_language():
+    """The picker is unusable otherwise.
+
+    Eurostat names EL3 only as "Αττική" and "Attiki", so a reader looking
+    for Attica in English, French or Portuguese has nothing to recognise —
+    which is the bug this endpoint's gazetteer exists to fix.
+    """
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        assert _by_code(client, "?lang=en")["EL3"]["name"] == "Attica Region"
+        assert _by_code(client, "?lang=el")["EL3"]["name"] == "Περιφέρεια Αττικής"
+        assert "Attique" in _by_code(client, "?lang=fr")["EL3"]["name"]
+        assert _by_code(client, "?lang=el")["EL"]["name"] == "Ελλάδα"
+        assert _by_code(client, "?lang=pt")["EL"]["name"] == "Grécia"
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_echoes_the_language_it_resolved():
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        assert client.get("/geo/nuts-regions?lang=pt-BR").json()["lang"] == "pt"
+        # Not an EU-24 language, and not a language at all: English, not a 422.
+        # This endpoint is public and agents send whatever they have.
+        assert client.get("/geo/nuts-regions?lang=zz").json()["lang"] == "en"
+        assert client.get("/geo/nuts-regions").json()["lang"] == "en"
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_keeps_both_eurostat_names_on_every_row():
+    """The transliteration is what makes an untranslated region findable,
+    and the national-language name is the one on the official documents."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        rows = _by_code(client, "?lang=en")
+        assert rows["EL3"]["name_native"] == "Αττική"
+        assert rows["EL3"]["name_latn"] == "Attiki"
+        assert rows["EL3"]["name_source"] == "en"
+        # No translation for this one — it falls back to the transliteration.
+        assert rows["EL303"]["name"] == "Kentrikos Tomeas Athinon"
+        assert rows["EL303"]["name_source"] == "latn"
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_prefers_the_national_name_for_its_own_readers():
+    """A Greek reader wants Κεντρικός Τομέας Αθηνών, not a transliteration
+    of it — the Latin form is a fallback for everyone else."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        row = _by_code(client, "?lang=el")["EL303"]
+        assert row["name"] == "Κεντρικός Τομέας Αθηνών"
+        assert row["name_source"] == "native"
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_names_are_clean():
+    """Eurostat ships trailing and doubled spaces, and two Greek names that
+    start with a LATIN capital A — which makes them unfindable in Greek."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        rows = _by_code(client)
+        assert rows["EL3"]["name_native"] == "Αττική"          # was "Αττική "
+        assert rows["EL30"]["name_native"].startswith("\u0391")  # GREEK ALPHA
+        assert rows["EL51"]["name_native"].startswith("\u0391")
+        for row in rows.values():
+            for field in ("name", "name_latn", "name_native"):
+                value = row[field]
+                assert value == value.strip() and "  " not in value
+    finally:
+        cleanup_dishka()
+
+
+def test_nuts_regions_filter_still_works_with_a_language():
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        rows = _by_code(client, "?codes=EL3,PT1A0&lang=fr")
+        assert set(rows) == {"EL3", "PT1A0"}
+        assert "Lisbonne" in rows["PT1A0"]["name"]
+    finally:
+        cleanup_dishka()
+
+
+# ── /geo/nuts-search-index ─────────────────────────────────────
+
+
+def test_search_index_covers_every_region_the_list_offers():
+    """A region missing from the index can only be found by the name on
+    screen — which is the state this whole change exists to leave behind."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        listed = {r["code"] for r in client.get("/geo/nuts-regions").json()["regions"]}
+        terms = client.get("/geo/nuts-search-index").json()["terms"]
+        assert listed <= set(terms)
+        assert all(terms[c] for c in listed)
+    finally:
+        cleanup_dishka()
+
+
+def test_search_index_carries_the_other_languages_names():
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        terms = client.get("/geo/nuts-search-index").json()["terms"]
+        assert "attica" in terms["EL3"]
+        assert "attiki" in terms["EL3"]
+        assert "αττικη" in terms["EL3"]
+        # Lisbon's region was renumbered in NUTS 2024, so its translations
+        # are inherited from the code it replaced (PT170).
+        for form in ("lisboa", "lisbonne", "lissabon"):
+            assert form in terms["PT1A0"], form
+        # A NUTS 3 unit with no translations at all still answers to the
+        # metro region it belongs to.
+        assert "athina" in terms["EL303"]
+    finally:
+        cleanup_dishka()
+
+
+def test_search_index_is_folded():
+    """The web app matches folded query against these verbatim, so an
+    unfolded term would simply never match."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        terms = client.get("/geo/nuts-search-index").json()["terms"]
+        assert "bergstrasse" in terms["DE715"] and "ß" not in terms["DE715"]
+        for value in list(terms.values())[:200]:
+            assert value == value.lower()
+            assert "  " not in value
     finally:
         cleanup_dishka()
 
