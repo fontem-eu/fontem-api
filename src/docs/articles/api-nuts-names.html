@@ -1,0 +1,46 @@
+<h1>Region names in 24 languages (public API)</h1>
+<p>Eurostat names each NUTS region twice: in the national language
+(<code>Αττική</code>) and transliterated into Latin (<code>Attiki</code>).
+Nobody publishes all 24 official languages. We assemble them, so
+<code>/nuts</code> answers both "what is EL3 called in French" and "which
+region is <em>Lisbonne</em>".</p>
+<h2>Endpoints</h2>
+<ul>
+  <li><code>GET /api/nuts</code> — vintage, build date, languages, coverage
+      per language and per level, sources and licence. Read this first.</li>
+  <li><code>GET /api/nuts/regions?level=&amp;country=&amp;limit=&amp;offset=</code>
+      — every region with all its known names, ordered by code.</li>
+  <li><code>GET /api/nuts/regions/{code}</code> — one region, its ancestor
+      chain and its direct children.</li>
+  <li><code>GET /api/nuts/search?q=&amp;lang=&amp;level=&amp;country=</code>
+      — a name in any of the 24 languages, or a code, to regions. Each hit
+      reports which form matched and in which language.</li>
+  <li><code>GET /api/nuts/gazetteer.json</code> — the whole artifact, for
+      keeping a local copy.</li>
+  <li><code>GET /api/nuts/regions.csv</code> — one row per region per name:
+      <code>code,level,country,parent,language,name,kind</code>.</li>
+</ul>
+<h2>What a record holds</h2>
+<p><code>code</code>, <code>level</code>, <code>country</code>,
+<code>parent</code>, <code>name_native</code> and <code>name_latn</code> (the
+two Eurostat forms), <code>names</code> (a name per language, only for the
+languages one is known in), <code>aliases</code>, and <code>sources</code> —
+which of Eurostat, the EU Publications Office or Wikidata that record's names
+came from.</p>
+<h2>Coverage is uneven, and says so</h2>
+<p>About 86% of the 1,798 regions carry at least one translation, averaging
+roughly 16 of the 24 languages; it is thinnest at NUTS 3 and in Maltese. A
+region with no translation falls back to its transliteration, which is what
+makes it findable at all. Machine translation is not used: it invents
+plausible place names, and a wrong name is worse than an untranslated one.</p>
+<h2>Search notes</h2>
+<p>Matching ignores case and accents, and treats Greek final sigma and German
+ß the way the index does, so <code>αττικη</code> finds <code>Αττική</code> and
+<code>bergstrasse</code> finds <code>Bergstraße</code>. Names of regions, not
+of settlements: a NUTS 3 unit is findable by the metro region Eurostat gives
+it (<code>Athina</code>), but there is no city gazetteer behind this.</p>
+<h2>Terms</h2>
+<p>CC BY 4.0, attributing Fontem and the upstream sources listed in
+<code>sources</code>. Names only — no boundary geometry is served here, so the
+EuroGeographics terms on Eurostat's boundary files do not apply to these
+responses. Boundaries stay on <code>/api/geo/nuts-boundaries</code>.</p>

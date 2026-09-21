@@ -71,7 +71,7 @@ LANGUAGES = (
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 POLYGONS_DIR = REPO_ROOT / "data" / "nuts" / "polygons"
 BUNDLED_DIR = REPO_ROOT / "src" / "api" / "data"
-OUTPUT_PATH = BUNDLED_DIR / "nuts_names.json"
+OUTPUT_PATH = REPO_ROOT / "src" / "data" / "nuts" / "nuts_names.json"
 
 EUVOC_SPARQL = "https://publications.europa.eu/webapi/rdf/sparql"
 WIKIDATA_SPARQL = "https://qlever.dev/api/wikidata"

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from src.api import nuts_gazetteer
+from src.data import nuts_gazetteer
 from src.etl import build_nuts_gazetteer as builder
 
 
