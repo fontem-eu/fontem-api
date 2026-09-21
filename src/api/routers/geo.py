@@ -138,7 +138,7 @@ def _localise_labels(rows: list[dict], lang: str | None, key: str = "label") -> 
         group="geography"),
 )
 @inject
-def aggregate(
+def aggregate(  # pylint: disable=too-many-arguments
     level: int = Query(0, ge=0, le=3, description="NUTS level (0–3)"),
     metric: str = Query(
         "companies",
@@ -183,7 +183,7 @@ def aggregate(
 
 @router.get("/entity/{entity_id}/aggregate")
 @inject
-def entity_aggregate(
+def entity_aggregate(  # pylint: disable=too-many-arguments
     entity_id: str,
     level: int = Query(0, ge=0, le=3, description="NUTS level (0–3)"),
     metric: str = Query(
