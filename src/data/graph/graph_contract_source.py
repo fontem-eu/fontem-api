@@ -7,6 +7,7 @@ and CPV nodes via the graph.
 from __future__ import annotations
 
 import logging
+from itertools import zip_longest
 
 from fontem_event_schemas.integrity import contract_red_flags
 
@@ -219,8 +220,17 @@ class GraphContractSource(ContractDataSource):
                 # contract, so the row's authority fields stay truthful.
                 identity_class("Authority", "authority_id", param="aid",
                                out="a")
-                + "MATCH (a)-[:AWARDED]->(ct:Contract)"
-                "-[:AWARDED_TO]->(c:Company) "
+                + "MATCH (a)-[:AWARDED]->(ct:Contract) "
+                # The supplier is optional, as on the detail page: a
+                # contract whose only supplier the cleaning stage
+                # withheld (data-backlog Part 5, C2 - the name field
+                # held a sentence, a URL, a placeholder) has no
+                # AWARDED_TO edge, and an inner MATCH dropped it from
+                # the rows while the totals below still counted it, so
+                # a buyer's page summed contracts the list never showed.
+                # The row keeps contractor null and carries the withheld
+                # count, which is what the UI labels.
+                "OPTIONAL MATCH (ct)-[:AWARDED_TO]->(c:Company) "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
                 "RETURN DISTINCT ct.ted_notice_id AS notice_id, "
                 "  ct.ted_publication_number AS publication_number, "
@@ -247,6 +257,7 @@ class GraphContractSource(ContractDataSource):
                 "  ct.ted_url AS ted_url, "
                 "  c.name AS contractor, c.country AS contractor_country, "
                 "  c.gmr_id AS contractor_gmr_id, "
+                "  ct.suppliers_withheld_count AS supplier_withheld_count, "
                 "  cpv.description AS cpv_description "
                 + f" {contract_order_by(sort)} LIMIT $limit",
                 aid=authority_id, limit=limit,
@@ -297,6 +308,12 @@ class GraphContractSource(ContractDataSource):
                 "contractor": r["contractor"],
                 "contractor_country": r["contractor_country"],
                 "contractor_gmr_id": r["contractor_gmr_id"],
+                # How many suppliers the notice named that the cleaning
+                # stage refused to mint a company for. Non-zero with a
+                # null contractor is "supplier not disclosed in the
+                # notice"; a row written before the cleaning stage
+                # carries no count at all, which reads as zero.
+                "supplier_withheld_count": r.get("supplier_withheld_count") or 0,
             })
 
         return {
@@ -368,7 +385,15 @@ class GraphContractSource(ContractDataSource):
 
         The awardee is optional: a contract with no AWARDED_TO edge is
         still a contract, and the briefing feed lists those as awarded to
-        "an undisclosed supplier".
+        "an undisclosed supplier". Since the cleaning stage (data-backlog
+        Part 5, C2) the contract also says WHY there is nobody to link:
+        ``suppliers_withheld`` lists the names the notice published that
+        the cleaner refused to mint a company for (a sentence, a URL, a
+        placeholder in the name field), each with the rule that withheld
+        it, and ``supplier_not_disclosed`` is true when that list is the
+        only trace of a supplier - no company was named, so the honest
+        reading is "not disclosed in the notice", raw text kept as a
+        pointer to where the real award was published.
         """
         with self._neo4j.session() as session:
             row = session.run(
@@ -389,6 +414,12 @@ class GraphContractSource(ContractDataSource):
             return None
         ct = row["ct"]
         auth_node = row["a"]
+        contractor = {
+            "gmr_id": row["c"]["gmr_id"],
+            "name": row["c"]["name"],
+            "country": row["c"].get("country"),
+        } if row["c"] is not None else None
+        suppliers_withheld = self._withheld_suppliers(ct)
         # Full-node projection — coalesce in Python. `lang` is already
         # whitelisted by the handler via safe_lang(), so the dynamic key
         # lookup is safe.
@@ -425,16 +456,41 @@ class GraphContractSource(ContractDataSource):
                 "name": auth_name,
                 "country": auth_node.get("country"),
             },
-            "contractor": {
-                "gmr_id": row["c"]["gmr_id"],
-                "name": row["c"]["name"],
-                "country": row["c"].get("country"),
-            } if row["c"] is not None else None,
+            "contractor": contractor,
+            "suppliers_withheld": suppliers_withheld,
+            "supplier_not_disclosed": contractor is None and bool(suppliers_withheld),
+            # Cleaning-stage marks (Part 5): the ids of the rules that
+            # fired on this notice, and why a value was quarantined
+            # rather than read. Empty / null when the contract predates
+            # the cleaning stage or nothing fired.
+            "cleaning_rules": list(ct.get("cleaning_rules") or []),
+            "value_quarantine_reason": ct.get("value_quarantine_reason"),
             # Tender-integrity: the raw eForms fields + the shared keystone's
             # derived red flags (single-bidder etc.), computed on the fly so
             # the detail page works even before the sink re-materialises them.
             "integrity": self._integrity_block(ct),
         }
+
+    @staticmethod
+    def _withheld_suppliers(ct) -> list[dict]:
+        """The names the notice published that the cleaning stage
+        withheld, as ``[{name_raw, reason}]``.
+
+        The sink stores them as two parallel lists in payload order
+        (Neo4j holds no list of maps): ``suppliers_withheld_names[i]``
+        was withheld for ``suppliers_withheld_reasons[i]``, a rule id
+        such as ``it.notice_text_in_supplier_name``. Absent lists read
+        as nothing withheld; a reason the sink wrote as '' (or a list
+        that fell short) reads as an unknown reason rather than a
+        misaligned one, and a nameless entry has nothing to show.
+        """
+        names = ct.get("suppliers_withheld_names") or []
+        reasons = ct.get("suppliers_withheld_reasons") or []
+        return [
+            {"name_raw": name, "reason": reason or None}
+            for name, reason in zip_longest(names, reasons)
+            if name
+        ]
 
     @staticmethod
     def _integrity_block(ct) -> dict:
