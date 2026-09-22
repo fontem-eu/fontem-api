@@ -449,8 +449,10 @@ def main(argv=None):  # pylint: disable=too-many-locals
     graph_iri = "http://data.fontem.eu/graph/sanctions"
     written = 0
 
-    # Chunked: ~6,200 per run; the review-candidate batch below stays unchunked, it emits tens. One round trip per 1000 rows
-    # instead of per event (fontem-events 0.7.0).
+    # Chunked: ~6,200 events per run. One round trip per 1000 rows
+    # instead of per event (fontem-events 0.7.0). The review-candidate
+    # batch in _emit_review_candidates stays unchunked on purpose — it
+    # emits tens of events, so chunking it would be churn.
     with log.batch(batch_id, producer="load_eu_sanctions", chunk=1000) as emit:
         emit.control(
             "BeginGraphReplace",

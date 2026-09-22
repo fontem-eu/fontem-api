@@ -361,8 +361,9 @@ def emit_listings(
             return 0
         batch_id = uuid.uuid4()
         n = 0
-        # Chunked: ~123,000 per nightly run over the seven-day delta window. One round trip per 1000 rows
-        # instead of per event (fontem-events 0.7.0).
+        # Chunked: ~123,000 per nightly run over the seven-day delta
+        # window. One round trip per 1000 rows instead of per event
+        # (fontem-events 0.7.0).
         with log.batch(batch_id, producer="load_firds", chunk=1000) as emit:
             for rec in buf:
                 emit.upsert(
