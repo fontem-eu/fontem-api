@@ -34,6 +34,7 @@ from __future__ import annotations
 
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -55,13 +56,19 @@ from eforms.parser import parse as parse_notice_xml
 from eforms.stream import stream_notices
 
 from src.data.ted_raw_store import TedRawStore, TedPackageStore
+from src.data_quality.peer_value_stats import load_peer_stats_from_env
 from src.etl.data_description import DataDescription
 from ..services.currency.client import CurrencyClient
 from ..services.location_service import LocationService
 from ._http import HTTP_HEADERS
 from ._http_retry import call_with_retry
+from .cleaning import (
+    CleaningReport, Lookups, Quarantine, Rescale, ValueFacts, run_stage,
+)
+from .cleaning.adapter import facts_from_notice, integer, number, text
+from .cleaning.rules.dates import is_placeholder_day
 from .contract_confidence import score_contract_value
-from .scale_normalization import normalize_scale
+from .dry_run_log import DryRunEventLog
 from . import value_review_queue
 from .ted_matcher import TedMatcher
 from . import ted_search
@@ -113,7 +120,9 @@ def _as_day(raw: str | None) -> str | None:
         _date.fromisoformat(day)
     except ValueError:
         return None
-    if day.startswith(("2000-01-01", "1900-01-01")):
+    # Counted per notice by the cleaning stage's generic.date_placeholder
+    # rule; the typed field still drops the sentinel exactly as before.
+    if is_placeholder_day(day):
         return None
     return day
 
@@ -312,15 +321,23 @@ def _identity_property(procedure_id, publication_number) -> str | None:
 
 
 @dataclass
-class IngestContext:
+class IngestContext:  # pylint: disable=too-many-instance-attributes
     """What every notice of one run shares: the matcher (reads Neo4j for
     stable gmr_ids), the currency service, the per-run parent dedup
-    sets, and whether already-loaded notices are re-emitted."""
+    sets, whether already-loaded notices are re-emitted, and the
+    cleaning stage's injected data + report accumulator."""
     matcher: TedMatcher
     currency_svc: CurrencyClient | None = None
     seen_authorities: set = field(default_factory=set)
     seen_companies: set = field(default_factory=set)
     rescore: bool = False
+    lookups: Lookups | None = None
+    report: CleaningReport | None = None
+    # A dry run writes nothing anywhere: no review-queue rows either.
+    dry_run: bool = False
+    # UpsertFrameworkAgreement is emitted only once the sink that
+    # understands it is deployed (EMIT_FRAMEWORK_AGREEMENTS).
+    emit_frameworks: bool = False
 
 
 _TRANSIENT_RETRIES = 4
@@ -352,6 +369,8 @@ def ingest_notice(notice, session, log: EventLog, ctx: IngestContext) -> str:
                 _emit_notice(
                     notice, emit, ctx.matcher,
                     ctx.seen_authorities, ctx.seen_companies, ctx.currency_svc,
+                    lookups=ctx.lookups, report=ctx.report,
+                    dry_run=ctx.dry_run, emit_frameworks=ctx.emit_frameworks,
                 )
             return "emitted"
         except TransientError as exc:
@@ -366,12 +385,17 @@ def ingest_notice(notice, session, log: EventLog, ctx: IngestContext) -> str:
     return "emitted"  # unreachable; keeps the type checker honest
 
 
-def load_contracts(
+def load_contracts(  # pylint: disable=too-many-arguments,too-many-locals
     driver,
     log: EventLog,
     archive_path: Path,
     currency_svc: CurrencyClient | None = None,
     rescore: bool = False,
+    *,
+    lookups: Lookups | None = None,
+    report: CleaningReport | None = None,
+    dry_run: bool = False,
+    emit_frameworks: bool = False,
 ):
     """Discover notices in a TED monthly archive and ingest each one.
 
@@ -379,7 +403,9 @@ def load_contracts(
     its contract exactly as one found through the search API would,
     because both go through :func:`ingest_notice`. ``rescore`` bypasses
     the already-loaded skip so every notice is re-emitted (the sinks
-    MERGE, so values overwrite in place)."""
+    MERGE, so values overwrite in place). A ``dry_run`` implies it: the
+    point of a dry run is to report what the cleaning stage would do to
+    notices that are already in the graph."""
     total = 0
     skipped = 0
     errors = 0
@@ -387,7 +413,8 @@ def load_contracts(
     with driver.session() as session:
         ctx = IngestContext(
             matcher=TedMatcher(session), currency_svc=currency_svc,
-            rescore=rescore,
+            rescore=rescore or dry_run, lookups=lookups, report=report,
+            dry_run=dry_run, emit_frameworks=emit_frameworks,
         )
         for notice in awards_and_modifications(stream_notices(archive_path)):
             try:
@@ -455,18 +482,36 @@ def _amount_to_eur(currency_svc, resolved_currency, rate_date_obj, raw):
     return original, eur
 
 
-def _supplier_vat(contractor) -> str | None:
-    """Canonical VAT (or national/EORI identifier) for a supplier, or
-    None. eforms-parser 0.2.0+ returns ``legal_id`` as a LegalIdentifier."""
-    # pylint: disable=import-outside-toplevel
-    from src.etl.identifiers import canon_vat
+@dataclass
+class _Candidate:
+    """One award whose contractor the notice names — before the
+    cleaning stage has said whether it becomes an entity and before
+    the matcher has assigned it an id."""
 
-    if contractor.legal_id is None:
-        return None
-    scheme = (contractor.legal_id.scheme_name or "").upper()
-    if scheme in ("VAT", "NATIONAL", "EORI", ""):
-        return canon_vat(contractor.legal_id.value)
-    return None
+    award: Any
+    contractor: Any
+    is_winner: bool
+
+    @property
+    def org_id(self) -> str:
+        return self.award.contractor_org_id
+
+    @property
+    def role(self) -> str:
+        return "winner" if self.is_winner else "named_tenderer"
+
+
+def _candidate_suppliers(notice) -> list[_Candidate]:
+    """Every award with a named contractor — winners AND named tenderers
+    (the losing bidders some eForms dialects publish)."""
+    return [
+        _Candidate(
+            award=award, contractor=notice.organizations[award.contractor_org_id],
+            is_winner=bool(getattr(award, "is_winner", True)),
+        )
+        for award in notice.awards
+        if notice.organizations.get(award.contractor_org_id)
+    ]
 
 
 @dataclass
@@ -489,26 +534,27 @@ def _match_provenance(match) -> "tuple[str | None, float | None]":
     return tier, confidence
 
 
-def _resolve_suppliers(notice, matcher, emit, seen_companies) -> list:
-    """Resolve EVERY named supplier — winners AND named tenderers (the
-    losing bidders some eForms dialects publish) — through the
-    consolidator: same tiers, same confidence capture, and the same
-    create-if-not-found minting as the historical single-winner path.
-    Emits UpsertCompany once per first-seen gmr_id (per-run dedup; the
-    sink would MERGE either way)."""
+def _resolve_suppliers(candidates, matcher, emit, seen_companies,
+                       identifiers) -> list:
+    """Resolve every supplier the cleaning stage let through — winners
+    AND named tenderers — via the consolidator: same tiers, same
+    confidence capture, and the same create-if-not-found minting as the
+    historical single-winner path. ``identifiers`` (org id -> canonical
+    VAT or None) comes from the stage: the C3 rule prefixes a bare
+    national id with the organisation's country BEFORE the matcher sees
+    it, which is where identity comes from. Emits UpsertCompany once per
+    first-seen gmr_id (per-run dedup; the sink would MERGE either way)."""
     resolved: list[_ResolvedSupplier] = []
-    for supplier_award in notice.awards:
-        contractor = notice.organizations.get(supplier_award.contractor_org_id)
-        if not contractor:
-            continue
-        raw_vat = _supplier_vat(contractor)
+    for candidate in candidates:
+        contractor = candidate.contractor
+        raw_vat = identifiers.get(candidate.org_id)
         match = matcher.match_company(
             contractor.name, contractor.country, raw_vat,
         )
         if match.gmr_id not in seen_companies:
             emit.upsert(
                 "UpsertCompany",
-                iri=f"http://data.fontem.eu/id/Company/{match.gmr_id}",
+                iri=f"{_IRI_BASE}Company/{match.gmr_id}",
                 domain="company",
                 payload=builders.upsert_company(
                     gmr_id=str(match.gmr_id),
@@ -520,10 +566,32 @@ def _resolve_suppliers(notice, matcher, emit, seen_companies) -> list:
             )
             seen_companies.add(match.gmr_id)
         resolved.append(_ResolvedSupplier(
-            award=supplier_award, contractor=contractor, match=match,
-            is_winner=bool(getattr(supplier_award, "is_winner", True)),
+            award=candidate.award, contractor=contractor, match=match,
+            is_winner=candidate.is_winner,
         ))
     return resolved
+
+
+def _withheld_payload(candidates, withheld: dict) -> "list[dict] | None":
+    """``suppliers_withheld``: one item per withheld organisation, its
+    raw text kept as the pointer it is. Never in ``parties`` and never
+    the top-level company — the neo4j sink stubs a :Company for any
+    company_gmr_id it has not seen an UpsertCompany for, which would
+    re-create exactly the junk node the rule refused."""
+    items: list[dict] = []
+    seen: set = set()
+    for candidate in candidates:
+        reason = withheld.get(candidate.org_id)
+        if reason is None or candidate.org_id in seen:
+            continue
+        seen.add(candidate.org_id)
+        is_winner = any(c.is_winner for c in candidates if c.org_id == candidate.org_id)
+        items.append(builders.withheld_supplier(
+            name_raw=candidate.contractor.name or "", reason=reason,
+            role="winner" if is_winner else "named_tenderer",
+            org_id=candidate.org_id,
+        ))
+    return items or None
 
 
 def _build_parties(resolved) -> "list[dict] | None":
@@ -575,19 +643,14 @@ def _sum_raw(values):
         return None
 
 
-def _winner_value_inputs(notice, resolved):
-    """The three raw money signals, from WINNER awards only.
-
-    A named tenderer's ``Award.value`` is its losing BID amount — never
-    contract money — so non-winners contribute nothing here. Consortium
-    members of one tendering party all restate the SAME undivided
-    tender value, so amounts are counted once per (lot, tendering
-    party), never once per member. The notice-level TotalAmount is only
-    attributable when there is exactly one winning party; with several
-    winners it is an aggregate we cannot split. Returns
-    ``(estimate_raw, total_raw, payable_raw)``."""
+def _winner_awards(entries) -> dict:
+    """One award per winning (lot, tendering party). A named tenderer's
+    ``Award.value`` is its losing BID amount — never contract money — so
+    non-winners are left out. Consortium members of one tendering party
+    all restate the SAME undivided tender value, so a party's award is
+    kept once, never once per member."""
     party_awards: dict = {}
-    for entry in resolved:
+    for entry in entries:
         if not entry.is_winner:
             continue
         key = (
@@ -596,6 +659,15 @@ def _winner_value_inputs(notice, resolved):
             or entry.award.contractor_org_id,
         )
         party_awards.setdefault(key, entry.award)
+    return party_awards
+
+
+def _winner_value_inputs(notice, party_awards: dict):
+    """The three raw money signals from the winner awards
+    (``_winner_awards``). The notice-level TotalAmount is only
+    attributable when there is exactly one winning party; with several
+    winners it is an aggregate we cannot split. Returns
+    ``(estimate_raw, total_raw, payable_raw)``."""
     payable_raw = _sum_raw(
         [a.value for a in party_awards.values() if a.value is not None])
     total_raw = notice.total_value if len(party_awards) == 1 else None
@@ -612,45 +684,39 @@ def _winner_value_inputs(notice, resolved):
     return _sum_raw(estimates), total_raw, payable_raw
 
 
-def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
-    notice, emit, matcher, seen_authorities, seen_companies, currency_svc,
-):
-    """Process a single TED notice within an already-open
-    ``log.batch(...)`` context — the caller owns commit semantics.
+_IRI_BASE = "http://data.fontem.eu/id/"
+_CURRENCY_CODE = re.compile(r"[A-Z]{3}")
+FRAMEWORKS_ENV = "EMIT_FRAMEWORK_AGREEMENTS"
 
-    Per-call side effects:
-      * Mutates ``seen_authorities`` / ``seen_companies`` for
-        per-run dedup of repeated parents within a single archive.
-      * Calls ``emit.upsert`` zero or more times: UpsertAuthority /
-        UpsertCompany for first-seen parents, then ONE UpsertContract
-        per notice (notice-grain). Every named supplier the notice
-        publishes is resolved and listed in ``parties[]``; the
-        top-level company/match fields stay the primary winner's.
 
-    Everything about the notice's identity comes from the parsed
-    notice: there is no override, no search-record stamp and no
-    out-of-band lookup, so the event is the same whichever way the
-    notice was discovered.
-    """
-    buyer = notice.buyer()
-    if not buyer:
-        return
-    buyer_legal_value = (
-        buyer.legal_id.value if buyer.legal_id else None
+def frameworks_enabled() -> bool:
+    """``EMIT_FRAMEWORK_AGREEMENTS`` — default off. The neo4j sink that
+    understands UpsertFrameworkAgreement must be deployed first: a sink
+    skips an unknown event type and advances its offset, so an early
+    emit would be lost, not queued."""
+    return os.environ.get(FRAMEWORKS_ENV, "false").strip().lower() in (
+        "1", "true", "yes",
     )
+
+
+def _emit_authority(buyer, matcher, emit, seen_authorities) -> str:
+    """Match the buyer and emit its UpsertAuthority once per run.
+
+    Authority dedup is per-archive (the caller threads
+    ``seen_authorities`` through). Once an authority has appeared in
+    the archive we skip the redundant UpsertAuthority — the sink would
+    MERGE either way, but eliding it keeps the event log compact and
+    replay-faster. The legal id travels raw as ``national_id``; the
+    stage's normalised form is counted but ``match_authority`` does not
+    read it and the schema has no field for it."""
+    buyer_legal_value = buyer.legal_id.value if buyer.legal_id else None
     authority_id = matcher.match_authority(
         buyer.name, buyer.country, buyer_legal_value,
     )
-
-    # Authority dedup is per-archive (the caller threads
-    # ``seen_authorities`` through). Once an authority has appeared in
-    # the archive we skip the redundant UpsertAuthority — the sink
-    # would MERGE either way, but eliding it keeps the event log
-    # compact and replay-faster.
     if authority_id not in seen_authorities:
         emit.upsert(
             "UpsertAuthority",
-            iri=f"http://data.fontem.eu/id/Authority/{authority_id}",
+            iri=f"{_IRI_BASE}Authority/{authority_id}",
             domain="authority",
             payload=builders.upsert_authority(
                 authority_id=authority_id,
@@ -662,39 +728,106 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             ),
         )
         seen_authorities.add(authority_id)
+    return authority_id
 
+
+@dataclass(frozen=True)
+class _Identity:  # pylint: disable=too-many-instance-attributes
+    """Everything about the notice's identity, all from the XML: there
+    is no override, no search-record stamp and no out-of-band lookup,
+    so the event is the same whichever way the notice was discovered."""
+
+    ted_notice_id: str
+    ted_publication_number: str | None
+    procedure_id: str | None
+    publication_date: str | None
+    notice_type: str | None
+    notice_kind: str
+    modifies_publication_number: str | None
+    modifies_notice_id: str | None
+    contract_key: str
+
+
+def _identity(notice) -> _Identity:
+    """Procedure id (BT-04), the notice version (BT-757) and, on a
+    modification, the back-link (BT-1501) in whichever of its two forms
+    the buyer wrote it. contract_key is derived here so the producer
+    stamp and the sink's native Contract/Notice model agree on what a
+    contract is."""
     # eForms UUID, or the publication number for a legacy notice (whose
     # notice_id is the human OJS reference). The publication number
     # itself is on the XML (efbc:NoticePublicationID / NO_DOC_OJS); a
     # notice TED has not published yet simply has none.
     ted_notice_id = notice_key(notice)
     ted_publication_number = notice.publication_number
+    notice_type = getattr(notice, "notice_type", None)
+    notice_kind = (
+        "modification" if notice_type == _MODIFICATION_NOTICE_TYPE
+        else "award"
+    )
+    modifies_publication_number = modifies_notice_id = None
+    if notice_kind == "modification":
+        modifies_publication_number = notice.modifies_publication_number
+        modifies_notice_id = notice.modifies_notice_id
+    return _Identity(
+        ted_notice_id=ted_notice_id,
+        ted_publication_number=ted_publication_number,
+        procedure_id=notice.procedure_id,
+        # When TED published the notice: efbc:PublicationDate off the
+        # XML, then cbc:IssueDate as a last resort. issue_date is when
+        # the buyer wrote it, which runs 1-3 days earlier and is the
+        # wrong answer for anything ordering or windowing by recency.
+        publication_date=(
+            _as_day(getattr(notice, "publication_date", None))
+            or _as_day(notice.issue_date)
+        ),
+        notice_type=notice_type,
+        notice_kind=notice_kind,
+        modifies_publication_number=modifies_publication_number,
+        modifies_notice_id=modifies_notice_id,
+        contract_key=derive_contract_key(
+            procedure_id=notice.procedure_id,
+            notice_kind=notice_kind,
+            modifies_publication_number=modifies_publication_number,
+            ted_publication_number=ted_publication_number,
+            ted_notice_id=ted_notice_id,
+        ),
+    )
 
-    # Every named supplier — winners AND named tenderers — resolves
-    # through the consolidator; unmatched ones mint a new node
-    # (create-if-not-found), exactly like the old single-winner path.
-    resolved = _resolve_suppliers(notice, matcher, emit, seen_companies)
-    if not resolved:
-        return
 
-    # The primary winner (first is_winner award) drives the top-level
-    # company/match fields (backward compat) and the date/currency
-    # context. A notice that names tenderers but resolves no winner
-    # (rare, eForms SettledContract-era) still emits — its named
-    # tenderers matter — but carries no company attribution and no
-    # awarded value (the winner-only aggregation below yields None).
-    primary = next((e for e in resolved if e.is_winner), None)
-    context_award = (primary or resolved[0]).award
+@dataclass
+class _Money:  # pylint: disable=too-many-instance-attributes
+    """The notice's money signals after FX and before any rule."""
 
-    declared_currency = context_award.currency or notice.currency
-    effective_date, _date_source = _coalesce_date(context_award, notice)
+    declared_currency: str | None
+    resolved_currency: str | None
+    rate_date_obj: _date | None
+    estimate_eur: float | None
+    total_eur: float | None
+    total_original: float | None
+    payable_eur: float | None
+    payable_original: float | None
+    before_eur: float | None
+    before_original: float | None
+    party_awards: dict
 
-    # Resolve currency + FX-rate date once; the estimate, the awarded
-    # total, and the payable all convert at the same rate.
-    resolved_currency = None
+    def value_facts(self, country: str | None, cpv) -> ValueFacts:
+        return ValueFacts(
+            estimate_eur=self.estimate_eur, total_eur=self.total_eur,
+            payable_eur=self.payable_eur, total_original=self.total_original,
+            payable_original=self.payable_original, country=country,
+            cpv=text(cpv),
+        )
+
+
+def _resolve_currency(currency_svc, declared_currency, buyer_country,
+                      effective_date, issue_date):
+    """Resolve the notice currency + FX-rate date once; the estimate,
+    the awarded total, and the payable all convert at the same rate.
+    Returns ``(resolved_currency, rate_date_obj)``."""
     rate_date_obj = None
     if currency_svc:
-        rate_date_str = effective_date or notice.issue_date
+        rate_date_str = effective_date or issue_date
         try:
             rate_date_obj = (
                 _date.fromisoformat(rate_date_str[:10])
@@ -704,7 +837,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
             rate_date_obj = None
         resolved_currency, _inferred = currency_svc.resolve_currency(
             declared_currency,
-            country=(buyer.country or "").upper(),
+            country=(buyer_country or "").upper(),
             on=rate_date_obj,
         )
     else:
@@ -712,16 +845,28 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
     # TED uses non-currency placeholders (UNPUBLISHED, OP_DATPRO) in the
     # currency field when no value is published. Null them so the contract
     # carries no spurious currency (and no value to convert downstream).
-    if resolved_currency and not re.fullmatch(r"[A-Z]{3}", resolved_currency):
+    if resolved_currency and not _CURRENCY_CODE.fullmatch(resolved_currency):
         resolved_currency = None
+    return resolved_currency, rate_date_obj
 
-    # The three money signals — WINNER-only, one undivided value per
-    # winning tendering party (see _winner_value_inputs). Loser bids
-    # and consortium-member restatements never reach the contract value.
-    estimate_raw, total_raw, payable_raw = _winner_value_inputs(
-        notice, resolved,
+
+def _convert_money(  # pylint: disable=too-many-locals
+    notice, buyer, candidates, context_award, currency_svc,
+) -> _Money:
+    """The three money signals — WINNER-only, one undivided value per
+    winning tendering party (see ``_winner_awards``) — plus the
+    pre-modification total, all converted at one rate. Loser bids and
+    consortium-member restatements never reach the contract value."""
+    declared_currency = context_award.currency or notice.currency
+    effective_date, _date_source = _coalesce_date(context_award, notice)
+    resolved_currency, rate_date_obj = _resolve_currency(
+        currency_svc, declared_currency, buyer.country, effective_date,
+        notice.issue_date,
     )
-
+    party_awards = _winner_awards(candidates)
+    estimate_raw, total_raw, payable_raw = _winner_value_inputs(
+        notice, party_awards,
+    )
     _est_orig, est_eur = _amount_to_eur(
         currency_svc, resolved_currency, rate_date_obj, estimate_raw,
     )
@@ -739,86 +884,354 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         currency_svc, resolved_currency, rate_date_obj,
         getattr(notice, "modification_value_before", None),
     )
+    return _Money(
+        declared_currency=declared_currency,
+        resolved_currency=resolved_currency, rate_date_obj=rate_date_obj,
+        estimate_eur=est_eur, total_eur=tot_eur, total_original=tot_orig,
+        payable_eur=pay_eur, payable_original=pay_orig,
+        before_eur=before_eur, before_original=before_orig,
+        party_awards=party_awards,
+    )
 
-    # Undo the national-gateway milli-euro leak (x1000) BEFORE scoring,
-    # so the confidence scorer sees the corrected magnitudes. The marker
-    # is carried onto the payload for dashboards + upstream reporting.
-    buyer_country_a3 = (
-        LocationService.to_alpha3(buyer.country) if buyer else None
-    )
-    scale = normalize_scale(
-        estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
-        total_original=tot_orig, payable_original=pay_orig,
-        country=buyer_country_a3,
-    )
-    if scale.corrected:
+
+@dataclass
+class _Valued:  # pylint: disable=too-many-instance-attributes
+    """What the contract event carries about money once the scorer and
+    the cleaning stage's value decision have both spoken."""
+
+    value_eur: float | None
+    value_original: float | None
+    currency: str | None
+    estimate_eur: float | None
+    payable_eur: float | None
+    before_eur: float | None
+    before_original: float | None
+    score: Any
+    scale_tier: str | None = None
+    quarantined: bool = False
+    quarantine_reason: str | None = None
+
+    def withhold(self, *, keep_estimate: bool) -> None:
+        """Strip the monetary fields the way every quarantine does."""
+        self.value_eur = self.value_original = None
+        self.currency = None
+        if not keep_estimate:
+            self.estimate_eur = self.payable_eur = None
+            self.before_eur = self.before_original = None
+
+
+def _chosen_value(score, tot_eur, tot_orig, pay_eur, pay_orig):
+    """The chosen value (TotalAmount-preferred) in both currencies. A
+    no-awarded-value contract must not carry a (stray, often
+    sign-flipped) monetary value."""
+    if score.flag.value == "no_awarded_value":
+        return None, None
+    if score.chosen_field == "total":
+        return tot_eur, tot_orig
+    if score.chosen_field == "payable":
+        return pay_eur, pay_orig
+    return None, None
+
+
+def _scored(money: _Money, decision, ted_notice_id: str) -> _Valued:
+    """Apply a rescale decision (the milli-euro tiers, unchanged) BEFORE
+    scoring so the confidence scorer sees the corrected magnitudes,
+    then score. Low-confidence values are kept but flagged."""
+    est_eur, tot_eur, pay_eur = money.estimate_eur, money.total_eur, money.payable_eur
+    tot_orig, pay_orig = money.total_original, money.payable_original
+    scale_tier = None
+    if isinstance(decision, Rescale):
         logger.warning(
-            "TED notice %s: monetary fields rescaled /1000 (%s): %s",
-            ted_notice_id, scale.tier, scale.detail,
+            "TED notice %s: monetary fields rescaled x%g (%s): %s",
+            ted_notice_id, decision.factor, decision.reason, decision.detail,
         )
-        est_eur = scale.estimate_eur
-        tot_eur, tot_orig = scale.total_eur, scale.total_original
-        pay_eur, pay_orig = scale.payable_eur, scale.payable_original
-
+        corrected = decision.corrected
+        est_eur, tot_eur, pay_eur = (
+            corrected.estimate_eur, corrected.total_eur, corrected.payable_eur,
+        )
+        tot_orig, pay_orig = corrected.total_original, corrected.payable_original
+        scale_tier = decision.reason
     score = score_contract_value(
         estimate_eur=est_eur, total_eur=tot_eur, payable_eur=pay_eur,
         total_original=tot_orig, payable_original=pay_orig,
     )
-    # Store the chosen value (TotalAmount-preferred) in both
-    # currencies. Low-confidence values are kept but flagged.
-    if score.chosen_field == "total":
-        value_eur_float, value_original_float = tot_eur, tot_orig
-    elif score.chosen_field == "payable":
-        value_eur_float, value_original_float = pay_eur, pay_orig
-    else:
-        value_eur_float, value_original_float = None, None
-
-    # A no-awarded-value contract must not carry a (stray, often
-    # sign-flipped) monetary value; keep value_eur clean.
-    if score.flag.value == "no_awarded_value":
-        value_eur_float, value_original_float = None, None
-
+    value_eur, value_original = _chosen_value(
+        score, tot_eur, tot_orig, pay_eur, pay_orig,
+    )
     if score.is_low_confidence:
         logger.warning(
             "TED notice %s value EUR %.3g flagged '%s' "
             "(confidence %.2f) — stored but excluded from default "
             "aggregates: %s",
-            ted_notice_id, value_eur_float or 0.0,
+            ted_notice_id, value_eur or 0.0,
             score.flag.value, score.confidence, score.reason,
         )
+    return _Valued(
+        value_eur=value_eur, value_original=value_original,
+        currency=money.resolved_currency, estimate_eur=est_eur,
+        payable_eur=pay_eur, before_eur=money.before_eur,
+        before_original=money.before_original, score=score,
+        scale_tier=scale_tier,
+    )
 
-    # ── Value quarantine ────────────────────────────────────
-    # A value that fails hard sanity checks is WITHHELD, not
-    # flagged-and-hoped: the event carries no monetary fields (the
-    # sinks also clear any previously rendered ones) plus the
-    # quarantine marker + reason. Review-tier claims go to
-    # events.value_review for a human decision; a published 0
-    # (zero_value) is auto-withheld — non-disclosure in costume —
-    # and keeps the independent estimate. The claimed numbers are
-    # never lost: event log + queue snapshot hold them.
+
+def _quarantine(  # pylint: disable=too-many-arguments
+    valued: _Valued, *, ted_notice_id: str, reason: str, detail: str,
+    review: bool, keep_estimate: bool = False,
+) -> None:
+    """Withhold the value: the event carries no monetary fields (the
+    sinks also clear any previously rendered ones) plus the quarantine
+    marker + reason. The claim goes to events.value_review for a human
+    decision when ``review``. The claimed numbers are never lost: event
+    log + queue snapshot hold them."""
+    if review:
+        value_review_queue.enqueue_default(
+            ted_notice_id=ted_notice_id,
+            reason=reason,
+            claimed_value_eur=valued.value_eur,
+            claimed_value_original=valued.value_original,
+            claimed_currency=valued.currency,
+            claimed_estimated_eur=valued.estimate_eur,
+            claimed_payable_eur=valued.payable_eur,
+            detail=detail,
+        )
+    valued.withhold(keep_estimate=keep_estimate)
+    valued.quarantined = True
+    valued.quarantine_reason = reason
+
+
+def _apply_value_decision(money: _Money, decision, ted_notice_id: str,
+                          *, review: bool) -> _Valued:
+    """Score, then quarantine on either ground.
+
+    The scorer's own quarantine tiers come first (a value that fails
+    hard sanity checks; a published 0 is auto-withheld — non-disclosure
+    in costume — and keeps the independent estimate). Otherwise a
+    cleaning-stage ``Quarantine`` (the peer outlier rule) withholds the
+    value exactly the same way, with the candidate corrections in the
+    review note. ``review`` is False on a dry run: nothing is written."""
+    valued = _scored(money, decision, ted_notice_id)
+    score = valued.score
     if score.quarantined:
-        if score.needs_review:
-            value_review_queue.enqueue_default(
-                ted_notice_id=ted_notice_id,
-                reason=score.flag.value,
-                claimed_value_eur=value_eur_float,
-                claimed_value_original=value_original_float,
-                claimed_currency=resolved_currency,
-                claimed_estimated_eur=est_eur,
-                claimed_payable_eur=pay_eur,
-                detail=score.reason,
-            )
-        value_eur_float = value_original_float = None
-        resolved_currency = None
-        if score.flag.value != "zero_value":
-            est_eur = pay_eur = None
-            before_eur = before_orig = None
+        _quarantine(
+            valued, ted_notice_id=ted_notice_id, reason=score.flag.value,
+            detail=score.reason, review=review and score.needs_review,
+            keep_estimate=score.flag.value == "zero_value",
+        )
+    elif isinstance(decision, Quarantine) and valued.value_eur is not None:
+        logger.warning(
+            "TED notice %s: value EUR %.3g withheld (%s): %s",
+            ted_notice_id, valued.value_eur, decision.reason, decision.detail,
+        )
+        _quarantine(
+            valued, ted_notice_id=ted_notice_id, reason=decision.reason,
+            detail=decision.detail, review=review,
+        )
+    return valued
 
-    # Match provenance — lets exact (lei/vat/cik) and name-based
-    # (name_country/fuzzy) attributions be told apart on the
-    # AWARDED_TO edge downstream. The top-level fields stay the
-    # PRIMARY winner's for backward compat; per-party provenance
-    # rides each parties[] entry.
+
+def _value_raw(notice, party_awards: dict, chosen_field: str | None,
+               declared_currency) -> str | None:
+    """The published amount text, verbatim, with the declared currency
+    when it is a real code: the notice total where the total is the
+    stored value (single winning party), else the winner awards' own
+    ``PayableAmount`` text (several parties: joined with ' + '), else
+    whatever total text there is. '0' stays '0'."""
+    total_raw = text(getattr(notice, "total_value_raw", None))
+    award_raws = [
+        raw for raw in (text(getattr(a, "value_raw", None))
+                        for a in party_awards.values())
+        if raw
+    ]
+    if chosen_field == "total" and total_raw:
+        raw = total_raw
+    elif award_raws:
+        raw = " + ".join(award_raws)
+    else:
+        raw = total_raw
+    if raw is None:
+        return None
+    currency = (declared_currency
+                if isinstance(declared_currency, str)
+                and _CURRENCY_CODE.fullmatch(declared_currency) else None)
+    return f"{raw} {currency}" if currency else raw
+
+
+@dataclass(frozen=True)
+class _FrameworkTerms:
+    """The establishing notice's framework terms in EUR."""
+
+    max_eur: float | None = None
+    max_original: float | None = None
+    max_currency: str | None = None
+    reestimated_eur: float | None = None
+    duration_months: int | None = None
+    max_operators: int | None = None
+
+
+def _currency_or(declared, fallback: str | None) -> str | None:
+    if declared and _CURRENCY_CODE.fullmatch(declared):
+        return declared
+    return fallback
+
+
+def _framework_terms(notice, money: _Money, currency_svc) -> _FrameworkTerms | None:
+    """None unless the notice sets up a framework agreement. The ceiling
+    (BT-118 / BT-709) and re-estimate (BT-660) convert with the currency
+    client like every other amount, at the notice's rate date."""
+    if notice.is_framework is not True:
+        return None
+    max_currency = _currency_or(
+        text(getattr(notice, "framework_max_value_currency", None)),
+        money.resolved_currency,
+    )
+    max_original, max_eur = _amount_to_eur(
+        currency_svc, max_currency, money.rate_date_obj,
+        number(getattr(notice, "framework_max_value", None)),
+    )
+    re_currency = _currency_or(
+        text(getattr(notice, "framework_reestimated_value_currency", None)),
+        money.resolved_currency,
+    )
+    _re_original, re_eur = _amount_to_eur(
+        currency_svc, re_currency, money.rate_date_obj,
+        number(getattr(notice, "framework_reestimated_value", None)),
+    )
+    return _FrameworkTerms(
+        max_eur=max_eur, max_original=max_original,
+        max_currency=max_currency if max_original is not None else None,
+        reestimated_eur=re_eur,
+        duration_months=integer(getattr(notice, "framework_duration_months", None)),
+        max_operators=integer(getattr(notice, "framework_max_operators", None)),
+    )
+
+
+def _emit_framework_agreement(  # pylint: disable=too-many-arguments,too-many-locals
+    emit, notice, ident: _Identity, terms: _FrameworkTerms, *,
+    authority_id: str, country: str | None, candidates, resolved,
+) -> None:
+    """The framework as a first-class entity, keyed by the establishing
+    procedure (``framework_id`` = the contract key) so its notices and
+    call-offs converge on one node. Suppliers are the resolved
+    (non-withheld) winners with lot/rank; ``supplier_count`` is what
+    the notice published, withheld ones included."""
+    suppliers: list[dict] = []
+    seen: set = set()
+    for entry in resolved:
+        if not entry.is_winner:
+            continue
+        lot = text(getattr(entry.award, "lot_id", None))
+        key = (str(entry.match.gmr_id), lot)
+        if key in seen:
+            continue
+        seen.add(key)
+        suppliers.append(builders.framework_supplier(
+            company_gmr_id=str(entry.match.gmr_id), lot=lot,
+            rank=integer(getattr(entry.award, "rank", None)),
+        ))
+    supplier_count = len({c.org_id for c in candidates if c.is_winner})
+    lots = notice.lots if isinstance(notice.lots, list) else []
+    payload = builders.upsert_framework_agreement(
+        framework_id=ident.contract_key,
+        buyer_authority_id=authority_id,
+        establishing_notice_id=ident.ted_notice_id,
+        country=country,
+        ceiling_eur=terms.max_eur,
+        ceiling_currency=terms.max_currency,
+        ceiling_original=terms.max_original,
+        reestimated_value_eur=terms.reestimated_eur,
+        duration_months=terms.duration_months,
+        cpv=text(notice.cpv_main),
+        lot_count=len(lots) or None,
+        supplier_count=supplier_count or None,
+        title=notice.title or None,
+        suppliers=suppliers or None,
+    )
+    emit.upsert(
+        "UpsertFrameworkAgreement",
+        iri=f"{_IRI_BASE}FrameworkAgreement/{ident.contract_key}",
+        domain="contract",
+        payload=payload,
+    )
+
+
+def _emit_notice(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+    notice, emit, matcher, seen_authorities, seen_companies, currency_svc,
+    *,
+    lookups: Lookups | None = None,
+    report: CleaningReport | None = None,
+    dry_run: bool = False,
+    emit_frameworks: bool = False,
+):
+    """Process a single TED notice within an already-open
+    ``log.batch(...)`` context — the caller owns commit semantics.
+
+    Order: parse (done) -> money + FX -> the cleaning stage -> identity
+    (the matcher, fed the stage's normalised identifiers) -> payloads.
+
+    Per-call side effects:
+      * Mutates ``seen_authorities`` / ``seen_companies`` for
+        per-run dedup of repeated parents within a single archive.
+      * Calls ``emit.upsert`` zero or more times: UpsertAuthority /
+        UpsertCompany for first-seen parents, then ONE UpsertContract
+        per notice (notice-grain), then — behind ``emit_frameworks`` —
+        an UpsertFrameworkAgreement for an establishing notice. Every
+        named supplier the stage lets through is resolved and listed in
+        ``parties[]``; a withheld one is carried in
+        ``suppliers_withheld`` only. The top-level company/match fields
+        stay the primary winner's.
+      * Feeds ``report`` (per-rule accounting) when given.
+    """
+    buyer = notice.buyer()
+    if not buyer:
+        return
+    # The buyer goes out before the awards are looked at (as it always
+    # has): a notice whose awards name no known contractor still
+    # describes its authority.
+    authority_id = _emit_authority(buyer, matcher, emit, seen_authorities)
+    # Every award whose contractor the notice names; nothing is matched
+    # yet, and nothing has been cleaned yet.
+    candidates = _candidate_suppliers(notice)
+    if not candidates:
+        return
+    ident = _identity(notice)
+    # Country of the contracting authority (the buyer / acquirer).
+    # Cascaded onto the Contract because TED contracts are
+    # jurisdictionally grouped by the procuring entity, not the vendor.
+    buyer_country = LocationService.to_alpha3(buyer.country)
+    # The primary winner's award (first is_winner) drives the
+    # date/currency context — withheld or not: the award's value, dates
+    # and currency are kept even when its supplier is not.
+    context_award = next(
+        (c.award for c in candidates if c.is_winner), candidates[0].award,
+    )
+    money = _convert_money(notice, buyer, candidates, context_award, currency_svc)
+
+    # ── The cleaning stage (pure; see src/etl/cleaning/README.md) ──
+    facts = facts_from_notice(
+        notice, value=money.value_facts(buyer_country, notice.cpv_main),
+        context_award=context_award,
+    )
+    cleaning = run_stage(facts, lookups)
+    if report is not None:
+        report.record(
+            notice_id=ident.ted_notice_id, country=buyer_country,
+            year=(ident.publication_date or "")[:4] or None, result=cleaning,
+        )
+
+    # Every supplier the stage let through — winners AND named tenderers
+    # — resolves through the consolidator; unmatched ones mint a new
+    # node (create-if-not-found), exactly like the old single-winner
+    # path. A withheld supplier is never matched: no entity for it.
+    kept = [c for c in candidates if c.org_id not in cleaning.withheld]
+    resolved = _resolve_suppliers(
+        kept, matcher, emit, seen_companies, cleaning.identifiers,
+    )
+    # The primary winner drives the top-level company/match fields
+    # (backward compat). A notice that names tenderers but resolves no
+    # winner still emits — its named tenderers matter — but carries no
+    # company attribution; so does one whose winner was withheld.
+    primary = next((e for e in resolved if e.is_winner), None)
     if primary is not None:
         match_tier, match_confidence = _match_provenance(primary.match)
         company_gmr_id = str(primary.match.gmr_id)
@@ -827,72 +1240,57 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         match_tier = match_confidence = None
         company_gmr_id = match_layer = None
 
-    # Identity, all from the XML: procedure id (BT-04), the notice
-    # version (BT-757) and, on a modification, the back-link (BT-1501)
-    # in whichever of its two forms the buyer wrote it. contract_key is
-    # derived here so the producer stamp and the sink's native
-    # Contract/Notice model agree on what a contract is.
-    procedure_id = notice.procedure_id
-    # When TED published the notice: efbc:PublicationDate off the XML,
-    # then cbc:IssueDate as a last resort. issue_date is when the buyer
-    # wrote it, which runs 1-3 days earlier and is the wrong answer for
-    # anything ordering or windowing by recency.
-    publication_date = (
-        _as_day(getattr(notice, "publication_date", None))
-        or _as_day(notice.issue_date)
+    valued = _apply_value_decision(
+        money, cleaning.value, ident.ted_notice_id, review=not dry_run,
     )
-    notice_type = getattr(notice, "notice_type", None)
-    notice_kind = (
-        "modification" if notice_type == _MODIFICATION_NOTICE_TYPE
-        else "award"
-    )
-    modifies_publication_number = modifies_notice_id = None
-    if notice_kind == "modification":
-        modifies_publication_number = notice.modifies_publication_number
-        modifies_notice_id = notice.modifies_notice_id
-    contract_key = derive_contract_key(
-        procedure_id=procedure_id,
-        notice_kind=notice_kind,
-        modifies_publication_number=modifies_publication_number,
-        ted_publication_number=ted_publication_number,
-        ted_notice_id=ted_notice_id,
-    )
+    terms = _framework_terms(notice, money, currency_svc)
 
     contract_payload = builders.upsert_contract(
-        ted_notice_id=ted_notice_id,
-        ted_publication_number=ted_publication_number,
+        ted_notice_id=ident.ted_notice_id,
+        ted_publication_number=ident.ted_publication_number,
         title=notice.title or None,
         authority_id=authority_id,
         company_gmr_id=company_gmr_id,
         match_tier=match_tier,
         match_confidence=match_confidence,
         match_layer=match_layer,
-        publication_date=publication_date,
-        value_eur=value_eur_float,
-        value_currency=resolved_currency,
-        value_original=value_original_float,
-        value_before_eur=before_eur,
-        value_before_original=before_orig,
-        estimated_value_eur=est_eur,
-        value_payable_eur=pay_eur,
-        value_confidence=score.confidence,
-        value_confidence_consistency=score.consistency,
-        value_confidence_plausibility=score.plausibility,
-        value_quality_flag=score.flag.value,
-        value_low_confidence=score.is_low_confidence,
-        value_payable_discrepancy=score.has_payable_discrepancy,
-        value_quarantined=score.quarantined or None,
-        value_quarantine_reason=(score.flag.value
-                                 if score.quarantined else None),
-        value_scale_corrected=scale.tier if scale.corrected else None,
+        publication_date=ident.publication_date,
+        value_eur=valued.value_eur,
+        value_currency=valued.currency,
+        value_original=valued.value_original,
+        value_before_eur=valued.before_eur,
+        value_before_original=valued.before_original,
+        estimated_value_eur=valued.estimate_eur,
+        value_payable_eur=valued.payable_eur,
+        value_confidence=valued.score.confidence,
+        value_confidence_consistency=valued.score.consistency,
+        value_confidence_plausibility=valued.score.plausibility,
+        value_quality_flag=valued.score.flag.value,
+        value_low_confidence=valued.score.is_low_confidence,
+        value_payable_discrepancy=valued.score.has_payable_discrepancy,
+        value_quarantined=valued.quarantined or None,
+        value_quarantine_reason=valued.quarantine_reason,
+        value_scale_corrected=valued.scale_tier,
+        # Cleaning-stage fields: the raw text stays, every rule that
+        # fired is named, and a withheld supplier is here and nowhere
+        # else on the event.
+        value_raw=_value_raw(
+            notice, money.party_awards, valued.score.chosen_field,
+            money.declared_currency,
+        ),
+        cleaning_rules=list(cleaning.rules_fired),
+        suppliers_withheld=_withheld_payload(candidates, cleaning.withheld),
+        # Watermark / provenance fields, verbatim, so the gateway census
+        # can run from the graph.
+        award_date_raw=facts.award_date_raw,
+        tender_result_award_date_raw=facts.tender_result_award_date_raw,
+        tender_reference=facts.tender_reference,
+        notice_language=facts.notice_language,
+        eforms_sdk=text(getattr(notice, "customization_id", None)),
         cpv=notice.cpv_main,
         nuts=notice.nuts,
         language=getattr(notice, "language", None),
-        # Country of the contracting authority (the buyer /
-        # acquirer). Cascaded onto the Contract because TED
-        # contracts are jurisdictionally grouped by the
-        # procuring entity, not the awarded vendor.
-        country=LocationService.to_alpha3(buyer.country),
+        country=buyer_country,
         # Tender-integrity fields (eForms) — inputs to the SMSB
         # single-bidder / non-open indicators + the CRI red flags.
         # tenders_received stays the notice's published bidder COUNT;
@@ -910,16 +1308,24 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         award_criterion_type=notice.award_criterion_type,
         submission_deadline=notice.submission_deadline,
         is_framework=notice.is_framework,
+        # Framework terms on the ESTABLISHING contract only. framework_id
+        # on a call-off stays None: the parser exposes no
+        # NoticeDocumentReference and a same-ContractFolderID link needs
+        # a graph lookup the stage does not make.
+        framework_max_value_eur=terms.max_eur if terms else None,
+        framework_reestimated_value_eur=terms.reestimated_eur if terms else None,
+        framework_duration_months=terms.duration_months if terms else None,
+        framework_max_operators=terms.max_operators if terms else None,
         eu_funded=notice.eu_funded,
         funding_programme=notice.funding_programme,
-        procedure_id=procedure_id,
+        procedure_id=ident.procedure_id,
         legacy_procedure_id=notice.legacy_procedure_id,
-        notice_type=notice_type,
+        notice_type=ident.notice_type,
         notice_version=notice.notice_version,
-        notice_kind=notice_kind,
-        modifies_publication_number=modifies_publication_number,
-        modifies_notice_id=modifies_notice_id,
-        contract_key=contract_key,
+        notice_kind=ident.notice_kind,
+        modifies_publication_number=ident.modifies_publication_number,
+        modifies_notice_id=ident.modifies_notice_id,
+        contract_key=ident.contract_key,
         parties=_build_parties(resolved),
     )
     emit.upsert(
@@ -927,10 +1333,15 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-branches,too-many-
         # IRI keyed by the stable UUID (notice_id) so it doesn't
         # change once TED assigns / revises a publication-number
         # after first ingest.
-        iri=f"http://data.fontem.eu/id/Contract/{ted_notice_id}",
+        iri=f"{_IRI_BASE}Contract/{ident.ted_notice_id}",
         domain="contract",
         payload=contract_payload,
     )
+    if terms is not None and emit_frameworks:
+        _emit_framework_agreement(
+            emit, notice, ident, terms, authority_id=authority_id,
+            country=buyer_country, candidates=candidates, resolved=resolved,
+        )
 
 
 _WATERMARK_ID = "ted-incremental"
@@ -959,7 +1370,7 @@ def _advance_watermark(session, watermark_id: str, day_iso: str) -> None:
     )
 
 
-def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments,too-many-statements
+def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments,too-many-statements,too-many-branches
     driver,
     log: EventLog,
     since: _date,
@@ -967,6 +1378,11 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     currency_svc: CurrencyClient | None = None,
     notice_types: tuple[str, ...] = ted_search.NOTICE_TYPES,
     watermark_id: str = _WATERMARK_ID,
+    *,
+    lookups: Lookups | None = None,
+    report: CleaningReport | None = None,
+    dry_run: bool = False,
+    emit_frameworks: bool = False,
 ):
     """Discover award + modification notices through TED's search API,
     one calendar day at a time from ``since`` to ``until`` inclusive,
@@ -981,14 +1397,20 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     next unfinished day. A day that errors on *every* notice (e.g. API
     outage) stops the run without advancing, so we never silently skip
     a date.
+
+    A ``dry_run`` reads TED and the graph but writes nothing: no raw
+    XML, no watermark, and every notice is re-processed (the skip gate
+    is bypassed) so the cleaning report covers what is already loaded.
     """
     totals = {"days": 0, "emitted": 0, "skipped": 0, "modifications": 0, "errors": 0}
-    raw_store = TedRawStore.from_env()
+    raw_store = None if dry_run else TedRawStore.from_env()
     http = httpx.Client(timeout=ted_search.SEARCH_TIMEOUT)
     try:
         with driver.session() as session:
             ctx = IngestContext(
                 matcher=TedMatcher(session), currency_svc=currency_svc,
+                rescore=dry_run, lookups=lookups, report=report,
+                dry_run=dry_run, emit_frameworks=emit_frameworks,
             )
             day = since
             while day <= until:
@@ -1004,7 +1426,7 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                         rec.get("notice-identifier")
                         or rec.get("publication-number")
                     )
-                    if nid and not _should_ingest(
+                    if nid and not dry_run and not _should_ingest(
                         session, nid, rec.get("notice-version"),
                         _identity_property(
                             rec.get("procedure-identifier"),
@@ -1055,7 +1477,8 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                         "advancing the watermark (will retry next run)", iso,
                     )
                     break
-                _advance_watermark(session, watermark_id, iso)
+                if not dry_run:
+                    _advance_watermark(session, watermark_id, iso)
                 day += timedelta(days=1)
     finally:
         http.close()
@@ -1127,6 +1550,20 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
         help="Watermark node id. Use a distinct id for backfills so they "
              "don't move the forward daily cron's watermark.",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Run everything but write nothing: events go to an in-memory "
+             "log (validated against their schemas, never stored); no "
+             "watermark, raw-XML or review-queue writes; notices already "
+             "in the graph are re-processed. Needs no EVENTS_DATABASE_URL. "
+             "Prints the cleaning report as JSON unless --report is given.",
+    )
+    parser.add_argument(
+        "--report",
+        help="Write the cleaning report (JSON: totals, per rule id, per "
+             "country, per publication year, first 20 examples per rule) "
+             "to this path. Works with and without --dry-run.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -1147,13 +1584,28 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
     driver = GraphDatabase.driver(
         args.neo4j_uri, auth=(args.neo4j_user, args.neo4j_password),
     )
-    log = EventLog.from_env()
+    if args.dry_run:
+        logger.info("DRY RUN: no events, watermark, raw XML or review "
+                    "rows will be written")
+        log = DryRunEventLog()
+    else:
+        log = EventLog.from_env()
+    # The cleaning stage's injected data + per-run accounting. Peer
+    # stats come from dq.peer_value_stats when the table exists; the
+    # loader function logs once when the rule is inactive.
+    stage = {
+        "lookups": Lookups(peer_stats=load_peer_stats_from_env()),
+        "report": CleaningReport(),
+        "dry_run": args.dry_run,
+        "emit_frameworks": frameworks_enabled(),
+    }
 
     try:
         # CPV bootstrap: emits UpsertTaxonomyCode events. Idempotent;
         # re-runs are MERGE on (system='cpv', code) at the sink.
-        from .load_cpv import load_cpv  # pylint: disable=import-outside-toplevel
-        load_cpv(log, lang="en")
+        if not args.dry_run:
+            from .load_cpv import load_cpv  # pylint: disable=import-outside-toplevel
+            load_cpv(log, lang="en")
 
         if args.file or args.year or args.month or args.from_month:
             # Bulk path: a local archive, a single monthly package, or a
@@ -1188,7 +1640,7 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
                     )
                 load_contracts(
                     driver, log, archive, currency_svc=currency_svc,
-                    rescore=args.rescore,
+                    rescore=args.rescore, **stage,
                 )
                 # Free disk between months (packages are >1 GB); the
                 # durable copy lives in the package store.
@@ -1228,7 +1680,7 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
                 load_contracts_incremental(
                     driver, log, since, until,
                     currency_svc=currency_svc, notice_types=notice_types,
-                    watermark_id=args.watermark_id,
+                    watermark_id=args.watermark_id, **stage,
                 )
                 # Nothing runs after the load: the neo4j sink links each
                 # modification to its award and maintains the contract
@@ -1238,6 +1690,25 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
         currency_svc.close()
         log.close()
         driver.close()
+    logger.info("%s", stage["report"].summary_line())
+    if isinstance(log, DryRunEventLog):
+        logger.info("DRY RUN: %d events in %d batches would have been "
+                    "written: %s", log.total, log.batches, dict(log.counts))
+    _write_report(stage["report"], args.report, to_stdout=args.dry_run)
+
+
+def _write_report(report: CleaningReport, path: str | None,
+                  *, to_stdout: bool) -> None:
+    """The cleaning report as JSON: to ``path`` when given, else to
+    stdout on a dry run, else nowhere (the summary line is logged)."""
+    if not path and not to_stdout:
+        return
+    payload = json.dumps(report.as_dict(), indent=2, ensure_ascii=False)
+    if path:
+        Path(path).write_text(payload + "\n", encoding="utf-8")
+        logger.info("cleaning report written to %s", path)
+    else:
+        print(payload)
 
 
 if __name__ == "__main__":
