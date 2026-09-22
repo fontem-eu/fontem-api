@@ -42,11 +42,23 @@ class Region(BaseModel):
     level: int
     country: str = Field(description="NUTS-0 code of the country this sits in")
     parent: str | None = Field(description="Parent NUTS code, null at level 0")
+    name: str = Field(
+        description="The name to show, in the requested language; falls back "
+                    "to the Latin transliteration, then the national-language "
+                    "name")
+    name_source: str = Field(
+        description="Which of those `name` came from: a language code, "
+                    "`latn`, `native` or `code`")
     name_native: str = Field(description="Eurostat's national-language name")
     name_latn: str = Field(description="Eurostat's Latin transliteration")
-    names: dict[str, str] = Field(
-        description="Name per language, for the languages a name is known in")
-    aliases: list[str] = Field(description="Other forms the region answers to")
+    names: dict[str, str] | None = Field(
+        default=None,
+        description="Name per language, for the languages a name is known in. "
+                    "Omitted when the request asked for `names=none`.")
+    aliases: list[str] | None = Field(
+        default=None,
+        description="Other forms the region answers to. Omitted, with "
+                    "`names`, when the request asked for `names=none`.")
     sources: list[str] = Field(
         description="Which sources this record's names came from")
 

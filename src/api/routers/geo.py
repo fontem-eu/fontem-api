@@ -23,6 +23,7 @@ from src.analysis.geo_source import GeoSource
 from src.data import eu_gate as eu_gate_policy
 from src.data import geo_ip
 from src.data import nuts_gazetteer
+from src.nuts_api import index as nuts_index
 from src.services.location_service import LocationService
 
 
@@ -226,85 +227,43 @@ def entity_aggregate(  # pylint: disable=too-many-arguments
     }
 
 
-@router.get(
-    "/nuts-regions",
-    openapi_extra=agent_tool(
-        name="list_nuts_regions",
-        when="you need the NUTS code for a place before asking for regional statistics",
-        group="geography",
-        params=("lang", "codes"),
-        core=True),
-)
+@router.get("/nuts-regions", deprecated=True)
 def nuts_regions(
-    codes: Annotated[str | None, Query(
-        description="Comma-separated NUTS codes; returns only these. "
-                    "Omit for the full list.",
-        max_length=2000,
-    )] = None,
-    lang: Annotated[str | None, Query(
-        description="Language for the region names, as an EU-24 code "
-                    "(el, pt, fr...). Unknown or missing means English.",
-        max_length=16,
-    )] = None,
+    codes: Annotated[str | None, Query(max_length=2000)] = None,
+    lang: Annotated[str | None, Query(max_length=16)] = None,
 ):
-    """Flat, geometry-free list of NUTS regions across all bundled levels.
+    """Deprecated — use ``GET /nuts/regions``.
 
-    Returns ``{regions: [{code, name, name_latn, name_native, name_source,
-    level}]}`` — small enough (~1.8k rows) to power a client-side region
-    picker without downloading the boundary GeoJSON. Levels/children are
-    derivable from the codes (a child's code is prefixed by its parent's).
-
-    ``name`` is the region's name in ``lang`` where one is known, else its
-    Latin transliteration, else the national-language name; ``name_source``
-    says which. Eurostat only publishes the last two, so the translations
-    come from the bundled gazetteer — see ``src.etl.build_nuts_gazetteer``
-    for where they come from and how complete they are.
-
-    `codes` narrows that to the ones asked for. A caller that needs a
-    handful of labels — a feed card naming the region a contract was
-    awarded in — should not pull 1,798 rows to find three of them.
+    Kept so the web app keeps working across a deploy where the API rolls
+    before it does; it delegates to the public surface rather than keeping a
+    second implementation of the same lookup. Remove once nothing calls it.
     """
     wanted = None
     if codes is not None:
         wanted = {c.strip().upper() for c in codes.split(",") if c.strip()}
-        # An explicit empty selection means "none", not "everything" —
-        # returning the whole list there would be a surprising amount of
-        # data for a caller that asked for nothing.
         if not wanted:
-            return {"regions": []}
-
+            return {"regions": [], "lang": nuts_gazetteer.resolve_language(lang)}
     language = nuts_gazetteer.resolve_language(lang)
-    named = nuts_gazetteer.localised(language)
-    if not named:
-        # No gazetteer bundled (a partial image, or a checkout without the
-        # generated file): fall back to the boundary files, which carry the
-        # national-language name and nothing else.
-        return {"regions": _regions_from_boundaries(wanted)}
-
-    out = []
-    for code, entry in named.items():
-        if wanted is not None and code.upper() not in wanted:
-            continue
-        row = {"code": code, "name": entry["name"], "level": entry["level"],
-               "name_latn": entry["name_latn"], "name_native": entry["name_native"],
-               "name_source": entry["name_source"]}
-        out.append(row)
+    out = [
+        {"code": rec["code"], "name": rec["name"], "level": rec["level"],
+         "name_latn": rec["name_latn"], "name_native": rec["name_native"],
+         "name_source": rec["name_source"]}
+        for rec in (nuts_index.localised(r, language, with_names=False)
+                    for r in nuts_index.records().values())
+        if wanted is None or rec["code"] in wanted
+    ]
     out.sort(key=lambda r: (r["level"], nuts_gazetteer.fold(r["name"])))
     return {"regions": out, "lang": language}
 
 
-@router.get("/nuts-search-index")
+@router.get("/nuts-search-index", deprecated=True)
 def nuts_search_index():
-    """``{terms: {code: "every name this region answers to"}}``.
+    """Deprecated — use ``GET /nuts/search``, which ranks server-side.
 
-    The region picker filters client-side, so it needs the names in all 24
-    languages — not only the one on screen. Somebody reading the site in
-    Portuguese still types "Attica", and a Greek reader still types
-    "Αττική"; both have to hit ``EL3``.
-
-    Terms are folded (lowercased, diacritics stripped) and stripped of any
-    that another term already contains, which keeps the payload to ~130 KB
-    gzipped. Language-independent, so the picker fetches it once.
+    This shipped a folded index for the client to match against, which meant
+    two implementations of the same ranking and a folding contract that had
+    to agree character for character across two languages. Kept only until
+    the deployed web app stops asking for it.
     """
     return {"terms": nuts_gazetteer.search_index()}
 
