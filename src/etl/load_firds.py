@@ -19,7 +19,8 @@ the derived Neo4j store (the canonical write path is
 load_gleif which already runs before us).
 
 Usage:
-    python -m src.etl.load_firds --since 2025-09-01
+    python -m src.etl.load_firds                 # last 7 days
+    python -m src.etl.load_firds --since 2026-06-01
     python -m src.etl.load_firds --file /tmp/firds_delta.zip
 """
 
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 
 import argparse
+import datetime
 import io
 import logging
 import os
@@ -107,6 +109,23 @@ UNWIND $leis AS lei
 MATCH (c:Company) WHERE c.lei = lei
 RETURN c.lei AS lei, c.gmr_id AS gmr_id
 """
+
+
+# Deltas are daily and immutable, and every event is an idempotent upsert,
+# so re-processing a few days is harmless and a rolling window needs no
+# watermark. The old default was a fixed 2025-09-01: every nightly run
+# re-emitted a year of deltas (729 files, measured 2026-09-22 at about
+# 1.6 minutes each — 20 hours against a 2-hour deadline), and etl-firds
+# had not completed since 2026-07-04. Seven days is 20–30 files, under an
+# hour, and covers a week of missed nights. A longer gap is a one-off run
+# with an explicit --since, in slices that fit the deadline.
+_DEFAULT_WINDOW_DAYS = 7
+
+
+def default_since(today=None) -> str:
+    """YYYY-MM-DD, _DEFAULT_WINDOW_DAYS before today (UTC)."""
+    today = today or datetime.datetime.now(datetime.UTC).date()
+    return (today - datetime.timedelta(days=_DEFAULT_WINDOW_DAYS)).isoformat()
 
 
 def query_firds_files(since):
@@ -489,8 +508,9 @@ def main(argv=None):
     )
     parser.add_argument("--file", help="Path to a local FIRDS ZIP file")
     parser.add_argument(
-        "--since", default="2025-09-01",
-        help="Download deltas since this date (YYYY-MM-DD)",
+        "--since", default=None,
+        help="Process delta files published since this date (YYYY-MM-DD). "
+             f"Default: {_DEFAULT_WINDOW_DAYS} days ago — see default_since().",
     )
     parser.add_argument(
         "--neo4j-uri",
@@ -520,7 +540,7 @@ def main(argv=None):
         if args.file:
             summary = _load_from_file(driver, log, args.file)
         else:
-            summary = _load_from_solr(driver, log, args.since)
+            summary = _load_from_solr(driver, log, args.since or default_since())
     finally:
         driver.close()
         log.close()
