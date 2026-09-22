@@ -110,3 +110,20 @@ def test_the_documented_schemas_match_the_stores_we_actually_run():
         assert label in graph
     for rel in ("AWARDED_TO", "SUBSIDIARY_OF", "SAME_AS"):
         assert rel in graph
+
+
+def test_the_graph_article_only_shows_queries_that_can_finish():
+    """These articles are retrieved by the assistant and copied by readers, so
+    an example that cannot run is worse than no example. The unbounded
+    count over every AWARDED_TO relationship takes ~13s against the query
+    proxy's 8s cap — it used to be the first query this article taught."""
+    graph = docs.get_article("store-graph").body
+    examples = graph.split("<pre><code>")[1:]
+    assert examples, "the article should still teach by example"
+    for example in examples:
+        query = example.split("</code></pre>")[0]
+        assert "LIMIT" in query, f"unbounded example: {query[:60]}"
+        if "count(" in query:
+            # Aggregating is fine once the match is anchored on an index.
+            assert "{" in query and "}" in query, f"unanchored aggregate: {query[:60]}"
+    assert "8-second" in graph
