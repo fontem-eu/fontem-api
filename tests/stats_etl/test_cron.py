@@ -39,7 +39,7 @@ def harness(monkeypatch):
 
     monkeypatch.setattr(cron.cli, "main", fake_cli)
     monkeypatch.setattr(cron.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setenv("KUMA_PUSH_URL", "http://kuma/api/push/abc")
+    monkeypatch.setenv("KUMA_PUSH_URL", "https://kuma/api/push/abc")
     return state
 
 
@@ -57,7 +57,7 @@ def test_daily_runs_seed_polygons_then_a_stale_sync_and_reports_up(harness):
         ["sync", "--stale-after", "1d"],
     ]
     q = _query(harness["pushed"][0])
-    assert harness["pushed"][0].startswith("http://kuma/api/push/abc?")
+    assert harness["pushed"][0].startswith("https://kuma/api/push/abc?")
     assert q == {"status": "up", "msg": "3+synced+1+skipped+0+failed", "ping": ""}
 
 
