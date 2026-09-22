@@ -124,3 +124,39 @@ def test_every_chart_image_comes_from_an_internal_mirror():
     assert images, "found no image references to check"
     offenders = [(str(f), ref) for f, ref in images if not ref.startswith(_MIRRORS)]
     assert not offenders, f"images not pulled through a mirror: {offenders}"
+
+
+def _pod_templates() -> list[tuple[pathlib.Path, str]]:
+    """Every chart template in the repo, both charts."""
+    out = []
+    for root in (pathlib.Path("deployment/templates"),
+                 pathlib.Path("deployment-stats/templates")):
+        for path in sorted(root.rglob("*.yaml")):
+            out.append((path, path.read_text(encoding="utf-8")))
+    return out
+
+
+def test_a_template_that_pins_nodes_also_tolerates_their_taints():
+    """nodeSelector and tolerations are two halves of one decision.
+
+    The production nodes carry void42.internal/role=prod:NoSchedule. A
+    pod selected onto them that cannot tolerate that taint is not
+    "slow to schedule", it is unschedulable forever: no pod, no logs,
+    no container to exec into, just a CronJob whose last success keeps
+    receding. fontem-stats-sync-weekly sat like that -- the template
+    rendered .Values.nodeSelector and never .Values.tolerations, while
+    prod's values defined both -- and the only symptom was a Pending pod
+    nobody looks at until someone asks why the data is stale.
+
+    Rendering the selector without the toleration is therefore always a
+    bug, whichever chart it is in.
+    """
+    offenders = [
+        str(path)
+        for path, text in _pod_templates()
+        if ".Values.nodeSelector" in text and ".Values.tolerations" not in text
+    ]
+    assert not offenders, (
+        "these templates pin pods to nodes but never render tolerations, so "
+        "they cannot schedule onto tainted nodes: " + ", ".join(offenders)
+    )
