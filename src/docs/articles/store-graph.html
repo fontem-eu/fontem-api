@@ -39,5 +39,13 @@ over name matches will overcount.</p>
 relationships without a direction arrow unless you have checked which way
 round they are stored.</p>
 <pre><code>MATCH (c:Company)-[:AWARDED_TO]-(ct:Contract)
-RETURN c.name AS company, count(ct) AS contracts
+WHERE ct.value_eur IS NOT NULL
+RETURN c.name AS supplier, ct.title AS contract, ct.value_eur AS value_eur
+LIMIT 20</code></pre>
+<p><strong>Narrow before you aggregate.</strong> Queries run under an 8-second
+cap, and counting across every <code>AWARDED_TO</code> relationship — three
+quarters of a million and growing — exceeds it. Anchor the match on an indexed
+property first, then group:</p>
+<pre><code>MATCH (ct:Contract {country: 'DEU'})-[:AWARDED_TO]-(c:Company)
+RETURN c.name AS supplier, count(ct) AS contracts, sum(ct.value_eur) AS total_eur
 ORDER BY contracts DESC LIMIT 20</code></pre>
