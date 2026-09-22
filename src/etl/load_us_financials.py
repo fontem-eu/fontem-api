@@ -202,7 +202,9 @@ def load_us_financials(  # pylint: disable=too-many-locals
     skipped_validation = 0
     t0 = time.time()
 
-    with log.batch(batch_id, producer="load_us_financials") as emit:
+    # Chunked: ~130,000 UpsertFiling per run. One round trip per 1000 rows
+    # instead of per event (fontem-events 0.7.0).
+    with log.batch(batch_id, producer="load_us_financials", chunk=1000) as emit:
         for filename in sorted(facts_dir.glob("CIK*.json")):
             cik_str = filename.stem.replace("CIK", "").lstrip("0").zfill(10)
             company_gmr = cik_to_gmr.get(cik_str)

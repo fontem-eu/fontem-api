@@ -227,7 +227,9 @@ def emit_gleif(log: EventLog, records) -> dict:
     total = 0
     t0 = time.time()
 
-    with log.batch(batch_id, producer="load_gleif") as emit:
+    # Chunked: ~3.4M UpsertCompany per run, one per LEI record. One round trip per 1000 rows
+    # instead of per event (fontem-events 0.7.0).
+    with log.batch(batch_id, producer="load_gleif", chunk=1000) as emit:
         for rec in records:
             company_gmr_id = str(gmr_id.from_lei(rec["lei"]))
             emit.upsert(

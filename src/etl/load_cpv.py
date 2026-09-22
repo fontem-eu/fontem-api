@@ -179,7 +179,9 @@ def load_cpv(log: EventLog, *, gc_path: Path = GC_FILE,
     batch_id = uuid.uuid4()
     total = 0
     t0 = time.time()
-    with log.batch(batch_id, producer="load_cpv") as emit:
+    # Chunked: 226,896 for the all-24-languages default. One round trip per 1000 rows
+    # instead of per event (fontem-events 0.7.0).
+    with log.batch(batch_id, producer="load_cpv", chunk=1000) as emit:
         for code, parent, label_lang, label, level in parse_genericode(
             gc_path,
         ):
