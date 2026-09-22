@@ -380,6 +380,40 @@ def test_nuts_regions_filter_still_works_with_a_language():
         cleanup_dishka()
 
 
+def test_the_geo_region_endpoints_are_deprecated_delegates():
+    """They are kept only so a deploy where the API rolls before the web app
+    does not break the picker, and they delegate rather than keeping a second
+    implementation of the same lookup. The public surface is /nuts."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        legacy = client.get("/geo/nuts-regions?codes=EL3&lang=fr").json()["regions"][0]
+        current = client.get("/nuts/regions?codes=EL3&lang=fr").json()["regions"][0]
+        assert legacy["name"] == current["name"]
+        assert legacy["name_latn"] == current["name_latn"]
+        spec = client.get("/openapi.json").json()["paths"]
+        assert spec["/geo/nuts-regions"]["get"]["deprecated"] is True
+        assert spec["/geo/nuts-search-index"]["get"]["deprecated"] is True
+        assert not spec["/nuts/regions"]["get"].get("deprecated")
+    finally:
+        cleanup_dishka()
+
+
+def test_the_assistant_reaches_regions_through_the_public_surface():
+    """One tool per job: the deprecated route no longer advertises itself, so
+    the model cannot pick the copy that is going away."""
+    client = make_test_client(geo_source=_mock_geo_source([]))
+    try:
+        paths = client.get("/openapi.json").json()["paths"]
+        tools = {op["x-agent-tool"]["name"]: path
+                 for path, item in paths.items() for op in item.values()
+                 if isinstance(op, dict) and "x-agent-tool" in op}
+        assert tools["list_nuts_regions"] == "/nuts/regions"
+        assert tools["find_nuts_region"] == "/nuts/search"
+        assert "x-agent-tool" not in paths["/geo/nuts-regions"]["get"]
+    finally:
+        cleanup_dishka()
+
+
 # ── /geo/nuts-search-index ─────────────────────────────────────
 
 

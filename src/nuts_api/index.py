@@ -11,6 +11,7 @@ module is meant to lift out into its own service, like ``src.atlas_api``.
 """
 from __future__ import annotations
 
+import dataclasses
 import functools
 
 from src.data import nuts_gazetteer
@@ -103,6 +104,28 @@ def _display(rec: dict, lang: str) -> str:
     return rec["names"].get(lang) or rec["name_latn"] or rec["name_native"] or rec["code"]
 
 
+def localised(rec: dict, lang: str, *, with_names: bool = True) -> dict:
+    """One record as it goes over the wire: a display name for `lang`, and the
+    per-language map unless the caller said they don't want it.
+
+    ``name_source`` names which form won, so a caller can tell a real
+    translation from a fallback to the transliteration — which matters when
+    ~14% of regions have no translation at all.
+    """
+    languages = nuts_gazetteer.localised(lang)
+    named = languages.get(rec["code"], {})
+    out = dict(rec)
+    out["name"] = named.get("name") or _display(rec, lang)
+    out["name_source"] = named.get("name_source") or "code"
+    if not with_names:
+        # Every name VARIANT goes, not only the per-language map: a caller
+        # asking for one language has no use for 23 others or the aliases,
+        # and they are most of the bytes.
+        out.pop("names", None)
+        out.pop("aliases", None)
+    return out
+
+
 def _unfolded(rec: dict, folded: str, lang: str | None, kind: str) -> str:
     """The original spelling behind a folded match, for showing back."""
     if kind == "code":
@@ -137,8 +160,26 @@ def _rank(folded_query: str, folded_form: str, lang: str | None,
     return RANK_ALIAS
 
 
-def _best_per_region(folded: str, lang: str, level: int | None,
-                     country: str | None) -> dict[str, tuple[int, str, str | None, str]]:
+@dataclasses.dataclass(frozen=True)
+class Filters:
+    """What narrows a search. One object because they travel together."""
+
+    level: int | None = None
+    max_level: int | None = None
+    country: str | None = None
+
+    def keeps(self, record: dict) -> bool:
+        if self.level is not None and record["level"] != self.level:
+            return False
+        if self.max_level is not None and record["level"] > self.max_level:
+            return False
+        if self.country and record["country"] != self.country.upper():
+            return False
+        return True
+
+
+def _best_per_region(folded: str, lang: str, filters: Filters
+                     ) -> dict[str, tuple[int, str, str | None, str]]:
     """Strongest match per region: ``code -> (rank, folded form, language, kind)``.
 
     One region can match through several of its names — Lisbon's has a dozen —
@@ -148,12 +189,7 @@ def _best_per_region(folded: str, lang: str, level: int | None,
     best: dict[str, tuple[int, str, str | None, str]] = {}
     for folded_form, code, form_lang, kind in name_index():
         rank = _rank(folded, folded_form, form_lang, kind, lang)
-        if rank is None:
-            continue
-        record = known[code]
-        if level is not None and record["level"] != level:
-            continue
-        if country and record["country"] != country.upper():
+        if rank is None or not filters.keeps(known[code]):
             continue
         current = best.get(code)
         if current is None or rank < current[0]:
@@ -161,8 +197,8 @@ def _best_per_region(folded: str, lang: str, level: int | None,
     return best
 
 
-def search(query: str, lang: str, *, level: int | None = None,
-           country: str | None = None, limit: int = 20) -> tuple[int, list[dict]]:
+def search(query: str, lang: str, *, filters: Filters | None = None,
+           limit: int = 20) -> tuple[int, list[dict]]:
     """Name (in any of the 24 languages) or code → NUTS regions, ranked.
 
     Returns the total number of matching regions and the first `limit` of them.
@@ -171,8 +207,9 @@ def search(query: str, lang: str, *, level: int | None = None,
     if not folded:
         return 0, []
     known = records()
-    ordered = sorted(_best_per_region(folded, lang, level, country).items(),
-                     key=lambda kv: (kv[1][0], kv[0]))
+    ordered = sorted(
+        _best_per_region(folded, lang, filters or Filters()).items(),
+        key=lambda kv: (kv[1][0], kv[0]))
     matches = []
     for code, (rank, folded_form, form_lang, kind) in ordered[:limit]:
         record = known[code]
