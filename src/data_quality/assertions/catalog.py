@@ -1100,6 +1100,55 @@ ASSERTIONS: list[Assertion] = [
         "confidence >= 0.05 legitimately keeps its value (mega-"
         "contracts) — that band is excluded here.",
     ),
+    # ── Ingest cleaning stage (data-backlog Part 5) ──────────────────
+    # The gate for the C1 prod cleanup: FAILS on the graph as it is and
+    # PASSES once the junk entities are retracted and the cleaner (C2)
+    # keeps new ones out.
+    #
+    # Only the UNAMBIGUOUS half of the name rules is a BLOCK gate: the
+    # Italian award-decree phrases and a URL with a scheme (nobody is
+    # named "https://contractaciopublica.cat/ca/detall-publicacio/...").
+    # A bare "www." is deliberately NOT here - WWW.KOTVA.CZ a.s.,
+    # www.heymountain.com GmbH and HTTPS OU are real companies trading
+    # under their domain (226 prod names contain "http" at all), so a
+    # gate that counted them could never reach zero however complete the
+    # cleanup was. The loader's generic.name_contains_url rule makes that
+    # distinction with the legal-form test, which Cypher cannot express.
+    Assertion(
+        "values.company_name_is_not_notice_text", VALUES,
+        "No Company is named after notice free text", BLOCK, "cypher",
+        "MATCH (c:Company) WHERE c.name =~ "
+        "'(?i).*gara aggiudicata.*|.*come da determina.*|.*determina n\\\\. ?[0-9].*"
+        "|.*pubblicat[ao] sul sito.*|.*https?://.*' "
+        "RETURN count(*) AS violations",
+        zero_violations("companies named after notice text"),
+        "Some notices put the award decree's free text ('Gara aggiudicata "
+        "come da determina n. 543 del 2013 pubblicata sul sito ...') where "
+        "the supplier's name belongs. Ingested as a company, that text "
+        "attracts contracts and near-duplicate merges (6,683 asserted "
+        "SAME_AS edges in one family). The cleaning stage withholds such "
+        "suppliers at ingest; this assertion is the failing-before / "
+        "passing-after gate for retracting the ones already in the graph.",
+    ),
+    # Contracts ingested by the cleaning-stage loader carry cleaning_rules
+    # (an empty list when nothing fired). The graph has no ingest timestamp
+    # to key on, so publication_date over the last 7 days is the proxy: the
+    # daily incremental run ingests those; a backfill of older notices is
+    # not covered. Stays red until the loader AND the neo4j sink that
+    # persists the field are both deployed — WARN, not BLOCK.
+    Assertion(
+        "coverage.contract_cleaning_rules_present", COVERAGE,
+        "Contracts published in the last 7 days carry cleaning_rules (>=95%)",
+        WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= "
+        "toString(date() - duration({days: 7})) "
+        "RETURN count(*) AS total, count(c.cleaning_rules) AS covered",
+        min_coverage(0.95, "cleaning_rules"),
+        "Every notice now passes through the cleaning stage, which stamps "
+        "the rules that fired (or []) on the event. A recent contract "
+        "without the field was written by a loader or sink that predates "
+        "the stage, so its suppliers and value were never cleaned.",
+    ),
     # ── InvestmentFund model (funds are not companies) ────────────────
     Assertion(
         "keys.investmentfund_gmr_id", KEYS,
