@@ -333,10 +333,17 @@ def _prior_disclosure_ids(dsn: str | None) -> set[str]:
         return set()
     prefix = _disclosure_iri("")
     ids: set[str] = set()
+    # `domain` is indexed (entity_events_domain_seq); `producer` is not.
+    # Filtering on producer alone was a parallel sequential scan of the
+    # whole 61 GB / 72 M-row log — more than 33 minutes on 2026-09-21,
+    # which is why every weekly run since 2026-09-07 died at its one-hour
+    # deadline right after emitting. With the domain in the WHERE the
+    # planner seeks the index; the same result takes about two minutes.
     with psycopg.connect(dsn, connect_timeout=10) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT iri FROM events.entity_events WHERE producer = %s",
-            ("load_eu_lobbying",),
+            "SELECT DISTINCT iri FROM events.entity_events "
+            "WHERE domain = %s AND producer = %s",
+            ("eu_lobbying", "load_eu_lobbying"),
         )
         for (iri,) in cur:
             if iri and iri.startswith(prefix):

@@ -335,6 +335,41 @@ def test_prior_disclosure_ids_extracts_and_filters(monkeypatch):
     assert ids == {"111-22", "333-44"}
 
 
+def test_prior_disclosure_ids_seeks_the_indexed_domain(monkeypatch):
+    """events.entity_events is 61 GB; only (domain, seq) and (iri, seq)
+    are indexed. A WHERE on producer alone is a full scan (33+ minutes
+    on 2026-09-21, past the job's deadline)."""
+    seen = {}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            seen["sql"], seen["params"] = sql, params
+
+        def __iter__(self):
+            return iter([])
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def cursor(self):
+            return _Cur()
+
+    monkeypatch.setattr(load_eu_lobbying.psycopg, "connect", lambda *a, **k: _Conn())
+    load_eu_lobbying._prior_disclosure_ids("postgresql://x")  # pylint: disable=protected-access
+    assert "domain = %s" in seen["sql"] and "producer = %s" in seen["sql"]
+    assert seen["params"] == ("eu_lobbying", "load_eu_lobbying")
+
+
 def test_prior_disclosure_ids_unconfigured_or_unsubstituted():
     assert load_eu_lobbying._prior_disclosure_ids(None) == set()  # pylint: disable=protected-access
     assert load_eu_lobbying._prior_disclosure_ids(  # pylint: disable=protected-access

@@ -1,8 +1,8 @@
 """Names for NUTS regions, in the 24 official EU languages.
 
 Reads the gazetteer built by ``src.etl.build_nuts_gazetteer`` (bundled at
-``src/api/data/nuts_names.json``) and turns it into what the region picker
-needs: one display name per language, the two Eurostat forms, and a folded
+``src/data/nuts/nuts_names.json``) and turns it into what its two readers
+need: the region picker: one display name per language, the two Eurostat forms, and a folded
 search string that matches the region under any of its names.
 
 Eurostat names a region twice — in the national language and transliterated
@@ -23,7 +23,7 @@ import unicodedata
 
 from src.data import geo_ip
 
-_GAZETTEER_PATH = os.path.join(os.path.dirname(__file__), "data", "nuts_names.json")
+_GAZETTEER_PATH = os.path.join(os.path.dirname(__file__), "nuts", "nuts_names.json")
 
 DEFAULT_LANGUAGE = "en"
 
