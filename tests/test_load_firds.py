@@ -6,6 +6,7 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+import datetime
 import io
 import zipfile
 from unittest.mock import MagicMock
@@ -458,3 +459,25 @@ def test_download_zip_passes_rate_limiter_to_get_with_retry(monkeypatch):
     assert captured["kwargs"]["rate_limiter"] is load_firds._firds_limiter
     assert captured["kwargs"]["max_attempts"] == load_firds._FIRDS_MAX_ATTEMPTS
     assert captured["kwargs"]["base_delay"] == load_firds._FIRDS_BASE_DELAY_S
+
+
+def test_default_since_is_a_rolling_seven_day_window():
+    assert load_firds.default_since(datetime.date(2026, 9, 22)) == "2026-09-15"
+
+
+def test_solr_mode_uses_the_rolling_window_when_no_since_is_given(monkeypatch):
+    """The fixed 2025-09-01 default re-emitted a year of deltas per night."""
+    seen = {}
+    def fake_solr(_driver, _log, since):
+        seen.setdefault("since", since)
+        return load_firds._new_summary()  # pylint: disable=protected-access
+
+    monkeypatch.setattr(load_firds, "_load_from_solr", fake_solr)
+    monkeypatch.setattr(load_firds.GraphDatabase, "driver",
+                        lambda *a, **k: type("D", (), {"close": lambda self: None})())
+    monkeypatch.setattr(load_firds.EventLog, "from_env",
+                        classmethod(lambda cls: type("L", (), {"close": lambda self: None})()))
+    load_firds.main([])
+    assert seen["since"] == load_firds.default_since()
+    load_firds.main(["--since", "2026-06-01"])
+    assert seen["since"] == load_firds.default_since()  # setdefault kept the first
