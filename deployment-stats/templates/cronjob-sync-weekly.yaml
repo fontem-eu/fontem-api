@@ -79,6 +79,19 @@ spec:
           nodeSelector:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .Values.tolerations }}
+          # The nodeSelector above is only half of it: the production
+          # nodes carry void42.internal/role=prod:NoSchedule, so a pod
+          # selected onto them and unable to tolerate that taint is
+          # unschedulable — 0/4 nodes, forever, with no pod and no log to
+          # look at. That is what happened here: the selector was
+          # rendered and the toleration was not, so the weekly sync sat
+          # Pending while the daily (which pins nothing, so it lands on
+          # an untainted node) kept working. The statefulset renders both
+          # and is the shape to match.
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumes:
             - name: datasets
               configMap:
