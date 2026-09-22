@@ -25,7 +25,6 @@ import argparse
 import datetime as dt
 import io
 import os
-import re
 import signal
 import sys
 import urllib.parse
@@ -33,9 +32,6 @@ import urllib.request
 from pathlib import Path
 
 from . import cli
-
-_SUMMARY = re.compile(r"\d+ synced|\d+ skipped|\d+ failed")
-
 
 class _Tee(io.TextIOBase):
     """Writes through to the real stream as it happens (so `kubectl
@@ -78,8 +74,16 @@ def _open_log(log_dir: str | None, cadence: str):
 
 
 def _summary(text: str) -> str:
-    found = _SUMMARY.findall(text)
-    return "+".join(found).replace(" ", "+") if found else "unknown"
+    """The CLI's last "summary: 3 synced, 1 skipped, 0 failed, 900 rows"
+    line as Kuma shows it: "3+synced+1+skipped+0+failed"."""
+    for line in reversed(text.splitlines()):
+        if not line.startswith("summary:"):
+            continue
+        parts = [p.strip() for p in line[len("summary:"):].split(",")]
+        kept = [p for p in parts if p.split(" ")[-1] in ("synced", "skipped", "failed")]
+        if kept:
+            return "+".join(kept).replace(" ", "+")
+    return "unknown"
 
 
 def push_kuma(url: str | None, status: str, summary: str) -> None:
