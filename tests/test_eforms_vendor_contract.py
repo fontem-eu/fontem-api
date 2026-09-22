@@ -7,7 +7,7 @@ did: the archive path crashed on ``buyer.nuts`` against 0.8.0). This
 asserts the ACTUAL vendored dataclasses expose the fields the loader
 depends on — cheap insurance against re-introducing the skew.
 """
-from eforms.models import Notice, Organization
+from eforms.models import Award, Lot, Notice, Organization
 
 
 def test_notice_exposes_nuts():
@@ -16,3 +16,22 @@ def test_notice_exposes_nuts():
 
 def test_organization_exposes_nuts():
     assert hasattr(Organization(org_id="o", name="n"), "nuts")
+
+
+def test_award_exposes_the_raw_signals_the_cleaning_stage_reads():
+    """eforms-parser 0.12: the verbatim text behind the cleaned money and
+    dates, which the cleaning stage keeps on the event."""
+    award = Award(lot_id="l", contractor_org_id="o")
+    for field in ("award_date_raw", "tender_reference", "value_raw",
+                  "framework_max_value", "framework_reestimated_value"):
+        assert hasattr(award, field), field
+
+
+def test_notice_exposes_the_watermark_and_framework_fields():
+    notice = Notice(notice_id="x")
+    for field in ("tender_result_award_date_raw", "notice_language",
+                  "customization_id", "total_value_raw", "framework_max_value",
+                  "framework_max_value_currency", "framework_reestimated_value",
+                  "framework_duration_months", "framework_max_operators"):
+        assert hasattr(notice, field), field
+    assert hasattr(Lot(lot_id="l"), "estimated_value_raw")

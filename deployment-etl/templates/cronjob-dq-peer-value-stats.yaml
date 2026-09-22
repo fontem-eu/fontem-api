@@ -1,0 +1,22 @@
+{{/*
+Peer value bands for the ingest cleaning stage (data-backlog Part 5,
+C4). Groups :Contract.value_eur by (buyer country, cpv4) and upserts
+the percentiles into dq.peer_value_stats in the events store; the TED
+loader reads the table at start-up and its generic.value_peer_outlier
+rule quarantines awards far above their peers. Runs nightly BEFORE
+etl-ted-contracts (05:00) so the day's ingest sees fresh bands. The
+grouping query over ~2.8M contracts takes minutes, hence the deadline.
+*/}}
+{{- include "edgar-gmr-etl.cronjob" (dict
+      "name"            "dq-peer-value-stats"
+      "schedule"        "30 3 * * *"
+      "module"          "src.data_quality.peer_value_stats"
+      "args"            (list)
+      "deadlineSeconds" 1800
+      "cpuRequest"      "100m"
+      "cpuLimit"        "500m"
+      "memRequest"      "256Mi"
+      "memLimit"        "1Gi"
+      "extraEnv"        (list)
+      "Values"          .Values
+      "Release"         .Release) -}}

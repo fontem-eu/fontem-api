@@ -874,3 +874,66 @@ def test_bidder_anomaly_evaluators():
     assert ok
     bad, obs = infl.evaluate({"violations": 3, "detail": "2026-03 2026-04 2025-11 "})
     assert not bad and "2026-03" in obs
+
+
+# --------------------------------------------------------------------------
+# Ingest cleaning stage (data-backlog Part 5)
+# --------------------------------------------------------------------------
+_NOTICE_TEXT_NAME = ("Gara aggiudicata come da determina n. 543 del 2013 "
+                     "pubblicata sul sito www.csc.sanita.fvg.it alla sezione "
+                     "delibere e decreti.")
+
+
+def _cypher_regex(query: str) -> str:
+    """The regex inside `=~ '...'`, with Cypher's string escaping undone."""
+    body = query.split("=~ '", 1)[1].split("' RETURN", 1)[0]
+    return body.replace("\\\\", "\\")
+
+
+def test_company_name_is_not_notice_text_is_the_c1_gate():
+    a = by_id()["values.company_name_is_not_notice_text"]
+    assert a.family == VALUES and a.severity == BLOCK and a.engine == "cypher"
+    assert "MATCH (c:Company)" in a.query
+    ok, obs = a.evaluate({"violations": 1307})
+    assert not ok and "1307" in obs
+    assert a.evaluate({"violations": 0})[0]
+
+
+@pytest.mark.parametrize("name", [
+    _NOTICE_TEXT_NAME,
+    "GARA AGGIUDICATA a seguito di procedura aperta",
+    "Fornitura come da determina dirigenziale 12/2020",
+    "Aggiudicazione pubblicata sul sito istituzionale",
+    "https://example.org",
+    "DIFERENTES ADJUDICATARIOS (https://contractaciopublica.cat/x/300670279)",
+])
+def test_notice_text_regex_matches_the_junk_families(name):
+    assert re.fullmatch(_cypher_regex(by_id()["values.company_name_is_not_notice_text"].query),
+                        name)
+
+
+@pytest.mark.parametrize("name", [
+    "Visualforma - Tecnologias de Informação, S.A.",
+    "Determinazione Servizi S.r.l.",
+    "Gara S.p.A.",
+    "Siemens Aktiengesellschaft",
+    # Real companies trading under their domain: the gate must not count
+    # them, or the C1 cleanup could never make it pass.
+    "WWW.KOTVA.CZ, a.s.",
+    "www.heymountain.com GmbH",
+    "HTTPS OU",
+])
+def test_notice_text_regex_leaves_real_names_alone(name):
+    assert not re.fullmatch(
+        _cypher_regex(by_id()["values.company_name_is_not_notice_text"].query), name)
+
+
+def test_contract_cleaning_rules_present_is_a_warn_coverage_bar():
+    a = by_id()["coverage.contract_cleaning_rules_present"]
+    assert a.family == COVERAGE and a.severity == WARN and a.engine == "cypher"
+    assert "c.publication_date >= toString(date() - duration({days: 7}))" in a.query
+    assert "count(c.cleaning_rules) AS covered" in a.query
+    assert a.evaluate({"total": 100, "covered": 95})[0]
+    ok, obs = a.evaluate({"total": 100, "covered": 50})
+    assert not ok and "50/100" in obs
+    assert a.evaluate({"total": 0, "covered": 0})[0]
