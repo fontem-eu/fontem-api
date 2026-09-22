@@ -74,9 +74,58 @@ def test_regions_filter_and_page_stably(client):
     assert first["total"] == second["total"] == 1798
 
 
+def test_regions_name_rows_in_the_requested_language(client):
+    """The app needs one language per row, not a map of 24 — this is what
+    replaced the separate /geo endpoint that used to do the projection."""
+    rows = {r["code"]: r for r in
+            client.get("/nuts/regions?codes=EL3,PT1A0&lang=el").json()["regions"]}
+    assert rows["EL3"]["name"] == "Περιφέρεια Αττικής"
+    assert rows["EL3"]["name_source"] == "el"
+    assert rows["PT1A0"]["name"].startswith("Μητροπολιτική")
+    # An unknown language is English, not a 422: this endpoint is public.
+    assert client.get("/nuts/regions?codes=EL3&lang=zz").json()[
+        "regions"][0]["name"] == "Attica Region"
+
+
+def test_regions_can_drop_the_per_language_map(client):
+    """It is most of the payload, and a caller showing one language pays for
+    23 others otherwise."""
+    full = client.get("/nuts/regions?limit=5000")
+    lean = client.get("/nuts/regions?limit=5000&lang=en&names=none")
+    lean_row = lean.json()["regions"][0]
+    assert lean_row["names"] is None and lean_row["aliases"] is None
+    assert lean_row["name"] and lean_row["name_latn"]      # still usable
+    assert full.json()["regions"][0]["names"]
+    assert len(lean.content) < len(full.content) / 3
+
+
+def test_regions_narrow_to_the_codes_asked_for(client):
+    """Labelling three regions on a feed card should not pull 1,798 rows."""
+    body = client.get("/nuts/regions?codes=EL3,pt1a0, EL303 ").json()
+    assert sorted(r["code"] for r in body["regions"]) == ["EL3", "EL303", "PT1A0"]
+    assert body["total"] == 3
+    # An explicit empty selection means none, not everything.
+    assert client.get("/nuts/regions?codes=").json()["regions"] == []
+
+
+def test_regions_cap_the_depth(client):
+    """`max_level=0` is the country list a picker opens with."""
+    countries = client.get("/nuts/regions?max_level=0&limit=5000").json()
+    assert countries["total"] == 39
+    assert {r["level"] for r in countries["regions"]} == {0}
+    shallow = client.get("/nuts/regions?max_level=2&limit=5000").json()
+    assert max(r["level"] for r in shallow["regions"]) == 2
+
+
+def test_search_caps_the_depth_too(client):
+    matches = client.get("/nuts/search?q=att&max_level=1").json()["matches"]
+    assert matches and all(m["level"] <= 1 for m in matches)
+
+
 def test_regions_reject_a_nonsense_filter(client):
     assert client.get("/nuts/regions?level=9").status_code == 422
     assert client.get("/nuts/regions?limit=99999").status_code == 422
+    assert client.get("/nuts/regions?names=some").status_code == 422
 
 
 # ── GET /nuts/regions/{code} ───────────────────────────────────

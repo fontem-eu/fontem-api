@@ -43,10 +43,12 @@ and folding the bundled artifact. Nothing in `src.api` is imported, so the
 seam to preserve when extracting is that one module plus
 `src/data/nuts/nuts_names.json`.
 
-The assistant reaches the same data through `/geo/nuts-regions`
-(`list_nuts_regions`), which is annotated with `agent_tool`; annotating
-routes here would mean importing `src.api.agent_tools` and breaking the
-boundary above.
+One documented exception to that boundary: `routers/regions.py` imports
+`src.api.agent_tools` to mark `/nuts/regions` and `/nuts/search` as tools the
+assistant may call, the same exception `src/atlas_api/routers/datasets.py`
+makes. The alternative was a second endpoint on the other side of the seam
+doing the same job, which is what this consolidation removed. When extracting,
+drop the two `openapi_extra=` annotations and the import with them.
 
 ## Where the names come from
 

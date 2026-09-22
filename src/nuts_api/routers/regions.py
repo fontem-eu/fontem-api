@@ -13,6 +13,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from src.api.agent_tools import agent_tool
+
 from src.data import nuts_gazetteer
 from src.nuts_api import index
 from src.nuts_api.schemas import (
@@ -117,29 +119,64 @@ def service_info(response: Response) -> ServiceInfo:
     )
 
 
-@router.get("/regions")
-def list_regions(
+@router.get(
+    "/regions",
+    openapi_extra=agent_tool(
+        name="list_nuts_regions",
+        when="you need the NUTS code for a place before asking for regional "
+             "statistics, and a name search has not already given it to you",
+        group="geography",
+        params=("codes", "level", "max_level", "country", "lang")),
+)
+def list_regions(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     response: Response,
-    level: Annotated[int | None, Query(ge=0, le=3, description="NUTS level")] = None,
+    level: Annotated[int | None, Query(ge=0, le=3, description="Exact NUTS level")] = None,
+    max_level: Annotated[int | None, Query(
+        ge=0, le=3, description="Deepest level to return; 0 is countries only")] = None,
     country: Annotated[str | None, Query(
         min_length=2, max_length=2,
         description="NUTS-0 code, e.g. EL. Note EL, not GR.")] = None,
-    limit: Annotated[int, Query(ge=1, le=2000)] = 500,
+    codes: Annotated[str | None, Query(
+        max_length=2000,
+        description="Comma-separated codes; returns only these. For labelling "
+                    "a handful without pulling the classification.")] = None,
+    lang: Annotated[str | None, Query(
+        max_length=16, description="Language for `name` on each row (EU-24 "
+                                   "code). Unknown or missing means "
+                                   "English.")] = None,
+    names: Annotated[str, Query(
+        pattern="^(all|none)$",
+        description="`none` drops the per-language map and the aliases, "
+                    "which are most of the payload, for a caller that only "
+                    "needs the one language it asked for.")] = "all",
+    limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> RegionPage:
     """Every region, with all of its known names. Filter, or take the lot.
 
-    Ordered by code, so paging is stable. `limit` caps at 2000 — one page
-    holds the whole classification if you ask for it, and
-    `GET /nuts/gazetteer.json` is there for a copy you keep.
+    Ordered by code, so paging is stable. The cap of 5000 is above the size
+    of the classification on purpose: one call gets everything, and
+    `names=none&lang=xx` roughly quarters that call when only the one
+    language is wanted.
     """
     _public(response)
+    wanted = None
+    if codes is not None:
+        wanted = {c.strip().upper() for c in codes.split(",") if c.strip()}
+        # An explicit empty selection means "none", not "everything".
+        if not wanted:
+            return RegionPage(total=0, limit=limit, offset=offset, regions=[])
+    language = nuts_gazetteer.resolve_language(lang)
     rows = [r for r in index.records().values()
             if (level is None or r["level"] == level)
-            and (not country or r["country"] == country.upper())]
+            and (max_level is None or r["level"] <= max_level)
+            and (not country or r["country"] == country.upper())
+            and (wanted is None or r["code"] in wanted)]
     page = rows[offset:offset + limit]
-    return RegionPage(total=len(rows), limit=limit, offset=offset,
-                      regions=[Region(**r) for r in page])
+    return RegionPage(
+        total=len(rows), limit=limit, offset=offset,
+        regions=[Region(**index.localised(r, language, with_names=names == "all"))
+                 for r in page])
 
 
 @router.get("/regions.csv", response_class=Response)
@@ -185,7 +222,16 @@ def gazetteer(response: Response) -> Response:
                     headers=dict(response.headers))
 
 
-@router.get("/search")
+@router.get(
+    "/search",
+    openapi_extra=agent_tool(
+        name="find_nuts_region",
+        when="the user names a place — in any language — and you need the "
+             "NUTS code for it",
+        group="geography",
+        params=("q", "lang", "level", "max_level", "country"),
+        core=True),
+)
 def search_regions(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     response: Response,
     q: Annotated[str, Query(min_length=1, max_length=120,
@@ -195,7 +241,10 @@ def search_regions(  # pylint: disable=too-many-arguments,too-many-positional-ar
         max_length=16, description="Language for the `name` field in each "
                                    "result, and the one whose names rank "
                                    "highest. Default English.")] = None,
-    level: Annotated[int | None, Query(ge=0, le=3)] = None,
+    level: Annotated[int | None, Query(ge=0, le=3,
+                                      description="Exact NUTS level")] = None,
+    max_level: Annotated[int | None, Query(
+        ge=0, le=3, description="Deepest level to return; 0 is countries only")] = None,
     country: Annotated[str | None, Query(min_length=2, max_length=2)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> SearchResults:
@@ -212,8 +261,9 @@ def search_regions(  # pylint: disable=too-many-arguments,too-many-positional-ar
     """
     _public(response)
     language = nuts_gazetteer.resolve_language(lang)
-    total, matches = index.search(q, language, level=level,
-                                 country=country, limit=limit)
+    total, matches = index.search(
+        q, language, limit=limit,
+        filters=index.Filters(level=level, max_level=max_level, country=country))
     return SearchResults(query=q, lang=language, total=total, matches=matches)
 
 
@@ -222,7 +272,13 @@ def search_regions(  # pylint: disable=too-many-arguments,too-many-positional-ar
                                             "NUTS vintage. Codes are retired and "
                                             "renumbered between vintages — see "
                                             "`nuts_version` on GET /nuts."}})
-def one_region(code: str, response: Response) -> RegionDetail:
+def one_region(
+    code: str,
+    response: Response,
+    lang: Annotated[str | None, Query(
+        max_length=16, description="Language for `name` here and on the "
+                                   "ancestors and children")] = None,
+) -> RegionDetail:
     """One region, its parent chain and its direct children.
 
     The hierarchy needs no extra call: NUTS codes nest by prefix, so the
@@ -234,9 +290,11 @@ def one_region(code: str, response: Response) -> RegionDetail:
         raise HTTPException(status_code=404, detail=f"no NUTS region {code!r} "
                                                    f"in this vintage")
     known = index.records()
+    language = nuts_gazetteer.resolve_language(lang)
     return RegionDetail(
-        **rec,
-        ancestors=[Region(**known[c]) for c in index.ancestors_of(rec["code"])],
-        children=[Region(**known[c])
+        **index.localised(rec, language),
+        ancestors=[Region(**index.localised(known[c], language))
+                   for c in index.ancestors_of(rec["code"])],
+        children=[Region(**index.localised(known[c], language))
                   for c in sorted(index.children_of().get(rec["code"], []))],
     )
