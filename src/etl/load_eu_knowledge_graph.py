@@ -249,7 +249,9 @@ def emit_programme_fund_nodes(log: EventLog, records: list[dict]) -> tuple[int, 
     seen_f: set[str] = set()
     seen_link: set[tuple[str, str]] = set()
     batch_id = uuid.uuid4()
-    with log.batch(batch_id, producer="load_eu_knowledge_graph") as emit:
+    # Chunked: ~350,000 per run across both passes. One round trip per 1000 rows
+    # instead of per event (fontem-events 0.7.0).
+    with log.batch(batch_id, producer="load_eu_knowledge_graph", chunk=1000) as emit:
         for rec in records:
             programme, fund = rec.get("programme"), rec.get("fund")
             pcode, fcode = _programme_code(programme), _fund_code(fund)
@@ -301,7 +303,9 @@ def emit_disclosure_events(log: EventLog, records: list[dict]) -> dict:
             return 0
         batch_id = uuid.uuid4()
         n = 0
-        with log.batch(batch_id, producer="load_eu_knowledge_graph") as emit:
+        # Chunked: ~350,000 per run across both passes. One round trip per 1000 rows
+        # instead of per event (fontem-events 0.7.0).
+        with log.batch(batch_id, producer="load_eu_knowledge_graph", chunk=1000) as emit:
             for rec in buf:
                 # Resolve-or-create the beneficiary as a :Company so the
                 # disclosure's company_gmr_id is never a dangling reference

@@ -66,7 +66,9 @@ def load_us_companies(log: EventLog, tickers_data: dict) -> int:  # pylint: disa
     total = 0
     t0 = time.time()
 
-    with log.batch(batch_id, producer="load_us_companies") as emit:
+    # Chunked: 20,884 per run. One round trip per 1000 rows
+    # instead of per event (fontem-events 0.7.0).
+    with log.batch(batch_id, producer="load_us_companies", chunk=1000) as emit:
         for _idx, info in tickers_data.items():
             ticker = info.get("ticker", "")
             cik_raw = info.get("cik_str", "")

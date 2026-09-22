@@ -156,7 +156,10 @@ def emit_relationships(log: EventLog, records) -> dict:  # pylint: disable=too-m
     ensured = 0
     seen_leis: set[str] = set()
     t0 = time.time()
-    with log.batch(batch_id, producer="load_gleif_relationships") as emit:
+    # Chunked: 441,470 events per run, measured 2026-09-22 (258,499
+    # relationships + 182,971 endpoint companies). One round trip per
+    # 1000 rows instead of per event (fontem-events 0.7.0).
+    with log.batch(batch_id, producer="load_gleif_relationships", chunk=1000) as emit:
         for child_lei, parent_lei, consolidation_type in records:
             child_id = str(gmr_id.from_lei(child_lei))
             parent_id = str(gmr_id.from_lei(parent_lei))

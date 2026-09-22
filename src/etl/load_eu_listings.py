@@ -263,7 +263,9 @@ def load_eu_listings(log: EventLog, esef_dir: Path) -> dict:
     batch_id = uuid.uuid4()
     t0 = time.time()
 
-    with log.batch(batch_id, producer="load_eu_listings") as emit:
+    # Chunked: 18,017 per run. One round trip per 1000 rows
+    # instead of per event (fontem-events 0.7.0).
+    with log.batch(batch_id, producer="load_eu_listings", chunk=1000) as emit:
         companies, listings = emit_listings(emit, entities)
         filings = emit_financials(emit, summaries_dir)
 
