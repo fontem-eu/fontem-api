@@ -27,7 +27,9 @@ Country- and gateway-specific rules are wanted.
 | `generic.name_contains_url` | C2 name | A URL with a scheme (`http://`, `https://`) anywhere in the name; or a bare `www.` domain when the name reads as a phrase (>= 4 tokens) and carries no legal form. A plain domain name is **not** enough: WWW.KOTVA.CZ a.s., www.heymountain.com GmbH, WWW.THEARTISANCO.CO.UK LIMITED and HTTPS OU are real companies trading under their domain | supplier withheld | same notice (`... pubblicata sul sito www.csc.sanita.fvg.it ...`), and the Catalan gateway's `DIFERENTES ADJUDICATARIOS (https://contractaciopublica.cat/...)` |
 | `es.multiple_awardees_placeholder` | C2 name | The ES/CA gateways' "several winners, see the resolution": `varios\|diversos\|diferentes\|distintos adjudicatari*`, `diversos homologad*\|homologat*` | supplier withheld | `Varios adjudicatarios (ver resolución adjudicación)`, `DIVERSOS HOMOLOGATS - https://contractaciopublica.cat/...` (prod, 2026-09-22) |
 | `generic.name_is_placeholder` | C2 name | After trim + casefold the name is one of `n/a`, `na`, `não aplicável`, `nao aplicavel`, `vários`, `varios`, `diversi`, `-`, `.`, `1`, `0`, `x`, `xxx` | supplier withheld | the placeholder family from the 2026-09-21 audit (unit strings) |
-| `generic.name_is_sentence` | C2 name | > 80 chars AND >= 8 whitespace tokens AND (a `n. <digits> del <year>` clause OR a function-word ratio >= 0.35 from small stopword lists for it/pt/es/fr/de/en/nl/pl/ro, the list chosen by `notice_language`, all lists when unknown). A legal-form token (S.p.A., Lda, GmbH, Sp. z o.o., Ltd, ... — `lexicon.py`) exempts a name from THIS rule only | supplier withheld | same 2013 notice (decree clause) plus unit strings |
+| `xx.several_operators_placeholder` | C2 name | The buyer writes how MANY won instead of WHO won: `various\|multiple\|several suppliers`, `plusieurs attributaires`, `mehrere Auftragnehmer`, `meerdere ondernemingen`, `diverse leveranciers`, `vari\|diversi operatori`, `varie ditte`, `różni wykonawcy`, … | supplier withheld | prod 2026-09-23: `Lot 1 - Multiple Suppliers` (IRL), `Plusieurs attributaires (accord-cadre)` (BEL), `Varie ditte (vedi allegato A.2)` (ITA) |
+| `xx.see_the_annex_placeholder` | C2 name | The buyer points at an annex, list, spreadsheet or page instead of naming anyone: `see attached`, `voir liste\|annexe`, `zie bijlage`, `ver anexo`, `vedi allegato`, `se bilaga`, `siehe Anlage`, `patrz załącznik`, `viz příloha`, `katso liite`, `lásd melléklet` | supplier withheld | prod: `zie bijlage` (NLD, 40 — the largest family), `Lot 2 - voir liste section VI` (FRA), `See attached excel file` (IRL) |
+| `xx.not_applicable_placeholder` | C2 name | The buyer refuses the field, sometimes citing the statute: `not applicable`, `niet van toepassing`, `nie dotyczy`, `nu este cazul`, `keine Angabe`, `no procede`, `sans objet`, `non comunicato` | supplier withheld | prod: `Keine Angabe gemäß § 61 Abs. 4 BVergG 2018` (AUT, 26), `Not Applicable` (GBR, 18) |
 | `generic.national_id_country_prefixed` | C3 identifier | When the legal id has no scheme (or VAT/NATIONAL/EORI) and `canon_vat(value)` is None, try `canon_vat(<VAT prefix of the org's country> + value)`; the per-country regex in `canon_vat` is the guard. Alpha-2 or alpha-3 accepted; Greece → `EL`. Suppliers AND buyers | canonical VAT handed to the matcher; counted when it changed the outcome | `tests/fixtures/ted/646890-2026.xml` — Beja, supplier NIF `503536717` + `PRT` → `PT503536717`; DE Leitweg `053660036036-31001-86` + `DEU` stays None |
 | `generic.value_scale_sibling_ratio` | C4 scale | `scale_normalization` tier A unchanged: award total ~x1000 its own estimate with the cents fingerprint or a proven gateway | rescale /1000, `value_scale_corrected = "ratio"` | Figueira da Foz school award (existing `tests/test_load_ted_contracts.py::test_milli_euro_leak_rescaled_at_emit`) |
 | `pt.value_scale_country_prior` | C4 scale | `scale_normalization` tier B unchanged: all fields consistent but >= EUR 1B on a PRT notice | rescale /1000, `value_scale_corrected = "country_prior"` | existing `tests/test_scale_normalization.py` cases |
@@ -48,7 +50,27 @@ counted.
 from its award: no company node, no `AWARDED_TO` edge, and nothing later
 can recover the name. So every pattern here was measured against the real
 graph before it shipped, and the ones that hit real companies were
-narrowed rather than kept (see the `vedi` and `www.` notes above). Value rules run in sequence — the peer test sees the value after the
+narrowed rather than kept (see the `vedi` and `www.` notes above).
+
+**There is no shape heuristic here, on purpose.** The first version of
+this library also carried `generic.name_is_sentence`: longer than 80
+characters, at least 8 tokens, and either a decree clause or a
+function-word ratio over 0.35. Measured against 23,814 real prod names
+longer than 80 characters it withheld **1,250 of them — 5.2%** — and they
+were real: UK trusts ("SETTLEMENT FOR THE BENEFIT OF THE CHILDREN OF …"),
+Italian pension funds, French associations and instituts. It reached
+production and withheld three genuine French training bodies from one
+notice before it was removed. A long name full of function words is what
+an institution is *called*.
+
+The families above replace it. Each one is a habit of a particular
+buyer's office — someone deciding that the supplier-name field is where
+you write "see the annex" — so they are enumerated by name, with the
+country and the prod match count beside each phrase in `lexicon.py`.
+Re-measured on the same 23,814 names, the named families withhold **3**
+(0.01%), and all three are genuine junk. When a new family turns up, add
+its phrases to `lexicon.py` with where you found them; do not reach for a
+shape test. Value rules run in sequence — the peer test sees the value after the
 milli-euro tiers.
 
 ## What the loader emits

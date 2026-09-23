@@ -893,7 +893,11 @@ def _cypher_regex(query: str) -> str:
 def test_company_name_is_not_notice_text_is_the_c1_gate():
     a = by_id()["values.company_name_is_not_notice_text"]
     assert a.family == VALUES and a.severity == BLOCK and a.engine == "cypher"
-    assert "MATCH (c:Company)" in a.query
+    # Index-backed on purpose: the bare `MATCH (c:Company) WHERE name =~`
+    # form scanned 3.6M nodes and the runner reported ERR instead of a
+    # count, so the gate did not exist.
+    assert "db.index.fulltext.queryNodes('company_name_ft'" in a.query
+    assert "MATCH (c:Company) WHERE" not in a.query
     ok, obs = a.evaluate({"violations": 1307})
     assert not ok and "1307" in obs
     assert a.evaluate({"violations": 0})[0]

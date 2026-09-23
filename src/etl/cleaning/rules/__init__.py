@@ -22,7 +22,8 @@ from .dates import DatePlaceholderRule
 from .identifiers import NationalIdCountryPrefixedRule
 from .names import (
     ItalianNoticeTextRule, MultipleAwardeesRule, NameContainsUrlRule,
-    NameIsPlaceholderRule, NameIsSentenceRule,
+    NameIsPlaceholderRule, NotApplicableRule, SeeTheAnnexRule,
+    SeveralOperatorsRule,
 )
 from .values import (
     MilliEuroCountryPriorRule, MilliEuroSiblingRatioRule, ValuePeerOutlierRule,
@@ -42,12 +43,17 @@ class Rule(Protocol):
         """The outcomes for this notice (empty when nothing fired)."""
 
 
+# Most specific first: a supplier hit by several is withheld under the
+# first, so the rule that names the buyer's actual habit wins over the
+# generic ones.
 NAME_RULES: tuple[Rule, ...] = (
     ItalianNoticeTextRule(),
     MultipleAwardeesRule(),
+    SeveralOperatorsRule(),
+    SeeTheAnnexRule(),
+    NotApplicableRule(),
     NameContainsUrlRule(),
     NameIsPlaceholderRule(),
-    NameIsSentenceRule(),
 )
 
 IDENTIFIER_RULES: tuple[Rule, ...] = (

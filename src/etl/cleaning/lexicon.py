@@ -1,79 +1,84 @@
-"""Static word lists the name rules read: function words per language,
-legal-form tokens, placeholder strings and the notice-language codes
-that select a list.
+"""The phrases the name rules look for, and the legal-form tokens that
+vouch for a real name.
 
-Data only — no logic lives here, so a list can be extended without
-touching a rule. Every list is deliberately small: the sentence rule
-needs a *ratio* of function words, not a dictionary, and a short list
-of unambiguous articles / prepositions / conjunctions is enough to tell
-"Gara aggiudicata come da determina n. 543 del 2013 pubblicata sul
-sito ..." from "Visualforma - Tecnologias de Informação, S.A.".
+Data only — no logic lives here, so a family can be extended without
+touching a rule. Every phrase is one a buyer really published in the
+supplier-name field, with the country and the prod match count beside
+it: these are individual clerks deciding to write an instruction where
+a company belongs, so they are enumerated by name rather than detected
+by shape.
 """
 from __future__ import annotations
 
-# Function words per language (casefolded). Articles, prepositions,
-# conjunctions, the commonest auxiliaries and pronouns. Nothing that is
-# also a plausible company-name token ("sa", "da" in PT is a preposition
-# but also a legal-form fragment — kept, since the legal-form check
-# exempts real names before the ratio is read).
-STOPWORDS: dict[str, frozenset[str]] = {
-    "it": frozenset("""
-        il lo la i gli le un uno una di a da in con su per tra fra e ed o
-        ma che non si del della dello dei degli delle al allo alla ai agli
-        alle dal dalla dallo dai dagli dalle nel nella nello nei negli nelle
-        sul sulla sullo sui sugli sulle come è sono ha hanno stato stata
-        essere questo questa quale cui anche ove
-    """.split()),
-    "pt": frozenset("""
-        o a os as um uma uns umas de do da dos das em no na nos nas por
-        para com sem e ou que não nao se ao à aos às pelo pela pelos pelas
-        como é são sao foi ser este esta isto qual onde
-    """.split()),
-    "es": frozenset("""
-        el la los las un una unos unas de del a al en con por para sin y
-        o u que no se como es son fue ser este esta esto cual donde
-    """.split()),
-    "fr": frozenset("""
-        le la les l un une des du de d à au aux en dans par pour sur avec
-        sans et ou que qui ne pas ce cette ces est sont été être dont où
-    """.split()),
-    "de": frozenset("""
-        der die das des dem den ein eine einer eines einem einen und oder
-        von vom zu zum zur im in am an auf für mit ohne bei nach über
-        unter ist sind wurde wird nicht gemäß laut durch
-    """.split()),
-    "en": frozenset("""
-        the a an of in on at to for with by from and or not is are was
-        were be been this that these those as it its per under
-    """.split()),
-    "nl": frozenset("""
-        de het een van in op te voor met door en of aan bij is zijn werd
-        wordt niet dat die deze dit volgens
-    """.split()),
-    "pl": frozenset("""
-        i w z na do o po od za przez dla nie jest są oraz lub a to ten ta
-        te tego tej tym się we ze
-    """.split()),
-    "ro": frozenset("""
-        și si sau de la în in cu pe pentru din prin fără fara nu este sunt
-        a al ai ale un o unui unei ce care conform
-    """.split()),
-}
+# ── Named junk families ─────────────────────────────────────────────
+#
+# Not a heuristic. Each phrase below is one a buyer really typed into
+# the supplier-name field, found by probing the prod name index on
+# 2026-09-23; the count and countries are what it matched there. The
+# generic "looks like a sentence" test these replace withheld 5.2% of
+# all names longer than 80 characters — UK trusts ("SETTLEMENT FOR THE
+# BENEFIT OF THE CHILDREN OF ..."), Italian pension funds, French
+# associations — because a long name full of function words is what a
+# real institution is called, not what junk looks like.
 
-# eForms BT-702 three-letter codes and legacy TED two-letter LG codes,
-# both as the parser hands them over verbatim, to a STOPWORDS key. A
-# notice in any other language falls back to the union of all lists.
-NOTICE_LANGUAGE_TO_LIST: dict[str, str] = {
-    "ITA": "it", "IT": "it",
-    "POR": "pt", "PT": "pt",
-    "SPA": "es", "ES": "es",
-    "FRA": "fr", "FR": "fr",
-    "DEU": "de", "DE": "de",
-    "ENG": "en", "EN": "en",
-    "NLD": "nl", "NL": "nl",
-    "POL": "pl", "PL": "pl",
-    "RON": "ro", "RO": "ro",
-}
+# "the names are somewhere else, go and look": the buyer points at an
+# annex, a list, a spreadsheet or a web page instead of naming anyone.
+SEE_THE_ANNEX_PHRASES: tuple[str, ...] = (
+    "see attached",          # 7, IRL/GBR — "See attached excel file"
+    "see annex",
+    "see the attached",
+    "voir annexe",           # 2, FRA
+    "voir liste",            # 20, FRA/BEL — "Lot 2 - voir liste section VI"
+    "voir le bloc",          # FRA — "voir le bloc 6 'Autres informations'"
+    "zie bijlage",           # 40, NLD — the largest single family
+    "se bilaga",             # 2, SWE
+    "se bilag",              # DNK/NOR
+    "ver anexo",             # 10, ESP — "Ver anexo publicado en el perfil"
+    "vedi allegato",         # 3, ITA
+    "siehe anlage",          # DEU/AUT
+    "siehe anhang",
+    "patrz zalacznik",       # POL
+    "patrz załącznik",
+    "viz priloha",           # CZE/SVK
+    "viz příloha",
+    "katso liite",           # FIN
+    "lasd melleklet",        # HUN
+    "lásd melléklet",
+)
+
+# "there were several winners and I am not listing them": the buyer
+# names the plurality instead of the operators.
+SEVERAL_OPERATORS_PHRASES: tuple[str, ...] = (
+    "various suppliers",         # 4, GBR
+    "multiple suppliers",        # 13, GBR/IRL — "Lot 1 - Multiple Suppliers"
+    "several suppliers",
+    "multiple awards",           # IRL
+    "plusieurs attributaires",   # 5, BEL/FRA
+    "mehrere auftragnehmer",     # 1, DEU
+    "meerdere ondernemingen",    # NLD — "Meerdere ondernemingen, zie bijlage A"
+    "diverse leveranciers",      # 1, NLD
+    "vari operatori",            # 2, ITA
+    "diversi operatori",         # 1, ITA
+    "varie ditte",               # ITA — "Varie ditte (vedi allegato A.2)"
+    "rozni wykonawcy",           # POL
+    "różni wykonawcy",
+    "ruzni dodavatele",          # CZE
+    "flera leverantorer",        # SWE
+)
+
+# "this field does not apply to me": a refusal, sometimes with the
+# statute the buyer is refusing under.
+NOT_APPLICABLE_PHRASES: tuple[str, ...] = (
+    "not applicable",        # 18, GBR/NLD/SRB/BEL/MKD
+    "niet van toepassing",   # 8, NLD
+    "nie dotyczy",           # 3, POL
+    "nu este cazul",         # ROU
+    "keine angabe",          # 26, AUT/DEU — "Keine Angabe aus Gründen des
+                             #   Wettbewerbs", "... gemäß § 61 Abs. 4 BVergG"
+    "no procede",            # ESP
+    "sans objet",            # FRA
+    "non comunicato",        # ITA
+)
 
 # Values that mean "no supplier named" rather than a name. Compared after
 # trim + casefold, exactly — a placeholder with extra decoration ("N/A.")
