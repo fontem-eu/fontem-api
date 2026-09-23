@@ -7,12 +7,14 @@ and CPV nodes via the graph.
 from __future__ import annotations
 
 import logging
+import re
 from itertools import zip_longest
 
 from fontem_event_schemas.integrity import contract_red_flags
 
 from ...analysis.contract_data_source import ContractDataSource
 from ...api.lang import authority_name_expr, contract_title_expr
+from ...services.ted_lookup import detail_url_for
 from .identity import identity_class
 from ._value_quality import (
     canonical_count,
@@ -44,6 +46,28 @@ CONTRACT_SORTS = {
     ),
 }
 DEFAULT_CONTRACT_SORT = "recent"
+
+#: How many of a framework's other award notices the detail page carries.
+#: Of 176 real frameworks sampled, 121 (68.8%) have a single award notice
+#: and the mean cluster is 6.04, so ten covers all but the long tail — and
+#: the tail is what `sibling_count` is for.
+FRAMEWORK_SIBLING_LIMIT = 10
+
+#: The publication-number form of the OPT-100 grouping key ("536632-2024").
+#: TED's per-notice routes are keyed by publication number and by nothing
+#: else: /en/notice/536632-2024/xml answers 200, while the other form the
+#: key takes — an eForms notice UUID — 404s there and renders the known
+#: blank 202 page under /en/notice/-/detail/ (see services/ted_lookup).
+#: So a UUID-form key gets no link at all rather than a broken one.
+_PUBLICATION_NUMBER = re.compile(r"\d+-\d{4}")
+
+
+def framework_ted_url(framework_id: str | None) -> str | None:
+    """The TED page for a framework grouping key, or None when the key
+    is in the UUID form TED cannot resolve to a page."""
+    if framework_id and _PUBLICATION_NUMBER.fullmatch(framework_id):
+        return detail_url_for(framework_id)
+    return None
 
 
 def contract_order_by(sort: str | None) -> str:
@@ -125,6 +149,11 @@ class GraphContractSource(ContractDataSource):
                 "  ct.modifies_publication_number AS modifies_publication_number, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
+                # "Part of a framework agreement" tag on the row. Never
+                # coalesced to false: pre-eForms notices carry no
+                # ContractingSystemTypeCode at all, and "we don't know"
+                # is not "not a framework".
+                "  ct.is_framework AS is_framework, "
                 f"  {auth_name} AS authority, a.country AS authority_country, "
                 # `authority_id` lets the contracts UI link each row's
                 # authority cell back to the authority profile. Without
@@ -182,6 +211,7 @@ class GraphContractSource(ContractDataSource):
                 "authority": r["authority"],
                 "authority_id": r["authority_id"],
                 "authority_country": r["authority_country"],
+                "is_framework": r.get("is_framework"),
             })
 
         return {
@@ -255,6 +285,11 @@ class GraphContractSource(ContractDataSource):
                 "  ct.modifies_publication_number AS modifies_publication_number, "
                 "  ct.procedure_type AS procedure_type, "
                 "  ct.ted_url AS ted_url, "
+                # "Part of a framework agreement" tag on the row. Never
+                # coalesced to false: pre-eForms notices carry no
+                # ContractingSystemTypeCode at all, and "we don't know"
+                # is not "not a framework".
+                "  ct.is_framework AS is_framework, "
                 "  c.name AS contractor, c.country AS contractor_country, "
                 "  c.gmr_id AS contractor_gmr_id, "
                 "  ct.suppliers_withheld_count AS supplier_withheld_count, "
@@ -314,6 +349,7 @@ class GraphContractSource(ContractDataSource):
                 # notice"; a row written before the cleaning stage
                 # carries no count at all, which reads as zero.
                 "supplier_withheld_count": r.get("supplier_withheld_count") or 0,
+                "is_framework": r.get("is_framework"),
             })
 
         return {
@@ -410,8 +446,9 @@ class GraphContractSource(ContractDataSource):
                 "RETURN ct, a, c, cpv",
                 nid=notice_id,
             ).single()
-        if not row:
-            return None
+            if not row:
+                return None
+            framework = self._framework_block(row["ct"], session, lang)
         ct = row["ct"]
         auth_node = row["a"]
         contractor = {
@@ -469,7 +506,106 @@ class GraphContractSource(ContractDataSource):
             # derived red flags (single-bidder etc.), computed on the fly so
             # the detail page works even before the sink re-materialises them.
             "integrity": self._integrity_block(ct),
+            # Framework agreement: null unless there is something to say.
+            "framework": framework,
         }
+
+    def _framework_block(self, ct, session, lang: str | None) -> dict | None:
+        """What this contract says about the framework agreement it is
+        part of, or None when it says nothing.
+
+        Null, not an empty object: a contract with no grouping key is not
+        a contract with no framework. Coverage of OPT-100 on
+        framework-flagged award notices runs 28.8% (2024), 89.4% (2025),
+        98.3% (2026), and pre-eForms notices carry neither the key nor
+        ``is_framework``, so "absent" has to render as nothing rather
+        than as "no framework".
+
+        Every term here is what THIS notice published. ``is_framework``
+        (the lot's ContractingSystemTypeCode starting `fa`) means the
+        notice belongs to a framework procedure — 344 of 351 sampled
+        CALL-OFFS carry it too — so nothing may be read out of this block
+        as "this contract IS the framework", and the ceiling is the
+        procedure's capacity, never money paid.
+        """
+        framework_id = ct.get("framework_id")
+        if not framework_id and not ct.get("is_framework"):
+            return None
+        siblings, sibling_count = (
+            self._framework_siblings(
+                session, framework_id, ct["ted_notice_id"], lang)
+            if framework_id else ([], 0)
+        )
+        return {
+            "framework_id": framework_id,
+            "ted_url": framework_ted_url(framework_id),
+            "max_value_eur": ct.get("framework_max_value_eur"),
+            "reestimated_value_eur": ct.get("framework_reestimated_value_eur"),
+            "duration_months": ct.get("framework_duration_months"),
+            "max_operators": ct.get("framework_max_operators"),
+            "sibling_count": sibling_count,
+            "siblings": siblings,
+        }
+
+    @staticmethod
+    def _framework_siblings(
+        session, framework_id: str, notice_id: str, lang: str | None,
+    ) -> tuple[list[dict], int]:
+        """The other award notices carrying the same grouping key, newest
+        first, capped at FRAMEWORK_SIBLING_LIMIT, with the total.
+
+        Both statements are equality seeks on the `contract_framework_id`
+        index (fontem-neo4j-sink#162). Without it the planner falls back
+        to scanning every :Contract: PROFILEd on fontem-prod on 2026-09-23
+        (3,606,471 contracts) the page read cost 7,212,943 DbHits / 3.9 s
+        and the count 7,212,943 DbHits / 3.8–52.8 s across runs, i.e. past
+        the 8 s transaction budget on a cold page cache. With the index
+        the same shape is a NodeIndexSeek: 20 DbHits / 1 ms for a one-row
+        cluster and 2,387 DbHits / 5 ms for a 1,136-row one, ~7x the
+        largest framework observed (148 award notices).
+
+        LIMIT lands before the supplier expansion so the OPTIONAL MATCH
+        only ever touches ten contracts, and the suppliers are ordered
+        before they are collected so a multi-supplier award always shows
+        the same name rather than reshuffling between requests.
+
+        Self-exclusion is on the contract's OWN ted_notice_id, not the id
+        the caller asked for: a detail page reached through a superseded
+        notice would otherwise list the contract as its own sibling.
+        """
+        title_expr = contract_title_expr("s", lang)
+        rows = session.run(
+            "MATCH (s:Contract {framework_id: $fid}) "
+            "WHERE s.ted_notice_id <> $nid "
+            "WITH s ORDER BY s.publication_date IS NULL, "
+            "  s.publication_date DESC, s.ted_notice_id "
+            "LIMIT $limit "
+            "OPTIONAL MATCH (s)-[:AWARDED_TO]->(co:Company) "
+            "WITH s, co ORDER BY co.name "
+            "WITH s, head(collect(co.name)) AS supplier "
+            "RETURN s.ted_notice_id AS ted_notice_id, "
+            f"  {title_expr} AS title, s.country AS country, "
+            "  s.value_eur AS value_eur, "
+            "  s.publication_date AS publication_date, supplier "
+            "ORDER BY publication_date IS NULL, publication_date DESC, "
+            "  ted_notice_id",
+            fid=framework_id, nid=notice_id, limit=FRAMEWORK_SIBLING_LIMIT,
+        ).data()
+        total = session.run(
+            "MATCH (s:Contract {framework_id: $fid}) "
+            "WHERE s.ted_notice_id <> $nid "
+            "RETURN count(s) AS sibling_count",
+            fid=framework_id, nid=notice_id,
+        ).single()
+        siblings = [{
+            "ted_notice_id": r["ted_notice_id"],
+            "title": r.get("title"),
+            "country": r.get("country"),
+            "value_eur": r.get("value_eur"),
+            "publication_date": r.get("publication_date"),
+            "supplier": r.get("supplier"),
+        } for r in rows]
+        return siblings, (total["sibling_count"] if total else len(siblings))
 
     @staticmethod
     def _withheld_suppliers(ct) -> list[dict]:
