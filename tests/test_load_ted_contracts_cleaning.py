@@ -12,7 +12,7 @@ from src.etl.cleaning import CleaningReport, Lookups
 from src.etl.cleaning.lookups import InMemoryPeerStats, PeerBand
 from src.etl.dry_run_log import DryRunEventLog
 from src.etl.load_ted_contracts import (  # pylint: disable=protected-access
-    _SCHEMAS_TAKE_ID_SOURCE, FRAMEWORKS_ENV, frameworks_enabled, load_contracts,
+    FRAMEWORKS_ENV, frameworks_enabled, load_contracts,
 )
 
 from .test_load_ted_contracts import (  # reuse the house stubs
@@ -311,10 +311,6 @@ class TestFrameworkGroupingKey:
         [contract] = _payloads(emit, "UpsertContract")
         assert contract["framework_max_value_eur"] == 5_000_000.0
 
-    @pytest.mark.skipif(
-        not _SCHEMAS_TAKE_ID_SOURCE,
-        reason="framework_id_source lands with fontem-event-schemas#49",
-    )
     def test_the_provenance_travels_with_the_key(self):
         """opt-100 and the BT-125 fallback are not equally strong
         evidence, so the consumer has to be able to tell them apart."""

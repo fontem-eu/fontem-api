@@ -42,7 +42,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date as _date, datetime, timedelta
-from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -688,19 +687,6 @@ def _winner_value_inputs(notice, party_awards: dict):
 _IRI_BASE = "http://data.fontem.eu/id/"
 _CURRENCY_CODE = re.compile(r"[A-Z]{3}")
 FRAMEWORKS_ENV = "EMIT_FRAMEWORK_AGREEMENTS"
-
-#: fontem-event-schemas grew ``framework_id_source`` in 0.10.0
-#: (fontem-event-schemas#49). CI installs that package from its main
-#: branch, so until #49 merges the loader must still build a payload the
-#: 0.9.0 builder accepts — an unknown keyword is a TypeError there, and
-#: the 0.9.0 UpsertContract schema would reject the extra property
-#: anyway. Only the provenance is lost by dropping it; the grouping key
-#: itself, which is what makes a framework's notices find each other,
-#: travels either way. Inline the keyword and delete this once #49 is on
-#: main.
-_SCHEMAS_TAKE_ID_SOURCE = "framework_id_source" in signature(
-    builders.upsert_contract
-).parameters
 
 
 def _framework_notice_key(notice) -> tuple[str | None, str | None]:
@@ -1377,8 +1363,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-arguments,too-many
         # mechanism by which they find each other. The terms below are
         # whatever THIS notice published, which may be either end.
         framework_id=framework_id,
-        **({"framework_id_source": framework_id_source}
-           if _SCHEMAS_TAKE_ID_SOURCE else {}),
+        framework_id_source=framework_id_source,
         framework_max_value_eur=terms.max_eur if terms else None,
         framework_reestimated_value_eur=terms.reestimated_eur if terms else None,
         framework_duration_months=terms.duration_months if terms else None,
