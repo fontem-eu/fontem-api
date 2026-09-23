@@ -11,7 +11,7 @@ import pytest
 from src.etl.cleaning import CleaningReport, Lookups
 from src.etl.cleaning.lookups import InMemoryPeerStats, PeerBand
 from src.etl.dry_run_log import DryRunEventLog
-from src.etl.load_ted_contracts import (
+from src.etl.load_ted_contracts import (  # pylint: disable=protected-access
     FRAMEWORKS_ENV, frameworks_enabled, load_contracts,
 )
 
@@ -221,7 +221,7 @@ class TestValueQuarantine:
 
 
 class TestFrameworkGate:
-    def _notice(self):
+    def _notice(self, framework_notice_id="536632-2024"):
         notice = _stub_notice(awards=[_stub_award()],
                               organizations={"O1": _org("Alfa S.p.A.")})
         notice.is_framework = True
@@ -229,6 +229,11 @@ class TestFrameworkGate:
         notice.framework_max_value_currency = "EUR"
         notice.framework_duration_months = 48
         notice.framework_max_operators = 5
+        # eforms-parser 0.13 hands the loader the OPT-100 key already
+        # normalised; 536632-2024 is the one notices 761784-2024 and
+        # 3406-2025 both publish.
+        notice.framework_notice_id = framework_notice_id
+        notice.framework_notice_id_source = "opt-100"
         return notice
 
     def test_the_event_is_not_emitted_until_the_sink_understands_it(self):
@@ -247,6 +252,71 @@ class TestFrameworkGate:
         _, emit, _ = _run(self._notice(), emit_frameworks=True)
         types = [c.args[0] for c in emit.upsert.call_args_list]
         assert "UpsertFrameworkAgreement" in types
+
+
+class TestFrameworkGroupingKey:
+    """OPT-100 is what makes a framework's notices find each other, so
+    the loader has to put the SAME value on the contract and on the
+    agreement node - the old code keyed the node on contract_key (BT-04
+    ContractFolderID), a value no contract could ever name."""
+
+    def _notice(self, **over):
+        notice = _stub_notice(awards=[_stub_award()],
+                              organizations={"O1": _org("Alfa S.p.A.")})
+        notice.is_framework = over.pop("is_framework", True)
+        notice.framework_max_value = 5_000_000.0
+        notice.framework_max_value_currency = "EUR"
+        notice.framework_duration_months = 48
+        notice.framework_max_operators = 5
+        notice.framework_notice_id = over.pop("key", "536632-2024")
+        notice.framework_notice_id_source = over.pop("source", "opt-100")
+        return notice
+
+    def test_the_key_rides_on_the_contract(self):
+        _, emit, _ = _run(self._notice())
+        [contract] = _payloads(emit, "UpsertContract")
+        assert contract["framework_id"] == "536632-2024"
+
+    def test_a_notice_with_a_key_but_no_framework_terms_still_carries_it(self):
+        """Nothing gates the key on is_framework: a notice that names a
+        framework it draws from belongs in that cluster whether or not
+        it published the procedure's own terms."""
+        _, emit, _ = _run(self._notice(is_framework=False))
+        [contract] = _payloads(emit, "UpsertContract")
+        assert contract["framework_id"] == "536632-2024"
+        assert "framework_max_value_eur" not in contract
+
+    def test_no_key_leaves_the_field_off_the_event(self):
+        """Absence of a key is not absence of a framework - pre-2024
+        notices have none at all - so it is simply not published."""
+        _, emit, _ = _run(self._notice(key=None))
+        [contract] = _payloads(emit, "UpsertContract")
+        assert "framework_id" not in contract
+
+    def test_the_agreement_is_keyed_on_the_same_value(self):
+        _, emit, _ = _run(self._notice(), emit_frameworks=True)
+        [agreement] = _payloads(emit, "UpsertFrameworkAgreement")
+        assert agreement["framework_id"] == "536632-2024"
+        [call] = [c for c in emit.upsert.call_args_list
+                  if c.args[0] == "UpsertFrameworkAgreement"]
+        assert call.kwargs["iri"].endswith("/FrameworkAgreement/536632-2024")
+
+    def test_without_a_key_no_agreement_is_invented(self):
+        """A node keyed on something no contract references is
+        unreachable by construction; the terms still reach the
+        contract."""
+        _, emit, _ = _run(self._notice(key=None), emit_frameworks=True)
+        types = [c.args[0] for c in emit.upsert.call_args_list]
+        assert "UpsertFrameworkAgreement" not in types
+        [contract] = _payloads(emit, "UpsertContract")
+        assert contract["framework_max_value_eur"] == 5_000_000.0
+
+    def test_the_provenance_travels_with_the_key(self):
+        """opt-100 and the BT-125 fallback are not equally strong
+        evidence, so the consumer has to be able to tell them apart."""
+        _, emit, _ = _run(self._notice(source="bt-125"))
+        [contract] = _payloads(emit, "UpsertContract")
+        assert contract["framework_id_source"] == "bt-125"
 
     def test_the_flag_defaults_to_off(self, monkeypatch):
         monkeypatch.delenv(FRAMEWORKS_ENV, raising=False)

@@ -57,14 +57,38 @@ On `UpsertContract`: `cleaning_rules`, `suppliers_withheld` (each `{name_raw,
 reason, role, org_id}`; absent from `parties[]` and never `company_gmr_id`, so
 the neo4j sink cannot stub a company for it), `value_raw`, `award_date_raw`,
 `tender_result_award_date_raw`, `tender_reference`, `notice_language`,
-`eforms_sdk`, `value_quarantine_reason`, and on framework-establishing notices
-`framework_max_value_eur`, `framework_reestimated_value_eur`,
+`eforms_sdk`, `value_quarantine_reason`, and — whenever the notice published
+them — `framework_max_value_eur`, `framework_reestimated_value_eur`,
 `framework_duration_months`, `framework_max_operators`.
-`UpsertFrameworkAgreement` is emitted for establishing notices only when
-`EMIT_FRAMEWORK_AGREEMENTS=true` (the sink that understands the type must be
-deployed first). `framework_id` on call-offs stays None: the parser exposes no
-`NoticeDocumentReference` and a same-`ContractFolderID` link needs a graph
-lookup, which the stage does not do.
+
+`framework_id` (with `framework_id_source`) is the eForms **OPT-100 Framework
+Notice Identifier**, which eforms-parser 0.13 reads from
+`efac:NoticeResult/efac:SettledContract/cac:NoticeDocumentReference/cbc:ID`
+(fallback BT-125 `cac:TenderingProcess/cac:NoticeDocumentReference/cbc:ID` on a
+framework procedure) and normalises — the zero-padded publication number
+`00536632-2024` becomes `536632-2024`, the form TED's own `framework-notice-id`
+index matches, and the eForms UUID loses its `-NN` version suffix. It rides on
+**every** notice that publishes one, not only call-offs: the
+framework-establishing award notice and each call-off under it carry the
+IDENTICAL value, and that symmetry is the whole mechanism by which they find
+each other. Coverage on framework-flagged award notices: 28.8% (2024), 89.4%
+(2025), 98.3% (2026).
+
+It is a grouping KEY, not a pointer to a contract we hold. ~80% of the time it
+names a call for competition, and this loader ingests award and modification
+notices only, so the referenced notice resolves to a `:Contract` in the graph
+about 13.6% of the time. Nothing may read an establishment-then-call-off order
+out of it either — both ends carry the same value, and `is_framework` (the
+lot's `ContractingSystemTypeCode` starting `fa`) is on 344 of 351 sampled
+call-offs too.
+
+`UpsertFrameworkAgreement` is keyed on that same OPT-100 value, so the node and
+the contracts pointing at it share one key space (it used to be keyed on
+`contract_key`, i.e. BT-04 `ContractFolderID` — a different value space, which
+no `framework_id` could ever name). A notice with framework terms but no
+OPT-100 key emits no agreement rather than inventing one. Emission still
+happens only when `EMIT_FRAMEWORK_AGREEMENTS=true` (the sink that understands
+the type must be deployed first).
 
 The buyer's normalised identifier is computed and counted but not emitted:
 `match_authority` does not read it and `UpsertAuthority` has no VAT field.

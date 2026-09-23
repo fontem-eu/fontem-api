@@ -35,3 +35,15 @@ def test_notice_exposes_the_watermark_and_framework_fields():
                   "framework_duration_months", "framework_max_operators"):
         assert hasattr(notice, field), field
     assert hasattr(Lot(lot_id="l"), "estimated_value_raw")
+
+
+def test_notice_exposes_the_framework_grouping_key():
+    """eforms-parser 0.13: OPT-100, already normalised (the zero padding
+    off the publication-number form, the `-NN` version suffix off the
+    eForms UUID form). The loader reads it defensively, so a wheel
+    without these fields would silently stop grouping frameworks rather
+    than fail — this is what notices the skew instead."""
+    notice = Notice(notice_id="x")
+    for field in ("framework_notice_id", "framework_notice_id_raw",
+                  "framework_notice_id_source", "framework_notice_id_conflict"):
+        assert hasattr(notice, field), field

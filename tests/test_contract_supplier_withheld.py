@@ -62,6 +62,10 @@ def _authority_row(**overrides):
         "value_before_original": None, "modifies_publication_number": None,
         "contractor": "Acme", "contractor_country": "HUN",
         "contractor_gmr_id": "g1", "supplier_withheld_count": None,
+        # Every alias the rows query projects belongs here: the source
+        # reads the row with .get(), so a missing one reads as None and
+        # the fixture stops testing the field it is meant to pin.
+        "is_framework": False,
     }
     row.update(overrides)
     return row

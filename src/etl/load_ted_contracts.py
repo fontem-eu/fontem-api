@@ -689,6 +689,38 @@ _CURRENCY_CODE = re.compile(r"[A-Z]{3}")
 FRAMEWORKS_ENV = "EMIT_FRAMEWORK_AGREEMENTS"
 
 
+def _framework_notice_key(notice) -> tuple[str | None, str | None]:
+    """The framework grouping key this notice publishes, and which
+    element it was read off.
+
+    OPT-100 (``efac:NoticeResult/efac:SettledContract/
+    cac:NoticeDocumentReference/cbc:ID``, "Framework Notice
+    Identifier") is carried IDENTICALLY by the framework-establishing
+    award notice and by every call-off under it, which is the whole
+    reason it can group them. eforms-parser 0.13 extracts it, falls back
+    to BT-125 on a framework procedure, and normalises the two published
+    forms: the zero-padded publication number (``00536632-2024``, which
+    TED's own framework-notice-id index returns 0 results for while
+    ``536632-2024`` returns 2) and the eForms UUID's ``-NN`` version
+    suffix, which differs between two notices of the same framework.
+
+    It is a KEY, not a pointer: ~80% of the time it names a call for
+    competition, and this platform ingests award and modification
+    notices only, so the referenced notice resolves to a :Contract we
+    hold about 13.6% of the time. Nothing downstream may assume
+    otherwise, and nothing may read an establishment-then-call-off ORDER
+    out of it — both ends carry the same value.
+
+    ``text()`` rather than a bare attribute read so a wheel older than
+    0.13, or a test double, degrades to None instead of putting a
+    MagicMock on the event.
+    """
+    key = text(getattr(notice, "framework_notice_id", None))
+    if not key:
+        return None, None
+    return key, text(getattr(notice, "framework_notice_id_source", None))
+
+
 def frameworks_enabled() -> bool:
     """``EMIT_FRAMEWORK_AGREEMENTS`` — default off. The neo4j sink that
     understands UpsertFrameworkAgreement must be deployed first: a sink
@@ -1108,13 +1140,26 @@ def _framework_terms(notice, money: _Money, currency_svc) -> _FrameworkTerms | N
 
 def _emit_framework_agreement(  # pylint: disable=too-many-arguments,too-many-locals
     emit, notice, ident: _Identity, terms: _FrameworkTerms, *,
-    authority_id: str, country: str | None, candidates, resolved,
+    framework_id: str, authority_id: str, country: str | None,
+    candidates, resolved,
 ) -> None:
-    """The framework as a first-class entity, keyed by the establishing
-    procedure (``framework_id`` = the contract key) so its notices and
-    call-offs converge on one node. Suppliers are the resolved
-    (non-withheld) winners with lot/rank; ``supplier_count`` is what
-    the notice published, withheld ones included."""
+    """The framework as a first-class entity, keyed by the OPT-100
+    grouping key every notice of the framework carries, so the node and
+    the ``UpsertContract.framework_id`` values pointing at it live in one
+    key space. It was keyed on ``ident.contract_key`` (BT-04
+    ContractFolderID), which is a different value space entirely: on
+    notice 761784-2024 the folder is ``2f3cab57-...`` while OPT-100 is
+    ``536632-2024``, so a contract referencing one could never meet a
+    node keyed by the other.
+
+    ``buyer_authority_id`` and ``establishing_notice_id`` are provenance
+    — the notice that happened to carry the terms — not a claim that it
+    established the framework; the data cannot tell an establishment
+    from a call-off.
+
+    Suppliers are the resolved (non-withheld) winners with lot/rank;
+    ``supplier_count`` is what the notice published, withheld ones
+    included."""
     suppliers: list[dict] = []
     seen: set = set()
     for entry in resolved:
@@ -1132,7 +1177,7 @@ def _emit_framework_agreement(  # pylint: disable=too-many-arguments,too-many-lo
     supplier_count = len({c.org_id for c in candidates if c.is_winner})
     lots = notice.lots if isinstance(notice.lots, list) else []
     payload = builders.upsert_framework_agreement(
-        framework_id=ident.contract_key,
+        framework_id=framework_id,
         buyer_authority_id=authority_id,
         establishing_notice_id=ident.ted_notice_id,
         country=country,
@@ -1149,7 +1194,7 @@ def _emit_framework_agreement(  # pylint: disable=too-many-arguments,too-many-lo
     )
     emit.upsert(
         "UpsertFrameworkAgreement",
-        iri=f"{_IRI_BASE}FrameworkAgreement/{ident.contract_key}",
+        iri=f"{_IRI_BASE}FrameworkAgreement/{framework_id}",
         domain="contract",
         payload=payload,
     )
@@ -1244,6 +1289,7 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-arguments,too-many
         money, cleaning.value, ident.ted_notice_id, review=not dry_run,
     )
     terms = _framework_terms(notice, money, currency_svc)
+    framework_id, framework_id_source = _framework_notice_key(notice)
 
     contract_payload = builders.upsert_contract(
         ted_notice_id=ident.ted_notice_id,
@@ -1307,11 +1353,17 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-arguments,too-many
         ),
         award_criterion_type=notice.award_criterion_type,
         submission_deadline=notice.submission_deadline,
+        # `is_framework` says the notice belongs to a framework
+        # procedure (its lot's ContractingSystemTypeCode starts `fa`), NOT
+        # that it established one: 344 of 351 sampled CALL-OFFS carry it
+        # too, and nothing in the data separates the two.
         is_framework=notice.is_framework,
-        # Framework terms on the ESTABLISHING contract only. framework_id
-        # on a call-off stays None: the parser exposes no
-        # NoticeDocumentReference and a same-ContractFolderID link needs
-        # a graph lookup the stage does not make.
+        # The grouping key rides on EVERY notice that publishes one,
+        # establishment and call-off alike — that symmetry is the whole
+        # mechanism by which they find each other. The terms below are
+        # whatever THIS notice published, which may be either end.
+        framework_id=framework_id,
+        framework_id_source=framework_id_source,
         framework_max_value_eur=terms.max_eur if terms else None,
         framework_reestimated_value_eur=terms.reestimated_eur if terms else None,
         framework_duration_months=terms.duration_months if terms else None,
@@ -1337,10 +1389,15 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-arguments,too-many
         domain="contract",
         payload=contract_payload,
     )
-    if terms is not None and emit_frameworks:
+    # No OPT-100 key, no agreement node: the old fallback minted one on
+    # ident.contract_key, a key no contract could ever reference, so the
+    # node was unreachable by construction. A notice with framework terms
+    # but no key still carries them on its own contract.
+    if terms is not None and framework_id and emit_frameworks:
         _emit_framework_agreement(
-            emit, notice, ident, terms, authority_id=authority_id,
-            country=buyer_country, candidates=candidates, resolved=resolved,
+            emit, notice, ident, terms, framework_id=framework_id,
+            authority_id=authority_id, country=buyer_country,
+            candidates=candidates, resolved=resolved,
         )
 
 

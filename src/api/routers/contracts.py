@@ -265,7 +265,25 @@ def contract_detail(
     *,
     source: FromDishka[ContractDataSource],
 ):
-    """Full detail for a single contract."""
+    """Full detail for a single contract.
+
+    Beyond the award itself the response carries ``framework``, which is
+    null unless the contract either belongs to a framework procedure
+    (``integrity.is_framework``) or publishes the eForms OPT-100 grouping
+    key. When present it holds ``framework_id`` (the normalised key),
+    ``ted_url`` (only for the publication-number form of the key — TED
+    has no page for the notice-UUID form, so it is null there), the four
+    term fields the notice published, and up to ten ``siblings``: the
+    other award notices carrying the same key, newest first, with
+    ``sibling_count`` for the whole cluster.
+
+    What the block does NOT say: which end of the framework this is. The
+    key is identical on the establishing award notice and on every
+    call-off, ``is_framework`` is on both, and ~80% of the time the key
+    names a call for competition this platform does not ingest. A reader
+    may say "part of a framework agreement" and nothing stronger, and
+    ``max_value_eur`` is the procedure's capacity, never money paid.
+    """
     result = source.get_contract_detail(notice_id, lang=safe_lang(lang))
     if result is None:
         raise HTTPException(status_code=404, detail="Contract not found")
