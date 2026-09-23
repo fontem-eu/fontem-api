@@ -23,7 +23,8 @@ from typing import Sequence
 from ..facts import NoticeFacts, OrgFacts
 from ..lexicon import (
     LEGAL_FORM_PHRASES, LEGAL_FORM_SHORT_TOKENS, LEGAL_FORM_TOKENS,
-    NOTICE_LANGUAGE_TO_LIST, PLACEHOLDER_NAMES, STOPWORDS,
+    NOT_APPLICABLE_PHRASES, PLACEHOLDER_NAMES, SEE_THE_ANNEX_PHRASES,
+    SEVERAL_OPERATORS_PHRASES,
 )
 from ..lookups import Lookups
 from ..outcomes import Outcome, SupplierWithheld
@@ -42,7 +43,11 @@ from ..outcomes import Outcome, SupplierWithheld
 _ITALIAN_NOTICE_TEXT = re.compile(
     r"\bgara aggiudicata\b|\bcome da determina\b|\bdetermina n\.\s*\d"
     r"|\bpubblicat[ao] sul sito\b|\bsi veda\b|\baggiudicat[ao] con\b"
-    r"|\blotto n\.\s*\d",
+    r"|\blotto n\.\s*\d"
+    # "n. 543 del 2013": the decree reference itself. It used to live in
+    # the sentence rule; it belongs here, with the rest of the Italian
+    # award-decree boilerplate it always travels with.
+    r"|\bn\.?\s*\d+\s+del\s+\d{4}\b",
     re.IGNORECASE,
 )
 # A URL with a scheme is a pointer to a page — no company is named
@@ -64,17 +69,8 @@ _MULTIPLE_AWARDEES_ES = re.compile(
     r"\b(varios|diversos|diferentes|distintos) adjudicatari|"
     r"\bdiversos homologa[dt]", re.IGNORECASE,
 )
-# "n. 543 del 2013": a decree reference — the shape of a pointer to a
-# published decision, never of a name.
-_DECREE_CLAUSE = re.compile(r"\bn\.?\s*\d+\s+del\s+\d{4}\b", re.IGNORECASE)
-
-SENTENCE_MIN_CHARS = 80
-SENTENCE_MIN_TOKENS = 8
-SENTENCE_FUNCTION_WORD_RATIO = 0.35
-
 _TOKEN_SPLIT = re.compile(r"[\s,;()\[\]\"]+")
 _TOKEN_TRIM = ".,;:-–—'\""
-_ALL_STOPWORDS = frozenset().union(*STOPWORDS.values())
 _LEGAL_PHRASES = tuple(re.compile(p) for p in LEGAL_FORM_PHRASES)
 
 
@@ -104,30 +100,6 @@ def has_legal_form(name: str) -> bool:
         return True
     joined = " ".join(n for n in norms if n)
     return any(p.search(joined) for p in _LEGAL_PHRASES)
-
-
-def function_word_ratio(name: str, notice_language: str | None) -> float:
-    """Share of tokens that are function words of the notice's language
-    (all lists when the language is unknown)."""
-    tokens = _tokens(name)
-    if not tokens:
-        return 0.0
-    key = NOTICE_LANGUAGE_TO_LIST.get((notice_language or "").upper())
-    words = STOPWORDS[key] if key else _ALL_STOPWORDS
-    hits = sum(1 for t in tokens if _norm(t) in words)
-    return hits / len(tokens)
-
-
-def is_sentence(name: str, notice_language: str | None) -> bool:
-    """Long, many-tokened, and either a decree clause or mostly function
-    words. A legal-form token exempts the name from this rule only."""
-    if len(name) <= SENTENCE_MIN_CHARS or len(_tokens(name)) < SENTENCE_MIN_TOKENS:
-        return False
-    if has_legal_form(name):
-        return False
-    if _DECREE_CLAUSE.search(name):
-        return True
-    return function_word_ratio(name, notice_language) >= SENTENCE_FUNCTION_WORD_RATIO
 
 
 class _NameRule:
@@ -203,10 +175,70 @@ class NameIsPlaceholderRule(_NameRule):
         return name.strip().casefold() in PLACEHOLDER_NAMES
 
 
-class NameIsSentenceRule(_NameRule):
-    """``generic.name_is_sentence``: shape features, language-aware."""
+def _phrase_pattern(phrases: tuple[str, ...]) -> re.Pattern[str]:
+    """One case-insensitive alternation over an enumerated family.
 
-    id = "generic.name_is_sentence"
+    Matched anywhere in the name, because a buyer writes "Lot 2 - voir
+    liste section VI" as often as a bare "VOIR LISTE"."""
+    return re.compile("|".join(re.escape(p) for p in phrases), re.IGNORECASE)
+
+
+_SEE_THE_ANNEX = _phrase_pattern(SEE_THE_ANNEX_PHRASES)
+_SEVERAL_OPERATORS = _phrase_pattern(SEVERAL_OPERATORS_PHRASES)
+_NOT_APPLICABLE = _phrase_pattern(NOT_APPLICABLE_PHRASES)
+
+
+# A note the buyer appended in brackets at the end: "Lange Deele BV
+# (zie bijlage)". Stripping it puts the legal form back where
+# has_legal_form looks for a two-letter one — as the last token.
+_TRAILING_ANNOTATION = re.compile(r"\s*[(\[][^()\[\]]*[)\]]\s*$")
+
+
+def vouched_by_legal_form(name: str) -> bool:
+    """True when a legal form vouches for the name, before or after its
+    trailing annotation is removed."""
+    if has_legal_form(name):
+        return True
+    stripped = _TRAILING_ANNOTATION.sub("", name).strip()
+    return bool(stripped) and stripped != name and has_legal_form(stripped)
+
+
+class _PhraseFamilyRule(_NameRule):
+    """A named family, with the legal-form guard the URL rule uses.
+
+    A name that carries a legal form is a real company the buyer
+    annotated — "Lange Deele BV (zie bijlage)" is a supplier plus a
+    note, not a note — so the token vouches for it and the rule stands
+    down. Junk of this kind never carries one: "Varie ditte (vedi
+    allegato A.2)" and "RV-Partner 3 (Keine Angabe ...)" are still
+    withheld, because what precedes the bracket is not a name either."""
+
+    phrases: re.Pattern[str]
 
     def hits(self, name: str, facts: NoticeFacts) -> bool:
-        return is_sentence(name, facts.notice_language)
+        return bool(self.phrases.search(name)) and not vouched_by_legal_form(name)
+
+
+class SeeTheAnnexRule(_PhraseFamilyRule):
+    """``xx.see_the_annex_placeholder``: the buyer points at an annex, a
+    list, a spreadsheet or a page instead of naming the supplier."""
+
+    id = "xx.see_the_annex_placeholder"
+    phrases = _SEE_THE_ANNEX
+
+
+class SeveralOperatorsRule(_PhraseFamilyRule):
+    """``xx.several_operators_placeholder``: the buyer writes how MANY
+    won instead of WHO won."""
+
+    id = "xx.several_operators_placeholder"
+    phrases = _SEVERAL_OPERATORS
+
+
+class NotApplicableRule(_PhraseFamilyRule):
+    """``xx.not_applicable_placeholder``: the buyer refuses the field,
+    sometimes citing the statute they are refusing under ("Keine Angabe
+    gemäß § 61 Abs. 4 BVergG 2018")."""
+
+    id = "xx.not_applicable_placeholder"
+    phrases = _NOT_APPLICABLE

@@ -1114,10 +1114,22 @@ ASSERTIONS: list[Assertion] = [
     # gate that counted them could never reach zero however complete the
     # cleanup was. The loader's generic.name_contains_url rule makes that
     # distinction with the legal-form test, which Cypher cannot express.
+    #
+    # The full-text index does the seeking. The same predicate as a bare
+    # `MATCH (c:Company) WHERE c.name =~ ...` scans all 3.6M companies and
+    # blew the runner's transaction timeout every night, so the assertion
+    # reported ERR rather than a number and the C1 gate did not exist.
+    # Seeking the name index first and applying the regex to the
+    # candidates answers in ~1.4 s. Measured against the full scan on
+    # 2026-09-23 it finds 625 of 627 — the two it misses are names in
+    # which none of these terms is a separate token, and a gate that runs
+    # is worth more than two counts it cannot reach.
     Assertion(
         "values.company_name_is_not_notice_text", VALUES,
         "No Company is named after notice free text", BLOCK, "cypher",
-        "MATCH (c:Company) WHERE c.name =~ "
+        "CALL db.index.fulltext.queryNodes('company_name_ft', "
+        "'determina OR aggiudicata OR sito OR https OR http') YIELD node "
+        "WITH node WHERE node.name =~ "
         "'(?i).*gara aggiudicata.*|.*come da determina.*|.*determina n\\\\. ?[0-9].*"
         "|.*pubblicat[ao] sul sito.*|.*https?://.*' "
         "RETURN count(*) AS violations",

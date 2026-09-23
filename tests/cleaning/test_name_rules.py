@@ -10,8 +10,8 @@ import pytest
 
 from src.etl.cleaning.rules.names import (
     ItalianNoticeTextRule, MultipleAwardeesRule, NameContainsUrlRule,
-    NameIsPlaceholderRule, NameIsSentenceRule, function_word_ratio,
-    has_legal_form, is_sentence,
+    NameIsPlaceholderRule, NotApplicableRule, SeeTheAnnexRule,
+    SeveralOperatorsRule, has_legal_form, vouched_by_legal_form,
 )
 
 from .factories import buyer, facts, org
@@ -55,6 +55,7 @@ class TestItalianNoticeText:
         "Gara aggiudicata a seguito di procedura aperta",
         "Come da determina dirigenziale",
         "determina n. 543",
+        "giusta determinazione dirigenziale n. 1287 del 2019",
         "Aggiudicato con delibera del direttore generale",
         "Si veda la sezione delibere e decreti",
         "Pubblicata sul sito istituzionale dell'ente",
@@ -130,51 +131,109 @@ class TestNameIsPlaceholder:
         assert _hits(NameIsPlaceholderRule(), name) == []
 
 
-class TestNameIsSentence:
-    def test_withholds_the_decree_sentence(self):
-        assert _hits(NameIsSentenceRule(), ITALIAN_JUNK,
-                     notice_language="ITA") == ["ORG-1"]
+# Real names the deleted function-word heuristic withheld in prod. It
+# hit 5.2% of every name longer than 80 characters; these are the kind
+# of institution that reads as a sentence because that is what it is
+# called.
+REAL_NAMES_THE_HEURISTIC_KILLED = [
+    ("ASSOCIATION DE FORMATION POUR LA COOPERATION ET LA PROMOTION "
+     "PROFESSIONNELLE MEDITERRANEENNE"),
+    ("INSTITUT NATIONAL DE FORMATION ET DE RECHERCHES SUR L'EDUCATION "
+     "PERMANENTE INFREP"),
+    ("THE SOCIETY FOR THE ORPHANS & CHILDREN OF MINISTERS AND MISSIONARIES "
+     "OF THE PRESBYTERIAN CHURCH"),
+    "SETTLEMENT FOR THE BENEFIT OF THE CHILDREN OF PETER JAMES ILLINGWORTH",
+    ("FONDO PENSIONE COMPLEMENTARE A CONTRIBUZIONE DEFINITA E A "
+     "CAPITALIZZAZIONE INDIVIDUALE PER I LAVORATORI"),
+]
 
-    def test_a_short_name_is_never_a_sentence(self):
-        assert not is_sentence("Visualforma - Tecnologias de Informacao, S.A.", "POR")
 
-    def test_a_long_name_without_sentence_shape_is_kept(self):
-        long_name = (
-            "Consorzio Nazionale Servizi Societa Cooperativa per Azioni "
-            "Divisione Facility Management Area Nord Est Italia"
-        )
-        assert not is_sentence(long_name, "ITA")
+@pytest.mark.parametrize("name", REAL_NAMES_THE_HEURISTIC_KILLED)
+def test_no_rule_withholds_a_real_institution(name):
+    """The regression that motivated naming the families: withholding
+    deletes a supplier from its award, and nothing downstream can
+    recover the name."""
+    for rule in (ItalianNoticeTextRule(), MultipleAwardeesRule(),
+                 SeveralOperatorsRule(), SeeTheAnnexRule(),
+                 NotApplicableRule(), NameContainsUrlRule(),
+                 NameIsPlaceholderRule()):
+        assert not _hits(rule, name), rule.id
 
-    def test_a_decree_clause_alone_is_enough(self):
-        name = ("Affidamento del servizio di pulizia giusta determinazione "
-                "dirigenziale n. 1287 del 2019 esecutiva dal quindici marzo")
-        assert is_sentence(name, "ITA")
 
-    def test_function_words_alone_are_enough(self):
-        name = ("il servizio e stato affidato alla ditta che ha presentato "
-                "la migliore offerta per il lotto unico della procedura")
-        assert function_word_ratio(name, "ITA") >= 0.35
-        assert is_sentence(name, "ITA")
+class TestSeeTheAnnex:
+    """The buyer points somewhere else instead of naming anyone."""
 
-    def test_a_legal_form_exempts_a_long_name_from_this_rule_only(self):
-        name = ("Aggiudicataria del servizio di ristorazione per le scuole "
-                "della citta con la sua rete di cucine S.p.A.")
-        assert has_legal_form(name)
-        assert not is_sentence(name, "ITA")
-        # ... but the Italian boilerplate still withholds it.
-        assert _hits(ItalianNoticeTextRule(),
-                     "Gara aggiudicata alla " + name) == ["ORG-1"]
+    @pytest.mark.parametrize("name", [
+        "See attached",                                  # IRL
+        "See attached excel file",                       # IRL
+        "See attached Supplier List",                    # GBR
+        "Lot 2 - voir liste section VI",                 # FRA
+        "VOIR LISTE",                                    # FRA
+        "Voir liste attributaires ci-dessous",           # FRA
+        "Voir liste sur site Apetra",                    # BEL
+        "zie bijlage",                                   # NLD
+        "Zie bijlage 'Gegunde partijen Software werkplekken'",
+        "Se bilaga",                                     # SWE
+        "Ver anexo publicado en el perfil de contratante",   # ESP
+        "Vedi allegato pubblicato nel seguente link",        # ITA
+    ])
+    def test_withholds_a_pointer_instead_of_a_name(self, name):
+        assert _hits(SeeTheAnnexRule(), name) == ["ORG-1"]
 
-    def test_the_language_selects_the_word_list(self):
-        portuguese = ("o servico foi adjudicado a empresa que apresentou a "
-                      "proposta mais vantajosa para o lote unico do concurso")
-        assert function_word_ratio(portuguese, "POR") > function_word_ratio(
-            portuguese, "DEU")
 
-    def test_an_unknown_language_uses_every_list(self):
-        portuguese = ("o servico foi adjudicado a empresa que apresentou a "
-                      "proposta mais vantajosa para o lote unico do concurso")
-        assert is_sentence(portuguese, None)
+class TestSeveralOperators:
+    """The buyer writes how many won instead of who won."""
+
+    @pytest.mark.parametrize("name", [
+        "Various Suppliers",                    # GBR
+        "Various suppliers over 7 categories",  # GBR
+        "Multiple Suppliers",                   # GBR
+        "Lot 1 - Multiple Suppliers",           # IRL
+        "Framework of multiple suppliers",      # IRL
+        "Plusieurs attributaires (accord-cadre)",   # BEL
+        "marche conclu avec plusieurs attributaires",   # FRA
+        "Mehrere Auftragnehmer (siehe Abschnitt VI.2)",  # DEU
+        "Meerdere ondernemingen, zie bijlage A",    # NLD
+        "diverse leveranciers",                     # NLD
+        "Vari operatori",                           # ITA
+        "Varie ditte (vedi allegato A.2)",          # ITA
+    ])
+    def test_withholds_a_plurality(self, name):
+        assert _hits(SeveralOperatorsRule(), name) == ["ORG-1"]
+
+
+class TestNotApplicable:
+    """The buyer refuses the field, sometimes citing a statute."""
+
+    @pytest.mark.parametrize("name", [
+        "Not Applicable",                                     # GBR
+        "Not Applicable — No Award Made",                     # GBR
+        "Niet van toepassing.",                               # NLD
+        "nie dotyczy",                                        # POL
+        "Keine Angabe",                                       # AUT
+        "Keine Angabe aus Gründen des Wettbewerbs",           # DEU/AUT
+        "Keine Angabe gemäß § 61 Abs. 4 BVergG 2018",         # AUT
+    ])
+    def test_withholds_a_refusal(self, name):
+        assert _hits(NotApplicableRule(), name) == ["ORG-1"]
+
+
+class TestTheLegalFormGuard:
+    def test_a_real_company_the_buyer_annotated_is_spared(self):
+        """"Lange Deele BV (zie bijlage)" is a supplier plus a note, not
+        a note. The legal form sits before the bracket, so the guard has
+        to look past the annotation."""
+        assert vouched_by_legal_form("Lange Deele BV (zie bijlage)")
+        assert not _hits(SeeTheAnnexRule(), "Lange Deele BV (zie bijlage)")
+        assert not _hits(SeeTheAnnexRule(), "Acme Solutions Ltd (see attached)")
+
+    @pytest.mark.parametrize("name", [
+        "Varie ditte (vedi allegato A.2)",
+        "RV-Partner 3 (Keine Angabe aus Gründen des Wettbewerbs)",
+        "Diverse locaties (zie bijlage)",
+    ])
+    def test_junk_in_front_of_the_bracket_is_still_junk(self, name):
+        assert not vouched_by_legal_form(name)
 
 
 class TestHasLegalForm:

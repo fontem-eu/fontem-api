@@ -28,7 +28,6 @@ def test_a_supplier_hit_by_several_rules_is_withheld_under_the_first():
     assert set(result.counters) == {
         "it.notice_text_in_supplier_name",
         "generic.name_contains_url",
-        "generic.name_is_sentence",
     }
 
 
@@ -41,7 +40,6 @@ def test_rules_fired_is_ordered_and_deduplicated():
     assert result.rules_fired == (
         "it.notice_text_in_supplier_name",
         "generic.name_contains_url",
-        "generic.name_is_sentence",
     )
     assert result.counters["it.notice_text_in_supplier_name"] == 2
 
@@ -67,7 +65,7 @@ def test_identifiers_cover_every_organisation_even_when_no_rule_fires():
 def test_outcomes_are_kept_for_the_report():
     result = run_stage(facts(org(ITALIAN_JUNK), notice_language="ITA"))
     decisions = [o.example()["decision"] for o in result.outcomes]
-    assert decisions == ["withheld", "withheld", "withheld"]
+    assert decisions == ["withheld", "withheld"]
 
 
 def test_the_stage_runs_without_injected_lookups():
