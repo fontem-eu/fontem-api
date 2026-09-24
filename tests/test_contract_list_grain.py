@@ -7,6 +7,7 @@ showed its three-insurer framework three times over. Measured on prod:
 1,026,029 contracts have more than one winner (5,358,640 rows, one
 contract 802 times) and 22,156 carry more than one :AWARDED edge.
 """
+# pylint: disable=protected-access
 from unittest.mock import MagicMock
 
 from src.data.graph.graph_contract_source import GraphContractSource
@@ -45,8 +46,7 @@ class TestAuthorityListGrain:
         assert "RETURN DISTINCT" not in rows_query
 
     def test_the_row_says_how_many_suppliers_won(self):
-        src, session = _authority_source(
-            [_authority_row(contractor_count=3)])
+        src, _ = _authority_source([_authority_row(contractor_count=3)])
         out = src.get_authority_contracts("auth-1")
         assert out["contracts"][0]["contractor_count"] == 3
 
