@@ -17,8 +17,7 @@ from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
     ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
     CONSISTENCY, LINGUISTICS, RESOLUTION,
-    COVERAGE, ORACLE, GRAIN, Assertion, by_id, le_threshold, max_ratio,
-    min_coverage,
+    COVERAGE, ORACLE, GRAIN, Assertion, by_id, le_threshold, min_coverage,
     no_confident_pair, oracle_band, resolves_confidently, resolves_via_tier,
     zero_violations,
     zero_with_detail,
