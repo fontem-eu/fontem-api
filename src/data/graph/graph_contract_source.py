@@ -120,8 +120,16 @@ class GraphContractSource(ContractDataSource):
                 identity_class("Company", "gmr_id")
                 + "MATCH (a:Authority)-[:AWARDED]->(ct:Contract)"
                 "-[:AWARDED_TO]->(me) "
+                # Same grain fix as the authority list, mirrored: here
+                # the fan-out is the BUYER side, because 22,156 prod
+                # contracts carry more than one :AWARDED edge (worst:
+                # 171). Without this a joint procurement appears once
+                # per participating authority on the supplier's page.
+                "WITH ct, a ORDER BY a.name "
+                "WITH ct, collect(DISTINCT a) AS buyers "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
-                "RETURN DISTINCT ct.ted_notice_id AS notice_id, "
+                "WITH ct, cpv, buyers, head(buyers) AS a "
+                "RETURN ct.ted_notice_id AS notice_id, "
                 # ted_publication_number is the human-readable TED ID
                 # ("295342-2026"); the UI uses it to short-circuit the
                 # /api/contracts/<id>/ted-link redirector and link
@@ -161,6 +169,7 @@ class GraphContractSource(ContractDataSource):
                 # text — there was no path from "X awarded by Y" back
                 # to Y's profile page.
                 "  a.authority_id AS authority_id, "
+                "  size(buyers) AS buyer_count, "
                 "  cpv.description AS cpv_description "
                 + f" {contract_order_by(sort)} LIMIT $limit",
                 gid=gmr_id, limit=limit,
@@ -211,6 +220,8 @@ class GraphContractSource(ContractDataSource):
                 "authority": r["authority"],
                 "authority_id": r["authority_id"],
                 "authority_country": r["authority_country"],
+                # Joint procurement: the row names one buyer of several.
+                "buyer_count": r.get("buyer_count") or 0,
                 "is_framework": r.get("is_framework"),
             })
 
@@ -261,8 +272,25 @@ class GraphContractSource(ContractDataSource):
                 # The row keeps contractor null and carries the withheld
                 # count, which is what the UI labels.
                 "OPTIONAL MATCH (ct)-[:AWARDED_TO]->(c:Company) "
+                # One row per CONTRACT, not per winner. This list is
+                # "contracts this buyer awarded"; the projection used to
+                # carry the winner's columns into a DISTINCT, so the row
+                # grain was (contract x winner) and a multi-winner award
+                # appeared once per supplier. Camara Municipal de Pombal
+                # showed its insurance framework three times, once for
+                # each insurer. It is not rare: 1,026,029 prod contracts
+                # have more than one winner and would render 5,358,640
+                # rows, one of them 802 times. The totals below already
+                # took DISTINCT ct for exactly this reason, so list and
+                # totals disagreed.
+                "WITH ct, c ORDER BY c.name "
+                "WITH ct, collect(DISTINCT c) AS winners "
                 "OPTIONAL MATCH (ct)-[:CATEGORIZED_AS]->(cpv:CPV) "
-                "RETURN DISTINCT ct.ted_notice_id AS notice_id, "
+                # head() keeps the single-value contractor columns the
+                # UI already reads; contractor_count is what lets it say
+                # there are others rather than silently showing one.
+                "WITH ct, cpv, winners, head(winners) AS c "
+                "RETURN ct.ted_notice_id AS notice_id, "
                 "  ct.ted_publication_number AS publication_number, "
                 f"  {title_expr} AS title, ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
@@ -292,6 +320,7 @@ class GraphContractSource(ContractDataSource):
                 "  ct.is_framework AS is_framework, "
                 "  c.name AS contractor, c.country AS contractor_country, "
                 "  c.gmr_id AS contractor_gmr_id, "
+                "  size(winners) AS contractor_count, "
                 "  ct.suppliers_withheld_count AS supplier_withheld_count, "
                 "  cpv.description AS cpv_description "
                 + f" {contract_order_by(sort)} LIMIT $limit",
@@ -342,6 +371,11 @@ class GraphContractSource(ContractDataSource):
                 "ted_url": r["ted_url"],
                 "contractor": r["contractor"],
                 "contractor_country": r["contractor_country"],
+                # How many suppliers actually won this contract. The row
+                # names one of them; without the count the page would
+                # quietly present a three-insurer framework as a
+                # single-supplier award.
+                "contractor_count": r.get("contractor_count") or 0,
                 "contractor_gmr_id": r["contractor_gmr_id"],
                 # How many suppliers the notice named that the cleaning
                 # stage refused to mint a company for. Non-zero with a
