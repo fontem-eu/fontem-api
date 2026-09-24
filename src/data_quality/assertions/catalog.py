@@ -104,6 +104,22 @@ def at_least(key: str, minimum: int, label: str) -> Evaluator:
     return _ev
 
 
+def max_ratio(limit: float, label: str) -> Evaluator:
+    """OK when row['hits']/row['total'] <= limit. Empty population passes.
+
+    The inverse of min_coverage: for a population that should stay SMALL,
+    where a sudden rise is the regression."""
+    def _ev(row: Mapping[str, Any]) -> tuple[bool, str]:
+        total = int(row.get("total") or 0)
+        hits = int(row.get("hits") or 0)
+        if total == 0:
+            return True, f"{label}: no rows yet"
+        ratio = hits / total
+        return ratio <= limit, (
+            f"{label}: {hits}/{total} ({ratio:.2%}, max {limit:.0%})")
+    return _ev
+
+
 def min_coverage(min_ratio: float, label: str) -> Evaluator:
     """OK when row['covered']/row['total'] >= min_ratio. Empty population
     (total 0) passes — nothing to cover yet."""
@@ -1141,6 +1157,147 @@ ASSERTIONS: list[Assertion] = [
         "SAME_AS edges in one family). The cleaning stage withholds such "
         "suppliers at ingest; this assertion is the failing-before / "
         "passing-after gate for retracting the ones already in the graph.",
+    ),
+    # ── What the rescan has to prove ────────────────────────────────
+    # These exist so the C8 reprocess campaign can be JUDGED rather than
+    # assumed. Every one of them is red today for a defect fixed on
+    # 2026-09-23/24, and the rescan is what turns it green; a count that
+    # does not move is a fix that did not land. Each query was timed
+    # against fontem-prod before it shipped, because the runner gives a
+    # statement 90 s (db.transaction.timeout) and the first version of
+    # values.company_name_is_not_notice_text blew it every night.
+    Assertion(
+        "values.company_name_is_not_a_placeholder_family", VALUES,
+        "No Company is named after a buyer's placeholder phrase", BLOCK,
+        "cypher",
+        "CALL db.index.fulltext.queryNodes('company_name_ft', "
+        "'bijlage OR annexe OR anexo OR allegato OR bilaga OR anlage OR "
+        "attached OR suppliers OR attributaires OR auftragnehmer OR "
+        "ondernemingen OR leveranciers OR operatori OR ditte OR "
+        "applicable OR toepassing OR dotyczy OR angabe') YIELD node "
+        "WITH node WHERE toLower(node.name) =~ "
+        "'.*(zie bijlage|voir annexe|voir liste|ver anexo|vedi allegato"
+        "|se bilaga|siehe anlage|siehe anhang|see attached|see annex"
+        "|various suppliers|multiple suppliers|several suppliers"
+        "|plusieurs attributaires|mehrere auftragnehmer"
+        "|meerdere ondernemingen|diverse leveranciers|vari operatori"
+        "|diversi operatori|varie ditte|not applicable"
+        "|niet van toepassing|nie dotyczy|keine angabe).*' "
+        "RETURN count(*) AS violations",
+        zero_violations("companies named after a placeholder phrase"),
+        "The named junk families of src/etl/cleaning/lexicon.py, asked of "
+        "the graph instead of the ingest: a buyer writing 'zie bijlage' or "
+        "'Keine Angabe' where the supplier's name belongs. The cleaning "
+        "stage withholds them at ingest, so after the reprocess campaign "
+        "only entities minted before it should remain — and the C1 cleanup "
+        "removes those. 155 on 2026-09-24, the day the families shipped. "
+        "The phrase list mirrors the lexicon; extend both together.",
+    ),
+    Assertion(
+        "values.framework_id_is_normalised", VALUES,
+        "Every framework_id is a canonical grouping key", BLOCK, "cypher",
+        "MATCH (c:Contract) WHERE c.framework_id IS NOT NULL AND ("
+        "c.framework_id =~ '^0[0-9]*-[0-9]{4}$' OR "
+        "c.framework_id =~ '.*-[0-9]{2}$' OR "
+        "c.framework_id =~ '^0+$') "
+        "RETURN count(*) AS violations",
+        zero_violations("framework keys that are not canonical"),
+        "framework_id groups every award notice of one framework "
+        "agreement, so both ends have to normalise to the same string: a "
+        "publication number without its zero padding (TED's own index "
+        "returns nothing for 00536632-2024 and two notices for "
+        "536632-2024) and a notice UUID without its -NN version suffix. "
+        "A zero-only number is not a key at all but a placeholder the "
+        "buyer typed, and it would pull every notice carrying the same "
+        "placeholder into one fabricated framework — prod held '0-2026' "
+        "until eforms-parser 0.13.1 rejected it.",
+    ),
+    Assertion(
+        "coverage.framework_key_present", COVERAGE,
+        "Framework contracts published since 2025 carry a framework key "
+        "(>=70%)", WARN, "cypher",
+        "MATCH (c:Contract) WHERE c.is_framework = true "
+        "AND c.publication_date >= '2025-01-01' "
+        "RETURN count(*) AS total, count(c.framework_id) AS covered",
+        min_coverage(0.70, "framework key"),
+        "The eForms OPT-100 reference is what lets the award notices of "
+        "one framework find each other. Measured on TED itself, it is "
+        "carried by 89.4% of framework-flagged award notices for 2025 and "
+        "98.3% for 2026 (2024 only 28.8%, nothing before), so a healthy "
+        "graph lands well above this bar once the notices are reprocessed. "
+        "274 of 105,738 on 2026-09-24 — every one of them ingested since "
+        "the loader learned to read it. WARN, because coverage is a "
+        "property of what buyers published, not of our correctness.",
+    ),
+    Assertion(
+        "grain.entity_quarantine_follows_canonical_notice", GRAIN,
+        "No :Contract is quarantined while its canonical notice is not",
+        BLOCK, "cypher",
+        "MATCH (e:Contract) WHERE e.value_quarantined = true "
+        "MATCH (e)<-[:NOTICE_OF]-(x:Notice) WHERE x.is_current = true "
+        "AND coalesce(x.value_quarantined, false) = false "
+        "RETURN count(*) AS violations",
+        zero_violations("entities carrying a stale quarantine marker"),
+        "A contract entity's value story must come from one notice — the "
+        "canonical one. A marker an older notice left behind, over a value "
+        "a newer healthy notice supplied, is the entity claiming to be "
+        "quarantined and valued at once. 333 on 2026-09-24; the chain "
+        "rollup now derives marker and value together from `latest`, so "
+        "the count falls as each contract is next touched.",
+    ),
+    Assertion(
+        "grain.canonical_quarantine_reaches_the_entity", GRAIN,
+        "A quarantined canonical notice leaves its :Contract without a "
+        "value", BLOCK, "cypher",
+        "MATCH (x:Notice) WHERE x.value_quarantined = true "
+        "AND x.is_current = true "
+        "MATCH (x)-[:NOTICE_OF]->(e:Contract) "
+        "WHERE coalesce(e.value_quarantined, false) = false "
+        "OR e.value_eur IS NOT NULL "
+        "RETURN count(*) AS violations",
+        zero_violations("quarantines that did not reach the entity"),
+        "The other direction, and the one that hid the bug: the loader "
+        "withheld the value and the entity write cleared it, then the "
+        "chain rollup — which takes 'the newest notice that still HAS a "
+        "value' — reached PAST the quarantined notice to an older one and "
+        "wrote that figure back. 630 on 2026-09-24. Distinct from "
+        "values.quarantined_carries_no_value, which only sees an entity "
+        "that kept BOTH the marker and a value.",
+    ),
+    Assertion(
+        "values.company_vat_is_country_prefixed", VALUES,
+        "No Company stores a bare national number as its VAT", BLOCK,
+        "cypher",
+        "MATCH (c:Company) WHERE c.vat IS NOT NULL RETURN "
+        "count(*) AS total, "
+        "count(CASE WHEN NOT c.vat =~ '^[A-Z]{2}.*' THEN 1 END) "
+        "AS violations",
+        zero_violations("bare national numbers stored as VAT", "total"),
+        "C3's invariant. A bare PT NIF (503536717) is not a VAT and must "
+        "never be stored as one: the matcher would compare it against "
+        "another country's number of the same shape. The cleaning stage "
+        "prefixes the organisation's country before identity is assigned "
+        "and canon_vat's per-country regex refuses whatever is still not "
+        "a VAT. Green on 2026-09-24 (0 of 67,641) — a guard, not a "
+        "symptom.",
+    ),
+    Assertion(
+        "values.supplier_withheld_rate_is_sane", VALUES,
+        "Recent contracts withhold at most 1% of their suppliers", WARN,
+        "cypher",
+        "MATCH (c:Contract) WHERE c.publication_date >= "
+        "toString(date() - duration({days: 7})) RETURN count(*) AS total, "
+        "sum(CASE WHEN coalesce(c.suppliers_withheld_count, 0) > 0 "
+        "THEN 1 ELSE 0 END) AS hits",
+        max_ratio(0.01, "contracts with a withheld supplier"),
+        "Withholding a supplier deletes it from its award and nothing "
+        "downstream can recover the name, so a name rule that fires too "
+        "widely is the worst thing the cleaning stage can do. "
+        "generic.name_is_sentence did exactly that — 5.2% of every prod "
+        "name over 80 characters, real institutions among them — and "
+        "nothing noticed until the withheld list was read by hand. The "
+        "named families sit at 1 in 12,128 (0.01%). This is the tripwire "
+        "for the next rule that reaches too far.",
     ),
     # Contracts ingested by the cleaning-stage loader carry cleaning_rules
     # (an empty list when nothing fired). The graph has no ingest timestamp

@@ -127,6 +127,14 @@ def test_values_block_except_documented_warn():
         # that label has always been clean and any drift there is new.
         # Raise this to BLOCK once the backfill reaches zero.
         "values.company_country_is_alpha3",
+        # A tripwire, not a defect: it measures how widely the name rules
+        # fire, and the honest value of that is a judgement call about
+        # the corpus, not a broken invariant. Blocking on it would stop a
+        # release because a week's notices happened to be unusually full
+        # of placeholders. It exists so the next over-broad rule is
+        # noticed in a dashboard rather than by reading withheld names by
+        # hand, which is how the 5.2% one was found.
+        "values.supplier_withheld_rate_is_sane",
     }
 
 
