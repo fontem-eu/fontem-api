@@ -13,6 +13,7 @@ from src.data_quality.assertions.catalog import BLOCK, WARN, by_id, max_ratio
 
 
 POST_RESCAN_IDS = [
+    "grain.notice_belongs_to_one_contract",
     "values.company_name_is_not_a_placeholder_family",
     "values.framework_id_is_normalised",
     "coverage.framework_key_present",
@@ -37,6 +38,7 @@ def test_post_rescan_assertions_are_registered_and_cypher(aid):
     ("grain.entity_quarantine_follows_canonical_notice", BLOCK),
     ("grain.canonical_quarantine_reaches_the_entity", BLOCK),
     ("values.company_vat_is_country_prefixed", BLOCK),
+    ("grain.notice_belongs_to_one_contract", BLOCK),
     # coverage of what buyers published, and a tripwire — neither is a
     # statement about our own correctness, so neither blocks a release.
     ("coverage.framework_key_present", WARN),
@@ -118,3 +120,15 @@ def test_max_ratio_helper():
     assert ev({"total": 0, "hits": 0})[0]
     assert ev({"total": 1000, "hits": 10})[0]
     assert not ev({"total": 1000, "hits": 11})[0]
+
+
+def test_notice_home_assertion_counts_notices_not_edges():
+    """The duplicate-contract driver. 2,673 notices carry two NOTICE_OF
+    edges on prod; only the 123 where the shared notice is the LATEST of
+    both entities surface as duplicate contracts today, so counting
+    notices — not the visible duplicates — is what measures the cause."""
+    a = by_id()["grain.notice_belongs_to_one_contract"]
+    assert "count(r) AS k" in a.query and "k > 1" in a.query
+    assert a.evaluate({"violations": 0})[0]
+    ok, obs = a.evaluate({"violations": 2673})
+    assert not ok and "2673" in obs
