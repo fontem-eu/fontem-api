@@ -17,7 +17,8 @@ from src.data_quality.assertions import catalog
 from src.data_quality.assertions.catalog import (
     ASSERTIONS, BLOCK, WARN, KEYS, REFS, VALUES, PIPELINE, FRESHNESS, GOLDEN,
     CONSISTENCY, LINGUISTICS, RESOLUTION,
-    COVERAGE, ORACLE, GRAIN, Assertion, by_id, le_threshold, min_coverage,
+    COVERAGE, ORACLE, GRAIN, Assertion, by_id, le_threshold, max_ratio,
+    min_coverage,
     no_confident_pair, oracle_band, resolves_confidently, resolves_via_tier,
     zero_violations,
     zero_with_detail,
@@ -127,6 +128,14 @@ def test_values_block_except_documented_warn():
         # that label has always been clean and any drift there is new.
         # Raise this to BLOCK once the backfill reaches zero.
         "values.company_country_is_alpha3",
+        # A tripwire, not a defect: it measures how widely the name rules
+        # fire, and the honest value of that is a judgement call about
+        # the corpus, not a broken invariant. Blocking on it would stop a
+        # release because a week's notices happened to be unusually full
+        # of placeholders. It exists so the next over-broad rule is
+        # noticed in a dashboard rather than by reading withheld names by
+        # hand, which is how the 5.2% one was found.
+        "values.supplier_withheld_rate_is_sane",
     }
 
 
@@ -941,3 +950,117 @@ def test_contract_cleaning_rules_present_is_a_warn_coverage_bar():
     ok, obs = a.evaluate({"total": 100, "covered": 50})
     assert not ok and "50/100" in obs
     assert a.evaluate({"total": 0, "covered": 0})[0]
+
+
+# --------------------------------------------------------------------------
+# What the rescan has to prove (data-backlog Part 5, C8)
+# --------------------------------------------------------------------------
+# Each of these is red today for a defect fixed on 2026-09-23/24. They
+# exist so the reprocess campaign can be judged rather than assumed.
+
+POST_RESCAN_IDS = [
+    "values.company_name_is_not_a_placeholder_family",
+    "values.framework_id_is_normalised",
+    "coverage.framework_key_present",
+    "grain.entity_quarantine_follows_canonical_notice",
+    "grain.canonical_quarantine_reaches_the_entity",
+    "values.company_vat_is_country_prefixed",
+    "values.supplier_withheld_rate_is_sane",
+]
+
+
+@pytest.mark.parametrize("aid", POST_RESCAN_IDS)
+def test_post_rescan_assertions_are_registered_and_cypher(aid):
+    a = by_id()[aid]
+    assert a.engine == "cypher"
+    assert a.severity in (BLOCK, WARN)
+    assert a.rationale and len(a.rationale) > 80
+
+
+@pytest.mark.parametrize("aid,expected", [
+    ("values.company_name_is_not_a_placeholder_family", BLOCK),
+    ("values.framework_id_is_normalised", BLOCK),
+    ("grain.entity_quarantine_follows_canonical_notice", BLOCK),
+    ("grain.canonical_quarantine_reaches_the_entity", BLOCK),
+    ("values.company_vat_is_country_prefixed", BLOCK),
+    # coverage of what buyers published, and a tripwire — neither is a
+    # statement about our own correctness, so neither blocks a release.
+    ("coverage.framework_key_present", WARN),
+    ("values.supplier_withheld_rate_is_sane", WARN),
+])
+def test_post_rescan_severities(aid, expected):
+    assert by_id()[aid].severity == expected
+
+
+def test_placeholder_family_assertion_seeks_the_name_index():
+    """3.6M :Company is a 90-second scan; the runner gives a statement
+    90 s. This one seeks the full-text index and regexes the candidates,
+    measured at 1.7 s on prod."""
+    q = by_id()["values.company_name_is_not_a_placeholder_family"].query
+    assert "db.index.fulltext.queryNodes('company_name_ft'" in q
+    assert "MATCH (c:Company) WHERE" not in q
+    # the phrase list has to mirror the lexicon families
+    for phrase in ("zie bijlage", "keine angabe", "multiple suppliers",
+                   "voir liste", "ver anexo", "not applicable"):
+        assert phrase in q
+
+
+def test_framework_id_normalisation_rejects_the_three_bad_shapes():
+    q = by_id()["values.framework_id_is_normalised"].query
+    assert "^0[0-9]*-[0-9]{4}$" in q     # zero-padded publication number
+    assert ".*-[0-9]{2}$" in q           # UUID that kept its -NN version
+    assert "^0+$" in q                   # a zero placeholder, not a key
+
+
+@pytest.mark.parametrize("aid", [
+    "grain.entity_quarantine_follows_canonical_notice",
+    "grain.canonical_quarantine_reaches_the_entity",
+])
+def test_quarantine_assertions_anchor_on_the_canonical_notice(aid):
+    """Both directions of the chain-rollup invariant: the entity's value
+    and its quarantine marker come from the SAME notice."""
+    q = by_id()[aid].query
+    assert "x.is_current = true" in q
+    assert ":NOTICE_OF" in q
+
+
+def test_quarantine_assertions_are_two_not_one():
+    """Measured on prod: each direction alone is ~4.1 s, but both as CALL
+    subqueries of one statement planned badly and took 50 s. Two
+    assertions also report their counts separately, which is what says
+    which direction is still broken."""
+    a = by_id()["grain.entity_quarantine_follows_canonical_notice"]
+    b = by_id()["grain.canonical_quarantine_reaches_the_entity"]
+    assert a.query != b.query
+    assert "CALL () {" not in a.query and "CALL () {" not in b.query
+
+
+def test_withheld_rate_tripwire_would_have_caught_the_heuristic():
+    """generic.name_is_sentence withheld 1,250 of 23,814 names (5.2%)."""
+    a = by_id()["values.supplier_withheld_rate_is_sane"]
+    assert a.evaluate({"total": 12128, "hits": 1})[0]
+    ok, obs = a.evaluate({"total": 23814, "hits": 1250})
+    assert not ok and "5.25%" in obs
+    # an empty window is not a failure
+    assert a.evaluate({"total": 0, "hits": 0})[0]
+
+
+def test_framework_key_coverage_bar():
+    a = by_id()["coverage.framework_key_present"]
+    assert not a.evaluate({"total": 105738, "covered": 274})[0]
+    assert a.evaluate({"total": 100, "covered": 70})[0]
+    assert not a.evaluate({"total": 100, "covered": 69})[0]
+
+
+def test_vat_assertion_is_a_green_guard_today():
+    a = by_id()["values.company_vat_is_country_prefixed"]
+    ok, obs = a.evaluate({"total": 67641, "violations": 0})
+    assert ok and "67641" in obs
+    assert not a.evaluate({"total": 67641, "violations": 1})[0]
+
+
+def test_max_ratio_helper():
+    ev = max_ratio(0.01, "x")
+    assert ev({"total": 0, "hits": 0})[0]
+    assert ev({"total": 1000, "hits": 10})[0]
+    assert not ev({"total": 1000, "hits": 11})[0]
