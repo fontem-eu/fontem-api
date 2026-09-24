@@ -1167,6 +1167,24 @@ ASSERTIONS: list[Assertion] = [
     # statement 90 s (db.transaction.timeout) and the first version of
     # values.company_name_is_not_notice_text blew it every night.
     Assertion(
+        "grain.notice_belongs_to_one_contract", GRAIN,
+        "Every :Notice hangs off exactly one :Contract", BLOCK, "cypher",
+        "MATCH (x:Notice)-[r:NOTICE_OF]->() WITH x, count(r) AS k "
+        "WHERE k > 1 RETURN count(*) AS violations",
+        zero_violations("notices attached to more than one contract"),
+        "A notice describes one contract, so NOTICE_OF is its one home. "
+        "2,673 notices carry two edges on 2026-09-24, and every one of "
+        "them has an edge whose entity key disagrees with the notice's "
+        "own — the stale half. It happens when a notice is re-stamped "
+        "onto another entity's chain and CHAIN_ADOPT_CYPHER then refuses "
+        "to merge the two entities because the old one has an award of "
+        "its own outside the chain (right: merging would fuse unrelated "
+        "contracts). Nothing removes the edge it left behind. The rollup "
+        "then lets BOTH entities claim that notice as canonical, which "
+        "is where duplicate contracts come from: 123 pairs today, with "
+        "the remaining 2,550 able to surface as their chains grow.",
+    ),
+    Assertion(
         "values.company_name_is_not_a_placeholder_family", VALUES,
         "No Company is named after a buyer's placeholder phrase", BLOCK,
         "cypher",
