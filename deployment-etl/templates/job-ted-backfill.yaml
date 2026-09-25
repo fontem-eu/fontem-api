@@ -82,6 +82,30 @@ spec:
           image: contribute.void42.internal/fontem/fontem-api:{{ $.Values.version }}
           imagePullPolicy: Always
           env:
+            {{- with $.Values.tedRaw }}
+            {{- if .enabled }}
+            # Without these the backfill re-downloads every monthly
+            # archive from TED instead of reading the packages the daily
+            # run already cached (TedPackageStore.from_env) — dozens of
+            # months of needless transfer, and it is TED's bandwidth.
+            # The daily cronjob has had them all along; this job did not,
+            # which is why a reprocess campaign was never cheap to run.
+            - name: TED_RAW_ENDPOINT
+              value: {{ .endpoint | quote }}
+            - name: TED_RAW_BUCKET
+              value: {{ .bucket | default "ted-raw" | quote }}
+            - name: TED_RAW_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .credentialsSecret }}
+                  key: {{ .accessKeyKey }}
+            - name: TED_RAW_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .credentialsSecret }}
+                  key: {{ .secretKeyKey }}
+            {{- end }}
+            {{- end }}
             - name: NEO4J_URI
               valueFrom:
                 secretKeyRef:
