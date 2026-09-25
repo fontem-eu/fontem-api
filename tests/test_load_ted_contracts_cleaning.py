@@ -31,7 +31,7 @@ COMPANY_ID = "00040372-dad6-5d34-882c-8b8624b4e734"
 def _stub_should_ingest(monkeypatch):
     monkeypatch.setattr(
         "src.etl.load_ted_contracts._should_ingest",
-        lambda _session, _nid, _version, _identity: True,
+        lambda _session, _nid, _version, _identity, **_kw: True,
     )
 
 
