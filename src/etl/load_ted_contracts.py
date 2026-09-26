@@ -271,12 +271,12 @@ def _version_num(raw) -> int | None:
 _INGEST_STATE = """
 OPTIONAL MATCH (n:Notice {ted_notice_id: $nid})
 OPTIONAL MATCH (c:Contract {ted_notice_id: $nid})
-WITH coalesce(n, c) AS x
+WITH coalesce(n, c) AS x, n.title_lang IS NOT NULL AS has_title_lang
 RETURN x IS NOT NULL AS present,
        x.notice_version AS version,
        x.procedure_id IS NOT NULL AS has_procedure_id,
        x.ted_publication_number IS NOT NULL AS has_publication_number,
-       n.title_lang IS NOT NULL AS has_title_lang
+       has_title_lang
 """
 
 
@@ -1672,6 +1672,7 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
         "emit_frameworks": frameworks_enabled(),
     }
 
+    outcomes: list = []
     try:
         # CPV bootstrap: emits UpsertTaxonomyCode events. Idempotent;
         # re-runs are MERGE on (system='cpv', code) at the sink.
@@ -1710,10 +1711,10 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
                     archive = _download_monthly(
                         yr, mo, Path("/tmp"), package_store=package_store,
                     )
-                load_contracts(
+                outcomes.append(load_contracts(
                     driver, log, archive, currency_svc=currency_svc,
                     rescore=args.rescore, **stage,
-                )
+                ))
                 # Free disk between months (packages are >1 GB); the
                 # durable copy lives in the package store.
                 if not args.file and archive.exists():
@@ -1749,11 +1750,11 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
                     "modifications-only" if args.modifications_only
                     else "awards+modifications",
                 )
-                load_contracts_incremental(
+                outcomes.append(load_contracts_incremental(
                     driver, log, since, until,
                     currency_svc=currency_svc, notice_types=notice_types,
                     watermark_id=args.watermark_id, **stage,
-                )
+                ))
                 # Nothing runs after the load: the neo4j sink links each
                 # modification to its award and maintains the contract
                 # entity on write (link_ted_modifications and
@@ -1767,6 +1768,23 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
         logger.info("DRY RUN: %d events in %d batches would have been "
                     "written: %s", log.total, log.batches, dict(log.counts))
     _write_report(stage["report"], args.report, to_stdout=args.dry_run)
+    _fail_if_nothing_succeeded(outcomes)
+
+
+def _fail_if_nothing_succeeded(outcomes: list) -> None:
+    """A run in which every notice failed is a failed run.
+
+    One bad notice is logged and skipped so it cannot end a multi-day range
+    Job. When NOTHING was emitted or skipped, though, the cause is systemic
+    (a broken query, an unreachable store) and the Job must not report
+    success: on 2026-09-26 a Cypher scoping error failed all 3,017 notices
+    of two validation runs while both Jobs showed Succeeded.
+    """
+    done = [o for o in outcomes if isinstance(o, dict)]
+    failed = sum(o.get("errors", 0) for o in done)
+    handled = sum(o.get("total", o.get("emitted", 0)) + o.get("skipped", 0) for o in done)
+    if failed and not handled:
+        raise SystemExit(f"every notice failed ({failed}); see the errors above")
 
 
 def _write_report(report: CleaningReport, path: str | None,
