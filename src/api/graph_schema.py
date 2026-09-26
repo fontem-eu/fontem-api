@@ -50,6 +50,20 @@ AUTHORITY_NUTS = "authority_nuts"
 #: of them, despite code having referenced all three.
 LOBBYIST_DISCLOSURE_ID = "lobbyist_disclosure_id"
 
+#: The key every authority page, contract list and map looks an authority up by.
+#:
+#: Authority had indexes on name_clean, nuts and (national_id, country) — and
+#: none on authority_id, the one property the API actually addresses it by. The
+#: planner, with nothing to seek on, starts these queries from the other end.
+#: /geo/entity/{authority}/aggregate scanned every NUTSRegion, walked down to
+#: 1.7M located Companies and their 65k contracts, and only then filtered for
+#: the one authority: 8.1M db hits to aggregate 66 contracts. On the shared
+#: graph (1G of page cache over NFS at the time) that was 26-31 s, which is the
+#: PROC-MAP-COLORIZE e2e failure; prod's 16G cache hid the same 8M hits behind
+#: 0.08 s. Forced to start from the authority it was 135k hits, nearly all of
+#: them the label scan this index removes.
+AUTHORITY_ID = "authority_authority_id"
+
 _STATEMENTS = (
     f"CREATE FULLTEXT INDEX {COMPANY_NAME_FULLTEXT} IF NOT EXISTS "
     "FOR (c:Company) ON EACH [c.name]",
@@ -59,18 +73,31 @@ _STATEMENTS = (
     "FOR (a:Authority) ON (a.nuts)",
     f"CREATE INDEX {LOBBYIST_DISCLOSURE_ID} IF NOT EXISTS "
     "FOR (l:Lobbyist) ON (l.disclosure_id)",
+    f"CREATE INDEX {AUTHORITY_ID} IF NOT EXISTS "
+    "FOR (a:Authority) ON (a.authority_id)",
 )
 
 
 def ensure_indexes(neo4j) -> list[str]:
-    """Create any missing index. Returns the statements that ran."""
+    """Create any missing index. Returns the statements that ran.
+
+    Each statement stands on its own. They used to share one ``try``, so a
+    single refusal — a name clash, a permission, a transient error — silently
+    skipped every index declared after it, and the list only ever grows at the
+    end.
+    """
     ran = []
     try:
-        with neo4j.session() as session:
-            for statement in _STATEMENTS:
-                session.run(statement)
-                ran.append(statement)
+        session_cm = neo4j.session()
     except Exception as exc:  # pylint: disable=broad-except
         # Logged, not raised: see the module docstring.
         logger.warning("could not ensure graph indexes: {}", exc)
+        return ran
+    with session_cm as session:
+        for statement in _STATEMENTS:
+            try:
+                session.run(statement)
+                ran.append(statement)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning("could not ensure graph index ({}): {}", statement, exc)
     return ran
