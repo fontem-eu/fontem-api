@@ -1844,3 +1844,35 @@ def test_contract_payload_carries_the_notices_title_language(
                    if c.args[0] == "UpsertContract").kwargs["payload"]
     assert payload["title_lang"] == "fr"
     assert payload["notice_language"] == "FRA"
+
+
+def test_the_ingest_state_query_returns_only_what_its_with_projects():
+    """A variable used after the WITH that dropped it made Neo4j reject the
+    gate's query: every notice failed, and the faked session in the tests
+    above could not see it. Every name the RETURN reads must be projected."""
+    import re  # pylint: disable=import-outside-toplevel
+    query = load_ted_contracts._INGEST_STATE  # pylint: disable=protected-access
+    with_clause, return_clause = query.split("WITH", 1)[1].split("RETURN", 1)
+    projected = set(re.findall(r"\bAS\s+(\w+)", with_clause))
+    items = [i.strip() for i in return_clause.split(",")]
+    used = set(re.findall(r"\b([a-z_]\w*)\.", return_clause))
+    bare = (i.split(" AS ")[0].strip() for i in items)
+    used |= {name for name in bare if re.fullmatch(r"[a-z_]\w*", name)}
+    assert used and used <= projected, f"RETURN reads {used - projected} outside the WITH"
+
+
+@pytest.mark.parametrize("outcomes, fails", [
+    ([{"total": 0, "skipped": 0, "errors": 1278}], True),          # everything failed
+    ([{"total": 0, "skipped": 0, "errors": 3},
+      {"total": 5, "skipped": 0, "errors": 0}], False),
+    ([{"emitted": 0, "skipped": 12, "errors": 2}], False),          # incremental shape
+    ([{"total": 0, "skipped": 0, "errors": 0}], False),  # empty: not a failure
+    ([None], False),
+])
+def test_a_run_where_every_notice_failed_exits_non_zero(outcomes, fails):
+    check = load_ted_contracts._fail_if_nothing_succeeded  # pylint: disable=protected-access
+    if fails:
+        with pytest.raises(SystemExit):
+            check(outcomes)
+    else:
+        check(outcomes)
