@@ -183,3 +183,42 @@ def test_the_feed_query_indexes_are_declared_too():
     statements = " ".join(graph_schema._STATEMENTS)  # noqa: SLF001
     assert "(c:Contract) ON (c.publication_date)" in statements
     assert "(a:Authority) ON (a.nuts)" in statements
+
+
+def test_authorities_are_indexed_by_the_id_the_api_looks_them_up_by():
+    """Without it the planner starts authority queries from the far end: the
+    map aggregate walked 1.7M companies to find one authority's 66 contracts,
+    8.1M db hits, 26-31 s on the shared graph — the PROC-MAP-COLORIZE failure."""
+    statements = " ".join(graph_schema._STATEMENTS)  # noqa: SLF001
+    assert "FOR (a:Authority) ON (a.authority_id)" in statements
+
+
+def test_one_refused_statement_does_not_skip_the_rest():
+    """They shared one try block, so an early failure silently dropped every
+    index declared after it — and new indexes are always appended last."""
+    first = graph_schema._STATEMENTS[0]  # noqa: SLF001
+
+    class Session:
+        def __init__(self):
+            self.ran = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def run(self, statement):
+            if statement == first:
+                raise RuntimeError("refused")
+            self.ran.append(statement)
+
+    session = Session()
+
+    class Neo4j:
+        def session(self):
+            return session
+
+    ran = graph_schema.ensure_indexes(Neo4j())
+    assert first not in ran
+    assert ran == list(graph_schema._STATEMENTS[1:])  # noqa: SLF001
