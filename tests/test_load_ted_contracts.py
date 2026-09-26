@@ -16,7 +16,7 @@ def _stub_should_ingest(monkeypatch):
     this to return False."""
     monkeypatch.setattr(
         "src.etl.load_ted_contracts._should_ingest",
-        lambda _session, _nid, _version, _identity: True,
+        lambda _session, _nid, _version, _identity, **_kw: True,
     )
 
 
@@ -88,6 +88,8 @@ def _stub_notice(*, awards, organizations):
     notice.modifies_notice_id = None
     notice.legacy_procedure_id = None
     notice.title = "Some contract"
+    notice.title_lang = None
+    notice.notice_language = None
     notice.description = "Procurement of stuff"
     notice.issue_date = "2025-09-01"
     notice.dispatch_date = "2025-09-01"
@@ -365,7 +367,7 @@ def test_skips_notice_already_in_neo4j(
     paying the full per-notice cost again."""
     monkeypatch.setattr(
         "src.etl.load_ted_contracts._should_ingest",
-        lambda _session, _nid, _version, _identity: False,
+        lambda _session, _nid, _version, _identity, **_kw: False,
     )
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1",
@@ -405,7 +407,7 @@ def test_rescore_reingests_already_loaded_notice(
     MERGEs, so values overwrite in place."""
     monkeypatch.setattr(
         "src.etl.load_ted_contracts._should_ingest",
-        lambda _session, _nid, _version, _identity: False,  # pretend it is already in Neo4j
+        lambda _session, _nid, _version, _identity, **_kw: False,  # pretend it is already in Neo4j
     )
     mock_matcher_cls.return_value = _mock_matcher(
         stub_authority_id="auth-1", stub_company_gmr="company-1",
@@ -1555,11 +1557,12 @@ def _session_with_state(row):
 
 
 def _state(present=True, version=None, has_procedure_id=True,
-           has_publication_number=True):
+           has_publication_number=True, has_title_lang=True):
     return {
         "present": present, "version": version,
         "has_procedure_id": has_procedure_id,
         "has_publication_number": has_publication_number,
+        "has_title_lang": has_title_lang,
     }
 
 
@@ -1708,7 +1711,7 @@ def test_search_path_is_discovery_only(mock_matcher_cls, mock_search,
     )
     seen = []
 
-    def _gate(_session, nid, version, identity):
+    def _gate(_session, nid, version, identity, **_kw):
         seen.append((nid, version, identity))
         return nid != "skip-me"
     monkeypatch.setattr("src.etl.load_ted_contracts._should_ingest", _gate)
@@ -1740,7 +1743,7 @@ def test_transient_neo4j_error_is_retried(monkeypatch):
     monkeypatch.setattr(load_ted_contracts.time, "sleep", lambda _s: None)
     calls = {"n": 0}
 
-    def _flaky(_session, _nid, _version, _identity):
+    def _flaky(_session, _nid, _version, _identity, **_kw):
         calls["n"] += 1
         if calls["n"] < 3:
             raise TransientError("Neo.TransientError.Transaction.BookmarkTimeout")
@@ -1758,7 +1761,7 @@ def test_transient_neo4j_error_gives_up_after_retries(monkeypatch):
     from neo4j.exceptions import TransientError  # pylint: disable=import-outside-toplevel
     monkeypatch.setattr(load_ted_contracts.time, "sleep", lambda _s: None)
 
-    def _always(_session, _nid, _version, _identity):
+    def _always(_session, _nid, _version, _identity, **_kw):
         raise TransientError("Neo.TransientError.Transaction.BookmarkTimeout")
     monkeypatch.setattr("src.etl.load_ted_contracts._should_ingest", _always)
     log, _emit = _mock_log()
@@ -1792,3 +1795,52 @@ def test_archive_run_counts_a_failed_notice_and_continues(
     res = load_contracts(driver, log, "/fake/path.tar.gz")
     assert res["errors"] == 1 and res["total"] == 1
     assert sum(1 for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract") == 1
+
+
+def test_should_ingest_backfills_a_missing_title_language(monkeypatch):
+    """The title-language backfill is a plain re-run: a notice whose
+    :Notice lacks title_lang is ingested again when the XML gives one,
+    even at the same version; once it has it, the re-run skips it."""
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    assert should(_session_with_state(_state(version="01", has_title_lang=False)),
+                  "n1", "01", "procedure_id", title_lang="it")
+    assert not should(_session_with_state(_state(version="01", has_title_lang=True)),
+                      "n1", "01", "procedure_id", title_lang="it")
+
+
+def test_should_ingest_ignores_a_title_language_the_xml_cannot_give(monkeypatch):
+    """No recognisable code on the notice, or the pre-download caller that
+    has not parsed it yet: nothing to backfill, the version rule decides."""
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    assert not should(_session_with_state(_state(version="01", has_title_lang=False)),
+                      "n1", "01", "procedure_id", title_lang=None)
+    assert not should(_session_with_state(_state(version="01", has_title_lang=False)),
+                      "n1", "01", "procedure_id")
+
+
+@patch("src.etl.load_ted_contracts.stream_notices")
+@patch("src.etl.load_ted_contracts.TedMatcher")
+def test_contract_payload_carries_the_notices_title_language(
+    mock_matcher_cls, mock_stream,
+):
+    """The language the notice gives for its title, and its verbatim code."""
+    mock_matcher_cls.return_value = _mock_matcher(
+        stub_authority_id="auth-1", stub_company_gmr="company-1")
+    contractor = MagicMock()
+    contractor.name = "Vendor"
+    contractor.country = "FR"
+    contractor.legal_id = None
+    notice = _stub_notice(awards=[_stub_award()], organizations={"O1": contractor})
+    notice.title_lang = "fr"
+    notice.notice_language = "FRA"
+    mock_stream.return_value = iter([notice])
+    driver, _session = _mock_driver_and_session()
+    log, emit = _mock_log()
+    load_contracts(driver, log, "/fake/path.tar.gz")
+
+    payload = next(c for c in emit.upsert.call_args_list
+                   if c.args[0] == "UpsertContract").kwargs["payload"]
+    assert payload["title_lang"] == "fr"
+    assert payload["notice_language"] == "FRA"

@@ -275,12 +275,14 @@ WITH coalesce(n, c) AS x
 RETURN x IS NOT NULL AS present,
        x.notice_version AS version,
        x.procedure_id IS NOT NULL AS has_procedure_id,
-       x.ted_publication_number IS NOT NULL AS has_publication_number
+       x.ted_publication_number IS NOT NULL AS has_publication_number,
+       n.title_lang IS NOT NULL AS has_title_lang
 """
 
 
 def _should_ingest(
     session, ted_notice_id: str, notice_version, identity: str | None,
+    *, title_lang: str | None = None,
 ) -> bool:
     """Idempotency gate, one indexed lookup per notice.
 
@@ -292,13 +294,22 @@ def _should_ingest(
     when the incoming notice is a NEWER version than the stored one. Same
     or older version: skip. So a re-run of an archive is O(1) per notice
     this loader already wrote, and the identity repair is simply a
-    re-run — no ``rescore`` needed, and a restarted range Job resumes."""
+    re-run — no ``rescore`` needed, and a restarted range Job resumes.
+
+    ``title_lang`` works the same way: when the XML gives the title's
+    language and the graph's :Notice lacks it, the notice is ingested
+    again, so backfilling it is a plain re-run. Only the :Notice counts:
+    the :Contract may carry a title_lang the translation enrichment
+    guessed, and a guess must not stop the notice's own statement landing.
+    The pre-download caller cannot know it yet and passes nothing."""
     row = session.run(_INGEST_STATE, nid=ted_notice_id).single()
     if row is None or not row["present"]:
         return True
     if identity == "procedure_id" and not row["has_procedure_id"]:
         return True
     if identity == "ted_publication_number" and not row["has_publication_number"]:
+        return True
+    if title_lang is not None and not row["has_title_lang"]:
         return True
     stored, incoming = _version_num(row["version"]), _version_num(notice_version)
     if incoming is not None and stored is None:
@@ -363,6 +374,7 @@ def ingest_notice(notice, session, log: EventLog, ctx: IngestContext) -> str:
             if not ctx.rescore and not _should_ingest(
                 session, ted_notice_id, notice.notice_version,
                 _identity_property(notice.procedure_id, notice.publication_number),
+                title_lang=notice.title_lang,
             ):
                 return "skipped"
             with log.batch(uuid.uuid4(), producer="load_ted_contracts") as emit:
@@ -1295,6 +1307,9 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-arguments,too-many
         ted_notice_id=ident.ted_notice_id,
         ted_publication_number=ident.ted_publication_number,
         title=notice.title or None,
+        # The notice's own statement of its title's language (ISO 639-1);
+        # translation starts from it. The verbatim code is in `facts`.
+        title_lang=notice.title_lang,
         authority_id=authority_id,
         company_gmr_id=company_gmr_id,
         match_tier=match_tier,
