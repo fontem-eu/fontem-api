@@ -251,4 +251,7 @@ def test_every_endpoint_is_cacheable_and_cross_origin(client, path):
     assert response.status_code == 200
     assert "public" in response.headers["cache-control"]
     assert response.headers["access-control-allow-origin"] == "*"
+    assert response.headers["cross-origin-resource-policy"] == "cross-origin"
+    # The wildcard is only safe because credentials never ride along with it.
+    assert "access-control-allow-credentials" not in response.headers
     assert response.headers["etag"].startswith('W/"nuts-2024-')

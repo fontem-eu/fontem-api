@@ -73,18 +73,35 @@ ENDPOINTS = {
 
 
 def _public(response: Response) -> None:
-    """Cache + CORS headers.
+    """Cache + cross-origin headers.
 
     Cross-origin is opened deliberately and narrowly: every response here is
     the same public reference data for every caller, there is nothing to
     authorise, and a browser app that cannot read it cannot use this API at
     all.
+
+    The wildcard is safe for a reason worth keeping in view. ``*`` and
+    credentials are mutually exclusive by specification: a browser will not
+    attach cookies or ``Authorization`` to a request answered with ``*``, and
+    rejects the response outright if it also claims
+    ``Access-Control-Allow-Credentials: true``. So no third-party page can read
+    anything user-specific through these routes — and there is nothing
+    user-specific here to read. That holds only while this is the ONE place
+    the header is set and credentials never appear beside it;
+    ``tests/test_nuts_cors_scope.py`` enforces both, so a route that copies
+    this helper, or a blanket ``CORSMiddleware``, fails CI rather than review.
+
+    ``Cross-Origin-Resource-Policy: cross-origin`` declares the same intent to
+    the browser's other isolation model, so a cross-origin-isolated page
+    (COEP ``require-corp``) can load these responses too, instead of the
+    intent having to be inferred from CORS alone.
     """
     doc = nuts_gazetteer.document()
     response.headers["Cache-Control"] = _CACHE_CONTROL
     response.headers["ETag"] = (
         f'W/"nuts-{doc.get("nuts_version", "?")}-{doc.get("generated", "?")}"')
     response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
     response.headers["Vary"] = "Accept-Encoding"
 
 
