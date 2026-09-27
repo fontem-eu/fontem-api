@@ -427,3 +427,27 @@ def test_disclosure_carries_programme_code():
             if c.args[0] == "UpsertDisclosure"][0]
     details = disc.kwargs["payload"]["details"]
     assert details["programme_code"] == _programme_code("Competitiveness PL")
+
+
+_TITLE_HEADER = ("Operation_Unique_Identifier,CountryCode,"
+                 "Operation_Name_English,Operation_Name_Programme_Language\n")
+
+
+def test_an_english_name_is_stated_as_english():
+    row = "https://linkedopendata.eu/entity/Q7,LT,Fund of Funds,Fondų fondas\n"
+    rec = list(parse_kohesio_csv((_TITLE_HEADER + row).encode(), since=None))[0]
+    assert rec["title"] == "Fund of Funds" and rec["title_lang"] == "en"
+
+
+def test_a_programme_language_fallback_claims_no_language():
+    """Kohesio does not say which language the programme's name is in."""
+    row = "https://linkedopendata.eu/entity/Q8,PL,,Opieka nad dziećmi do lat 3\n"
+    rec = list(parse_kohesio_csv((_TITLE_HEADER + row).encode(), since=None))[0]
+    assert rec["title"] == "Opieka nad dziećmi do lat 3" and rec["title_lang"] is None
+
+
+def test_the_disclosure_payload_carries_the_title_language():
+    log, emit = _emit_log()
+    emit_disclosure_events(log, [{"qid": "Q7", "title": "Fund of Funds", "title_lang": "en"}])
+    disc = [c for c in emit.upsert.call_args_list if c.args[0] == "UpsertDisclosure"][0]
+    assert disc.kwargs["payload"]["title_lang"] == "en"

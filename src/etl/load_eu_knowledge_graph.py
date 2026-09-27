@@ -207,6 +207,10 @@ def parse_kohesio_csv(data_bytes: bytes, since: str | None = None):  # pylint: d
                 or row.get("Operation_Name_Programme_Language")
                 or ""
             )[:500] or None,
+            # The CSV names its columns by language: a title from the
+            # English-name column is English. The programme-language
+            # fallback states no language, so none is claimed for it.
+            "title_lang": "en" if row.get("Operation_Name_English") else None,
             "description": (
                 row.get("Operation_Summary_English")
                 or row.get("Operation_Summary_Programme_Language")
@@ -358,6 +362,7 @@ def emit_disclosure_events(log: EventLog, records: list[dict]) -> dict:
                         disclosure_type="cohesion-project",
                         year=year,
                         title=rec.get("title"),
+                        title_lang=rec.get("title_lang"),
                         details=details or None,
                     ),
                 )
