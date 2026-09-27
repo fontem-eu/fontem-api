@@ -1557,12 +1557,11 @@ def _session_with_state(row):
 
 
 def _state(present=True, version=None, has_procedure_id=True,
-           has_publication_number=True, has_title_lang=True):
+           has_publication_number=True):
     return {
         "present": present, "version": version,
         "has_procedure_id": has_procedure_id,
         "has_publication_number": has_publication_number,
-        "has_title_lang": has_title_lang,
     }
 
 
@@ -1795,29 +1794,6 @@ def test_archive_run_counts_a_failed_notice_and_continues(
     res = load_contracts(driver, log, "/fake/path.tar.gz")
     assert res["errors"] == 1 and res["total"] == 1
     assert sum(1 for c in emit.upsert.call_args_list if c.args[0] == "UpsertContract") == 1
-
-
-def test_should_ingest_backfills_a_missing_title_language(monkeypatch):
-    """The title-language backfill is a plain re-run: a notice whose
-    :Notice lacks title_lang is ingested again when the XML gives one,
-    even at the same version; once it has it, the re-run skips it."""
-    monkeypatch.undo()
-    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
-    assert should(_session_with_state(_state(version="01", has_title_lang=False)),
-                  "n1", "01", "procedure_id", title_lang="it")
-    assert not should(_session_with_state(_state(version="01", has_title_lang=True)),
-                      "n1", "01", "procedure_id", title_lang="it")
-
-
-def test_should_ingest_ignores_a_title_language_the_xml_cannot_give(monkeypatch):
-    """No recognisable code on the notice, or the pre-download caller that
-    has not parsed it yet: nothing to backfill, the version rule decides."""
-    monkeypatch.undo()
-    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
-    assert not should(_session_with_state(_state(version="01", has_title_lang=False)),
-                      "n1", "01", "procedure_id", title_lang=None)
-    assert not should(_session_with_state(_state(version="01", has_title_lang=False)),
-                      "n1", "01", "procedure_id")
 
 
 @patch("src.etl.load_ted_contracts.stream_notices")
