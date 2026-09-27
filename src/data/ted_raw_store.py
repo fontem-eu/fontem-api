@@ -26,6 +26,7 @@ import io
 from pathlib import Path
 import logging
 import os
+from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,21 @@ class TedRawStore:
             if resp is not None:
                 resp.close()
                 resp.release_conn()
+
+    def iter_xml(self, start_after: str = "") -> Iterator[tuple[str, bytes]]:
+        """Every stored notice as (object name, XML bytes), in key order,
+        resuming after ``start_after``. For one-off migrations; the
+        loader itself only writes and reads single notices."""
+        for obj in self._client.list_objects(self._bucket, recursive=True,
+                                             start_after=start_after or None):
+            resp = self._client.get_object(self._bucket, obj.object_name)
+            try:
+                data = resp.read()
+            finally:
+                resp.close()
+                resp.release_conn()
+            yield obj.object_name, (gzip.decompress(data)
+                                    if obj.object_name.endswith(".gz") else data)
 
     def exists(self, identifier: str) -> bool:
         key = _safe_key(identifier)
