@@ -1557,11 +1557,12 @@ def _session_with_state(row):
 
 
 def _state(present=True, version=None, has_procedure_id=True,
-           has_publication_number=True):
+           has_publication_number=True, publication_date=None):
     return {
         "present": present, "version": version,
         "has_procedure_id": has_procedure_id,
         "has_publication_number": has_publication_number,
+        "publication_date": publication_date,
     }
 
 
@@ -1608,6 +1609,31 @@ def test_should_ingest_newer_version(monkeypatch):
                   "procedure_id")
     assert should(_session_with_state(_state(version=1)), "n1", "02",
                   "procedure_id")
+
+
+def test_should_ingest_when_the_graph_has_another_publication_date(monkeypatch):
+    """The FieldsPrivacy repair (eforms-parser 0.14.1): 474034-2024 sits
+    in the graph as 2034-07-15, the XML says 2024-08-07."""
+    monkeypatch.undo()
+    should = load_ted_contracts._should_ingest  # pylint: disable=protected-access
+    wrong = _state(version="01", publication_date="2034-07-15")
+    assert should(_session_with_state(wrong), "n1", "01", "procedure_id",
+                  publication_date="2024-08-07")
+    assert should(_session_with_state(wrong), "n1", "02", "procedure_id",
+                  publication_date="2024-09-01")
+    # the same date is not a reason, and neither is an OLDER version's date
+    right = _state(version="01", publication_date="2024-08-07")
+    assert not should(_session_with_state(right), "n1", "01", "procedure_id",
+                      publication_date="2024-08-07")
+    newer = _state(version="02", publication_date="2024-09-01")
+    assert not should(_session_with_state(newer), "n1", "01", "procedure_id",
+                      publication_date="2024-08-07")
+    # a caller that cannot know the date yet (search API) passes nothing
+    assert not should(_session_with_state(wrong), "n1", "01", "procedure_id")
+    # legacy, unversioned: a differing date re-ingests as well
+    assert should(_session_with_state(_state(publication_date="2019-01-02")),
+                  "1-2019", None, "ted_publication_number",
+                  publication_date="2019-01-03")
 
 
 def test_should_ingest_restamps_node_loaded_before_identity(monkeypatch):

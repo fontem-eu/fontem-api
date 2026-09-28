@@ -275,12 +275,14 @@ WITH coalesce(n, c) AS x
 RETURN x IS NOT NULL AS present,
        x.notice_version AS version,
        x.procedure_id IS NOT NULL AS has_procedure_id,
-       x.ted_publication_number IS NOT NULL AS has_publication_number
+       x.ted_publication_number IS NOT NULL AS has_publication_number,
+       x.publication_date AS publication_date
 """
 
 
 def _should_ingest(
     session, ted_notice_id: str, notice_version, identity: str | None,
+    *, publication_date: str | None = None,
 ) -> bool:
     """Idempotency gate, one indexed lookup per notice.
 
@@ -292,7 +294,15 @@ def _should_ingest(
     when the incoming notice is a NEWER version than the stored one. Same
     or older version: skip. So a re-run of an archive is O(1) per notice
     this loader already wrote, and the identity repair is simply a
-    re-run — no ``rescore`` needed, and a restarted range Job resumes."""
+    re-run — no ``rescore`` needed, and a restarted range Job resumes.
+
+    ``publication_date`` (the day the XML says TED published it) makes a
+    graph copy with a different date stale too, at the same or a newer
+    version (an older version legitimately carries an older date).
+    eforms-parser before 0.14.1 read efac:FieldsPrivacy's date — when a
+    withheld field may be published — for any notice that withholds
+    one: 5,104 prod notices dated 2027-2035 on 2026-09-28, and same-year
+    ones no count can see. A re-run of the archive is the repair."""
     row = session.run(_INGEST_STATE, nid=ted_notice_id).single()
     if row is None or not row["present"]:
         return True
@@ -308,6 +318,9 @@ def _should_ingest(
         # but its back-link is in the wrong field. Re-stamp it. This is
         # what makes a range Job resumable and the repair a plain re-run:
         # notices this loader wrote carry the version and are skipped.
+        return True
+    older = stored is not None and incoming is not None and incoming < stored
+    if publication_date and row["publication_date"] != publication_date and not older:
         return True
     return stored is not None and incoming is not None and incoming > stored
 
@@ -363,6 +376,7 @@ def ingest_notice(notice, session, log: EventLog, ctx: IngestContext) -> str:
             if not ctx.rescore and not _should_ingest(
                 session, ted_notice_id, notice.notice_version,
                 _identity_property(notice.procedure_id, notice.publication_number),
+                publication_date=_as_day(getattr(notice, "publication_date", None)),
             ):
                 return "skipped"
             with log.batch(uuid.uuid4(), producer="load_ted_contracts") as emit:
