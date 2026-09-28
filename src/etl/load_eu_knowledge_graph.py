@@ -42,6 +42,7 @@ from fontem_event_schemas import builders
 from fontem_events import EventLog
 
 from src.etl._http import HTTP_HEADERS
+from src.etl._http_retry import get_with_retry
 from src.services.location_service import LocationService
 from src.etl.data_description import DataDescription
 
@@ -75,9 +76,13 @@ KOHESIO_CSV_URL = (
     "?id=data/projects-2021-2027/latest/{cc}-pp21-27-latest.csv"
 )
 
+#: Kohesio names its files by ISO 3166 code, so Greece is "GR", not the
+#: EU's "EL". Its gateway answers a file that does not exist with a 504
+#: after 60 s rather than a 404, which made "EL" look like an outage for
+#: as long as the list said "EL": Greece was never loaded.
 EU_COUNTRIES = [
-    "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "ES",
-    "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT",
+    "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI",
+    "FR", "GR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT",
     "NL", "PL", "PT", "RO", "SE", "SI", "SK",
 ]
 
@@ -117,10 +122,10 @@ def _to_float(value: str) -> float | None:
 
 
 def download_country_csv(country_code: str) -> bytes:
-    """Download a single country's CSV from Kohesio."""
+    """Download a single country's CSV from Kohesio, retrying 5xx."""
     url = KOHESIO_CSV_URL.format(cc=country_code)
     logger.info("Downloading %s ...", url)
-    resp = httpx.get(
+    resp = get_with_retry(
         url, timeout=300, follow_redirects=True,
         headers=HTTP_HEADERS,
     )
@@ -403,6 +408,8 @@ def main(argv=None):
     )
 
     all_records: list[dict] = []
+    failed: list[str] = []
+    countries: list[str] = []
 
     if args.file:
         logger.info("Reading local file: %s", args.file)
@@ -416,7 +423,6 @@ def main(argv=None):
     else:
         countries = [c.strip() for c in args.countries.split(",") if c.strip()]
         logger.info("Downloading %d countries (since=%s)", len(countries), args.since)
-        failed: list[str] = []
         for cc in countries:
             try:
                 data = download_country_csv(cc)
@@ -426,20 +432,25 @@ def main(argv=None):
             except httpx.HTTPError:
                 logger.warning("  %s: download failed", cc)
                 failed.append(cc)
-        # A half-empty load must not pass as success. A couple of countries
-        # legitimately 404 from time to time; more than that is a real outage.
-        if len(failed) > 3:
-            logger.error(
-                "%d/%d country downloads failed (%s) — refusing to emit a "
-                "partial load", len(failed), len(countries), ",".join(failed))
-            sys.exit(1)
 
     logger.info("Total: %d projects to emit", len(all_records))
 
-    if not all_records:
-        logger.info("No records to emit, exiting")
-        return
+    if all_records:
+        _emit(all_records)
+    else:
+        logger.info("No records to emit")
 
+    # Each project is its own upsert, so emitting the countries that did
+    # load loses nothing. Reporting success without the others does: a
+    # tolerance of "a few failed countries" hid Greece for every run.
+    if failed:
+        logger.error("%d/%d country downloads failed: %s",
+                     len(failed), len(countries), ",".join(failed))
+        sys.exit(1)
+
+
+def _emit(all_records: list[dict]) -> None:
+    """Write the programme/fund nodes and the projects to the event log."""
     log = EventLog.from_env()
     t0 = time.time()
     try:
