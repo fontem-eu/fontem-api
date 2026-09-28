@@ -44,7 +44,7 @@ def test_latest_per_id_keeps_the_last_language_in_seq_order():
 # ── SQL shape ───────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("domain", ["contract", "eu_cohesion"])
+@pytest.mark.parametrize("domain", ["contract", "contract_ojs", "eu_cohesion"])
 def test_the_update_adds_title_lang_and_nothing_else_where_it_is_absent(domain):
     sql = mig.events_sql(domain, dry_run=False)
     assert "jsonb_set(e.payload, '{title_lang}', to_jsonb(m.title_lang))" in sql
@@ -58,6 +58,44 @@ def test_a_kohesio_event_is_english_only_when_its_title_is_kohesios_english_name
 
 def test_a_notice_that_states_no_language_is_never_given_one():
     assert "m.title_lang IS NOT NULL" in mig.events_sql("contract", dry_run=False)
+
+
+def test_the_ojs_pass_rewrites_the_oj_s_reference_to_the_publication_number():
+    sql = mig.events_sql("contract_ojs", dry_run=False)
+    assert "e.payload->>'ted_notice_id' ~ '^\\d{4}/S '" in sql
+    assert "regexp_replace(e.payload->>'ted_notice_id', '^(\\d{4})/S \\d+-(\\d+)$', '\\2-\\1')" in sql
+    assert "m.title_lang IS NOT NULL" in sql
+    assert "jsonb_set(e.payload, '{title_lang}', to_jsonb(m.title_lang))" in sql
+    assert "%" not in sql.replace("%(", "")   # no stray placeholder for psycopg
+
+
+def test_the_ojs_pass_reads_contract_events_and_keeps_its_own_progress(monkeypatch):
+    monkeypatch.setattr(mig.time, "sleep", lambda _s: None)
+    conn = _Conn(max_seq=20, progress={"events:contract": "20"})
+    mig.migrate_events(conn, "contract_ojs", batch=20, pause_s=0, dry_run=False)
+    params = [p for sql, p in conn.executed if sql.startswith("UPDATE")]
+    assert params == [{"domain": "contract", "lo": 0, "hi": 20, "event_type": "UpsertContract"}]
+    assert conn.progress["events:contract_ojs"] == "20"
+
+
+def test_each_stage_defaults_to_its_own_passes(monkeypatch):
+    seen = []
+    monkeypatch.setenv("EVENTS_DATABASE_URL", "postgresql://x")
+    monkeypatch.setattr(mig.psycopg, "connect", lambda _url: _ConnCtx(_Conn()))
+    monkeypatch.setattr(mig, "migrate_events", lambda _c, name, **_k: seen.append(name))
+    mig.main(["events"])
+    assert seen == ["contract", "contract_ojs", "eu_cohesion"]
+
+
+class _ConnCtx:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self.conn
+
+    def __exit__(self, *_):
+        return False
 
 
 def test_the_dry_run_counts_the_same_rows():
@@ -141,7 +179,7 @@ class _Driver:
 
             def run(self, cypher, **params):
                 drv.runs.append((cypher, params))
-                if "RETURN count(d) AS cleared" in cypher:
+                if "AS cleared" in cypher:
                     return SimpleNamespace(single=lambda: {"cleared": drv.cleared.pop(0)})
                 return SimpleNamespace(consume=lambda: None)
         return _S()
@@ -183,9 +221,28 @@ def test_the_graph_takes_each_ids_latest_language_from_the_events():
     conn = _Conn(max_seq=40, graph_rows={0: [("n1", "fr"), ("n1", "en")], 20: [("n2", "de")]})
     drv = _Driver()
     assert mig.migrate_graph(conn, drv, "contract", batch=20, dry_run=False) == 2
-    sent = [p["rows"] for _c, p in drv.runs]
+    sent = [p["rows"] for _c, p in drv.runs if "rows" in p]
     assert sent == [[{"id": "n1", "lang": "en"}], [{"id": "n2", "lang": "de"}]]
     assert conn.progress["graph:contract"] == "40"
+
+
+def test_ojs_keyed_contract_guesses_are_cleared_before_the_events_set_languages():
+    """No loader ever stated a language on a contract keyed by its OJ S
+    reference, so whatever title_lang one carries a translator guessed."""
+    conn = _Conn(max_seq=20, graph_rows={0: [("2021/S 129-344226", "en")]})
+    drv = _Driver()
+    mig.migrate_graph(conn, drv, "contract", batch=20, dry_run=False)
+    kinds = ["clear" if "REMOVE" in c else "set" for c, _p in drv.runs]
+    assert kinds == ["clear", "clear", "set"]
+    assert "c.ted_notice_id =~ '^[0-9]{4}/S .*'" in drv.runs[0][0]
+
+
+def test_a_resumed_graph_stage_does_not_clear_again():
+    conn = _Conn(max_seq=40, progress={"graph:contract": "20"},
+                 graph_rows={20: [("n2", "de")]})
+    drv = _Driver()
+    mig.migrate_graph(conn, drv, "contract", batch=20, dry_run=False)
+    assert not any("REMOVE" in c for c, _p in drv.runs)
 
 
 def test_cohesion_guesses_are_cleared_before_the_events_set_what_the_source_states():
