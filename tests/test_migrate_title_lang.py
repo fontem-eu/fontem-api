@@ -63,7 +63,8 @@ def test_a_notice_that_states_no_language_is_never_given_one():
 def test_the_ojs_pass_rewrites_the_oj_s_reference_to_the_publication_number():
     sql = mig.events_sql("contract_ojs", dry_run=False)
     assert "e.payload->>'ted_notice_id' ~ '^\\d{4}/S '" in sql
-    assert "regexp_replace(e.payload->>'ted_notice_id', '^(\\d{4})/S \\d+-(\\d+)$', '\\2-\\1')" in sql
+    rewrite = r"regexp_replace(e.payload->>'ted_notice_id', '^(\d{4})/S \d+-(\d+)$', '\2-\1')"
+    assert rewrite in sql
     assert "m.title_lang IS NOT NULL" in sql
     assert "jsonb_set(e.payload, '{title_lang}', to_jsonb(m.title_lang))" in sql
     assert "%" not in sql.replace("%(", "")   # no stray placeholder for psycopg
