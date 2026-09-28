@@ -451,3 +451,66 @@ def test_the_disclosure_payload_carries_the_title_language():
     emit_disclosure_events(log, [{"qid": "Q7", "title": "Fund of Funds", "title_lang": "en"}])
     disc = [c for c in emit.upsert.call_args_list if c.args[0] == "UpsertDisclosure"][0]
     assert disc.kwargs["payload"]["title_lang"] == "en"
+
+
+# ── which files exist, and what a missing one does to the run ──────────────
+
+
+def test_greece_is_fetched_under_its_iso_code():
+    """Kohesio keys its files by ISO 3166: GR-pp21-27-latest.csv exists and
+    EL-… does not. Its gateway answers the missing one with a 504, so "EL"
+    read as an outage and Greece was skipped on every run."""
+    from src.etl.load_eu_knowledge_graph import EU_COUNTRIES  # pylint: disable=import-outside-toplevel
+    assert "GR" in EU_COUNTRIES and "EL" not in EU_COUNTRIES
+    assert len(EU_COUNTRIES) == len(set(EU_COUNTRIES)) == 27
+
+
+def test_a_5xx_is_retried_before_the_country_counts_as_failed(monkeypatch):
+    import httpx  # pylint: disable=import-outside-toplevel
+    from src.etl import _http_retry, load_eu_knowledge_graph  # pylint: disable=import-outside-toplevel
+    answers = [httpx.Response(504), httpx.Response(200, content=b"csv")]
+    calls = []
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        resp = answers.pop(0)
+        resp.request = httpx.Request("GET", url)
+        return resp
+
+    monkeypatch.setattr(_http_retry.httpx, "get", fake_get)
+    monkeypatch.setattr(_http_retry.time, "sleep", lambda _s: None)
+    assert load_eu_knowledge_graph.download_country_csv("GR") == b"csv"
+    assert len(calls) == 2 and "GR-pp21-27-latest.csv" in calls[0]
+
+
+def test_a_failed_country_fails_the_run_after_the_rest_are_emitted(monkeypatch):
+    """Projects are independent upserts, so the countries that loaded are
+    still written; the run then exits non-zero, naming the one that did not,
+    instead of passing as a complete load."""
+    import httpx  # pylint: disable=import-outside-toplevel
+    from src.etl import load_eu_knowledge_graph as kg  # pylint: disable=import-outside-toplevel
+    csv_bytes = (_TITLE_HEADER + "https://linkedopendata.eu/entity/Q7,LT,Fund,Fondas\n").encode()
+
+    def fake_download(cc):
+        if cc == "GR":
+            raise httpx.HTTPStatusError("504", request=httpx.Request("GET", "u"),
+                                        response=httpx.Response(504))
+        return csv_bytes
+
+    emitted = []
+    monkeypatch.setattr(kg, "download_country_csv", fake_download)
+    monkeypatch.setattr(kg, "_emit", emitted.extend)
+    with pytest.raises(SystemExit) as exc:
+        kg.main(["--countries", "LT,GR", "--since", ""])
+    assert exc.value.code == 1
+    assert [r["qid"] for r in emitted] == ["Q7"]
+
+
+def test_a_complete_load_exits_cleanly(monkeypatch):
+    from src.etl import load_eu_knowledge_graph as kg  # pylint: disable=import-outside-toplevel
+    csv_bytes = (_TITLE_HEADER + "https://linkedopendata.eu/entity/Q7,LT,Fund,Fondas\n").encode()
+    emitted = []
+    monkeypatch.setattr(kg, "download_country_csv", lambda _cc: csv_bytes)
+    monkeypatch.setattr(kg, "_emit", emitted.extend)
+    kg.main(["--countries", "LT", "--since", ""])
+    assert len(emitted) == 1
