@@ -24,19 +24,24 @@ to re-run:
     Add ``title_lang``, and nothing else, to the ``UpsertContract`` and
     Kohesio ``UpsertDisclosure`` events that lack it, in seq batches over the
     ``(domain, seq)`` index. A Kohesio event gets "en" only when its stored
-    title is Kohesio's English name for that project.
+    title is Kohesio's English name for that project. ``contract_ojs`` is a
+    second pass over the contract events for the legacy notices an older
+    loader keyed by their OJ S reference (``2021/S 129-344226``) rather than
+    the publication number (``344226-2021``) the map holds.
 ``graph``
     Read the events back in seq order and set only ``title_lang`` on
     ``:Notice``, on the ``:Contract`` whose canonical notice it is, and on
     the Kohesio ``:Disclosure``. Where a notice states no language, a
     ``title_lang`` a translator guessed on its contract is removed; every
-    cohesion ``title_lang`` written before step 1 was such a guess.
+    cohesion ``title_lang`` written before step 1 was such a guess, and so is
+    every one on an OJ-S-keyed contract.
 
 Usage::
 
     python -m src.etl.migrate_title_lang map --from 2011-01 --to 2026-08
     python -m src.etl.migrate_title_lang map --raw --cohesion
     python -m src.etl.migrate_title_lang events [--dry-run]
+    python -m src.etl.migrate_title_lang events --domains contract_ojs
     python -m src.etl.migrate_title_lang graph [--dry-run]
 """
 from __future__ import annotations
@@ -47,6 +52,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -101,33 +107,57 @@ ON CONFLICT (disclosure_id) DO UPDATE
    SET title = EXCLUDED.title, title_lang = EXCLUDED.title_lang
 """
 
-#: Which events each domain touches, and the map it joins. The (domain,
-#: seq) index keeps each window to that domain's rows, and
+#: A legacy notice an older loader keyed by its OJ S reference
+#: (``2021/S 129-344226``), and the publication number the map holds for it
+#: (``344226-2021``). The rewrite only goes this way: the issue number (129)
+#: is not in the publication number.
+OJS_ID_SQL = r"'^\d{4}/S '"
+_OJS_TO_PUBNUM_SQL = (r"regexp_replace(e.payload->>'ted_notice_id', "
+                      r"'^(\d{4})/S \d+-(\d+)$', '\2-\1')")
+
+
+@dataclass(frozen=True)
+class EventsPass:
+    """One pass of the events stage: which events, and the map they join."""
+
+    domain: str
+    event_type: str
+    table: str
+    join: str
+
+
+#: Each pass, by the name its progress is kept under. The (domain, seq)
+#: index keeps each window to that domain's rows, and
 #: ``NOT (payload ? 'title_lang')`` makes a re-run, and every event loaded
 #: since step 1, a no-op.
-_EVENTS_JOIN = {
-    "contract": ("migrations.title_lang_map",
-                 "m.notice_id = e.payload->>'ted_notice_id' AND m.title_lang IS NOT NULL",
-                 "UpsertContract"),
+_EVENTS_PASSES = {
+    "contract": EventsPass(
+        "contract", "UpsertContract", "migrations.title_lang_map",
+        "m.notice_id = e.payload->>'ted_notice_id' AND m.title_lang IS NOT NULL"),
+    # A separate pass rather than an OR in the join, which would lose the
+    # hash join on every window of the first.
+    "contract_ojs": EventsPass(
+        "contract", "UpsertContract", "migrations.title_lang_map",
+        f"e.payload->>'ted_notice_id' ~ {OJS_ID_SQL} "
+        f"AND m.notice_id = {_OJS_TO_PUBNUM_SQL} AND m.title_lang IS NOT NULL"),
     # A Kohesio title is stated English only when it is Kohesio's English name.
-    "eu_cohesion": ("migrations.title_lang_cohesion",
-                    "m.disclosure_id = e.payload->>'disclosure_id' "
-                    "AND m.title = e.payload->>'title'",
-                    "UpsertDisclosure"),
+    "eu_cohesion": EventsPass(
+        "eu_cohesion", "UpsertDisclosure", "migrations.title_lang_cohesion",
+        "m.disclosure_id = e.payload->>'disclosure_id' AND m.title = e.payload->>'title'"),
 }
 _EVENTS_FILTER = ("e.domain = %(domain)s AND e.seq > %(lo)s AND e.seq <= %(hi)s "
                   "AND e.event_type = %(event_type)s AND NOT (e.payload ? 'title_lang')")
 
 
-def events_sql(domain: str, *, dry_run: bool) -> str:
-    """The UPDATE for one seq window, or its COUNT for a dry run."""
-    table, join, _ = _EVENTS_JOIN[domain]
+def events_sql(name: str, *, dry_run: bool) -> str:
+    """The UPDATE for one seq window of a pass, or its COUNT for a dry run."""
+    p = _EVENTS_PASSES[name]
     if dry_run:
-        return (f"SELECT count(*) FROM events.entity_events AS e JOIN {table} AS m "
-                f"ON {join} WHERE {_EVENTS_FILTER}")
+        return (f"SELECT count(*) FROM events.entity_events AS e JOIN {p.table} AS m "
+                f"ON {p.join} WHERE {_EVENTS_FILTER}")
     return ("UPDATE events.entity_events AS e "
             "SET payload = jsonb_set(e.payload, '{title_lang}', to_jsonb(m.title_lang)) "
-            f"FROM {table} AS m WHERE {join} AND {_EVENTS_FILTER}")
+            f"FROM {p.table} AS m WHERE {p.join} AND {_EVENTS_FILTER}")
 
 
 _GRAPH_READ = {
@@ -182,6 +212,15 @@ _GRAPH_CLEAR_COHESION = """
     WITH d LIMIT 10000
     REMOVE d.title_lang
     RETURN count(d) AS cleared
+"""
+#: Nor did anything state one on a contract keyed by its OJ S reference: the
+#: loader that keyed them so predates title_lang (15,239 in prod, 2026-09-28).
+_GRAPH_CLEAR_OJS_CONTRACTS = """
+    MATCH (c:Contract)
+    WHERE c.title_lang IS NOT NULL AND c.ted_notice_id =~ '^[0-9]{4}/S .*'
+    WITH c LIMIT 10000
+    REMOVE c.title_lang
+    RETURN count(c) AS cleared
 """
 
 _LEGACY_PUBNUM = re.compile(r"^0*(\d+)-(\d{4})$")
@@ -320,17 +359,17 @@ def _max_seq(conn) -> int:
     return conn.execute("SELECT coalesce(max(seq), 0) FROM events.entity_events").fetchone()[0]
 
 
-def migrate_events(conn, domain: str, *, batch: int, pause_s: float, dry_run: bool) -> int:
-    """Add title_lang to this domain's events, window by window up to the
+def migrate_events(conn, name: str, *, batch: int, pause_s: float, dry_run: bool) -> int:
+    """Add title_lang to this pass's events, window by window up to the
     newest event at the start (everything after it carries the field)."""
-    stage = f"events:{domain}"
+    stage = f"events:{name}"
     lo, end = int(_get_cursor(conn, stage) or 0), _max_seq(conn)
     touched = 0
-    sql, event_type = events_sql(domain, dry_run=dry_run), _EVENTS_JOIN[domain][2]
+    sql, events_pass = events_sql(name, dry_run=dry_run), _EVENTS_PASSES[name]
     while lo < end:
         hi = min(lo + batch, end)
-        cur = conn.execute(sql, {"domain": domain, "lo": lo, "hi": hi,
-                                 "event_type": event_type})
+        cur = conn.execute(sql, {"domain": events_pass.domain, "lo": lo, "hi": hi,
+                                 "event_type": events_pass.event_type})
         touched += cur.fetchone()[0] if dry_run else cur.rowcount
         if not dry_run:
             _set_cursor(conn, stage, str(hi))
@@ -352,8 +391,8 @@ def migrate_graph(conn, driver, domain: str, *, batch: int, dry_run: bool) -> in
     stage = f"graph:{domain}"
     lo, end = int(_get_cursor(conn, stage) or 0), _max_seq(conn)
     written = 0
-    if domain == "eu_cohesion" and not dry_run and lo == 0:
-        _clear_cohesion_guesses(driver)
+    if not dry_run and lo == 0 and domain in _GRAPH_CLEAR_FIRST:
+        _clear_guesses(driver, domain)
     while lo < end:
         hi = min(lo + batch, end)
         rows = latest_per_id(conn.execute(_GRAPH_READ[domain], {"lo": lo, "hi": hi}))
@@ -369,15 +408,23 @@ def migrate_graph(conn, driver, domain: str, *, batch: int, dry_run: bool) -> in
     return written
 
 
-def _clear_cohesion_guesses(driver) -> int:
+#: Guesses removed before a domain's first graph window, so that the stated
+#: languages its events then set are all that remain.
+_GRAPH_CLEAR_FIRST = {
+    "contract": _GRAPH_CLEAR_OJS_CONTRACTS,
+    "eu_cohesion": _GRAPH_CLEAR_COHESION,
+}
+
+
+def _clear_guesses(driver, domain: str) -> int:
     cleared = 0
     with driver.session() as session:
         while True:
-            n = session.run(_GRAPH_CLEAR_COHESION).single()["cleared"]
+            n = session.run(_GRAPH_CLEAR_FIRST[domain]).single()["cleared"]
             cleared += n
             if n == 0:
                 break
-    logger.info("graph:eu_cohesion: cleared %d guessed title_lang", cleared)
+    logger.info("graph:%s: cleared %d guessed title_lang", domain, cleared)
     return cleared
 
 
@@ -422,7 +469,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw", action="store_true", help="map: the ted-raw notice XMLs")
     parser.add_argument("--cohesion", action="store_true", help="map: Kohesio's CSVs")
     parser.add_argument("--countries", default=",".join(EU_COUNTRIES))
-    parser.add_argument("--domains", default="contract,eu_cohesion")
+    parser.add_argument(
+        "--domains", default=None,
+        help="events: passes to run (default contract,contract_ojs,eu_cohesion); "
+             "graph: domains (default contract,eu_cohesion)")
     parser.add_argument("--batch", type=int, default=20000,
                         help="events/graph: seq window per statement")
     parser.add_argument("--pause", type=float, default=0.2,
@@ -446,7 +496,8 @@ def main(argv=None) -> int:
             if args.cohesion:
                 map_cohesion(conn, args.countries.split(","))
             return 0
-        domains = [d for d in args.domains.split(",") if d]
+        default = ",".join(_EVENTS_PASSES if args.stage == "events" else _GRAPH_READ)
+        domains = [d for d in (args.domains or default).split(",") if d]
         if args.stage == "events":
             for domain in domains:
                 migrate_events(conn, domain, batch=args.batch, pause_s=args.pause,
