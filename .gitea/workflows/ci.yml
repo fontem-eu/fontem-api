@@ -318,10 +318,10 @@ jobs:
   build-deploy:
     needs: [test, security]
     if: github.ref == 'refs/heads/main'
-    # ci-python runner bundles python3 + pip + node + docker CLI. ubuntu-latest
-    # resolves to ci-node which has no pip, so `sbom-generate language: python`
-    # died with `pip: command not found` on every main build. Cosign still
-    # has to be installed below — neither image ships it.
+    # ci-python runner: python3 + pip + node + docker CLI. It was chosen for
+    # the python language SBOM (sbom-generate needed pip), which is gone:
+    # docker-build-sign catalogs the image's own venv. Cosign still has to
+    # be installed below — neither image ships it.
     runs-on: python
     steps:
       - uses: actions/checkout@v7
@@ -330,14 +330,6 @@ jobs:
           repository: void42/ci-actions
           path: .ci-actions
           token: ${{ secrets.CI_READ_TOKEN }}
-
-      - id: sbom
-        name: Generate + upload SBOM
-        uses: ./.ci-actions/actions/sbom-generate
-        with:
-          language: python
-          project-name: edgar-gmr-etl
-          project-version: ${{ github.sha }}
 
       - name: Vendor internal Python deps for docker build
         # The Dockerfile pip-installs from vendor/gmr-event-schemas
@@ -364,7 +356,9 @@ jobs:
           cosign-key: ${{ secrets.COSIGN_KEY }}
           registry-user: ${{ secrets.REGISTRY_USER }}
           registry-password: ${{ secrets.REGISTRY_PASSWORD }}
-          sbom-path: ${{ steps.sbom.outputs.sbom-path }}
+          # No shell, package manager or pip in the runtime image: fail the
+          # build if one comes back (e.g. with a new base).
+          minimal-enforce: "true"
 
       # Inline gitops-bump. The shared action in void42/ci-actions
       # was rewritten for the void42-templates layout
