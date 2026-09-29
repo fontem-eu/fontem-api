@@ -172,3 +172,13 @@ def test_the_endpoint_is_annotated_as_an_agent_tool():
     tool = op.get("x-agent-tool")
     assert tool and tool["name"] == "get_schema"
     assert tool["core"] is True
+
+
+def test_the_data_quality_indexes_are_ensured():
+    """Every assertion that seeks on a value, quarantine, bidder-count,
+    fund or match property has its index declared and created at start."""
+    from src.api import graph_schema  # pylint: disable=import-outside-toplevel
+    names = [n for n, _ in graph_schema.DQ_INDEXES]
+    assert len(names) == len(set(names))
+    for name, target in graph_schema.DQ_INDEXES:
+        assert f"CREATE INDEX {name} IF NOT EXISTS FOR {target}" in graph_schema._STATEMENTS  # pylint: disable=protected-access
