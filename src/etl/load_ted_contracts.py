@@ -1506,6 +1506,10 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
                             rec.get("procedure-identifier"),
                             rec.get("publication-number"),
                         ),
+                        # TED's own publication date: a graph copy dated
+                        # otherwise (the pre-0.14.1 FieldsPrivacy date, or
+                        # an older version) is re-fetched.
+                        publication_date=_as_day(rec.get("publication-date")),
                     ):
                         d_skip += 1
                         continue

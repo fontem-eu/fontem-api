@@ -39,6 +39,10 @@ _FIELDS = [
     "notice-identifier", "publication-number", "publication-date",
     "notice-type", "procedure-identifier",
     "modification-previous-notice-identifier", "links",
+    # The daily loader's pre-download skip compares versions; without the
+    # field every record read as version None, so a republished notice
+    # (v02 under a new publication number) was skipped as already loaded.
+    "notice-version",
 ]
 
 _PAGE_SIZE = 100

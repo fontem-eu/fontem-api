@@ -1736,8 +1736,8 @@ def test_search_path_is_discovery_only(mock_matcher_cls, mock_search,
     )
     seen = []
 
-    def _gate(_session, nid, version, identity, **_kw):
-        seen.append((nid, version, identity))
+    def _gate(_session, nid, version, identity, **kw):
+        seen.append((nid, version, identity, kw.get("publication_date")))
         return nid != "skip-me"
     monkeypatch.setattr("src.etl.load_ted_contracts._should_ingest", _gate)
 
@@ -1749,7 +1749,10 @@ def test_search_path_is_discovery_only(mock_matcher_cls, mock_search,
 
     assert totals["emitted"] == 1 and totals["skipped"] == 1
     assert mock_search.fetch_xml.call_count == 1  # skipped before download
-    assert seen[0] == ("912f1717-1ace-413d-aa61-cd21cd6b95e7", 1, "procedure_id")
+    # the record's version AND its publication day reach the gate, so a
+    # republished v02 or a notice dated otherwise in the graph is fetched
+    assert seen[0] == ("912f1717-1ace-413d-aa61-cd21cd6b95e7", 1, "procedure_id",
+                       "2026-01-01")
     payload = _contract_payload(emit)
     assert payload["contract_key"] == "XML-PROC"
     assert payload["ted_publication_number"] == "295342-2026"
@@ -1878,3 +1881,10 @@ def test_a_run_where_every_notice_failed_exits_non_zero(outcomes, fails):
             check(outcomes)
     else:
         check(outcomes)
+
+
+def test_the_search_asks_for_the_notice_version():
+    """Without the field every record read as version None and the daily
+    loader skipped republished notices as already loaded (2026-09)."""
+    from src.etl import ted_search  # pylint: disable=import-outside-toplevel
+    assert "notice-version" in ted_search._FIELDS  # pylint: disable=protected-access
