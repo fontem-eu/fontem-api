@@ -345,6 +345,7 @@ def test_select_families():
 
 
 def test_cypher_runner_shapes_row():
+    seen = []
     class _Rec(dict):
         pass
     class _Result:
@@ -355,13 +356,16 @@ def test_cypher_runner_shapes_row():
             return self
         def __exit__(self, *a):
             return False
-        def run(self, _q):
+        def run(self, q):
+            seen.append(q)
             return _Result()
     class _Client:
         def session(self):
             return _Session()
     run = cli._build_cypher_runner(_Client())
     assert run("RETURN 1") == {"violations": 2}
+    # Each check carries its own budget, past the server's 90 s default.
+    assert seen[0].text == "RETURN 1" and seen[0].timeout == cli.CYPHER_TIMEOUT_S > 90
 
 
 def test_cypher_runner_empty_on_no_record():
