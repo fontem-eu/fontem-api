@@ -700,7 +700,10 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "values.confidence_formula", VALUES,
         "value_confidence = consistency × plausibility", BLOCK, "cypher",
-        "MATCH (c:Contract) WHERE c.value_confidence IS NOT NULL "
+        # Driven by contract_value_confidence (every confidence is >= 0):
+        # 22 s instead of a 62 s label scan that timed out under load.
+        "MATCH (c:Contract) USING INDEX c:Contract(value_confidence) "
+        "WHERE c.value_confidence >= 0 "
         "AND c.value_confidence_consistency IS NOT NULL "
         "AND c.value_confidence_plausibility IS NOT NULL "
         "AND abs(c.value_confidence - "
@@ -1126,12 +1129,16 @@ ASSERTIONS: list[Assertion] = [
         "values.hard_flags_are_quarantined", VALUES,
         "Hard-flagged values are actually quarantined", BLOCK,
         "cypher",
-        "MATCH (ct:Contract) WHERE ct.value_eur IS NOT NULL "
+        # Seek the ~26k flagged contracts on contract_value_quality_flag
+        # instead of scanning 4.87M: 0.2 s, where the planner left alone
+        # scanned contract_value_eur for 70 s and timed out under load.
+        "MATCH (ct:Contract) USING INDEX ct:Contract(value_quality_flag) "
+        "WHERE ct.value_quality_flag IN ['concession_negative',"
+        "'unverified_single_signal','zero_value','implausible_magnitude'] "
+        "AND ct.value_eur IS NOT NULL "
         "AND coalesce(ct.value_quarantined, false) = false "
-        "AND (ct.value_quality_flag IN "
-        "['concession_negative','unverified_single_signal','zero_value'] "
-        "OR (ct.value_quality_flag = 'implausible_magnitude' "
-        "AND ct.value_confidence < 0.05)) "
+        "AND (ct.value_quality_flag <> 'implausible_magnitude' "
+        "OR ct.value_confidence < 0.05) "
         "RETURN count(ct) AS violations",
         zero_violations(),
         "A quarantine-tier value (categorical flags, or implausible "

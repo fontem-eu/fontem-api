@@ -971,3 +971,12 @@ def test_present_counts_read_the_count_store_not_the_label():
         assert "count(*) - count(" not in q, aid
     q = by_id()["refs.sameas_confidence_range"].query
     assert "[r:SAME_AS]" in q and "[r:SAME_AS_CANDIDATE]" in q and "|" not in q
+
+
+def test_hard_flag_and_confidence_checks_seek_their_indexes():
+    """Both timed out (90 s) as label scans under load; hinted onto the
+    DQ indexes they take 0.2 s and 22 s on prod."""
+    assert "USING INDEX ct:Contract(value_quality_flag)" in by_id()[
+        "values.hard_flags_are_quarantined"].query
+    assert "USING INDEX c:Contract(value_confidence)" in by_id()[
+        "values.confidence_formula"].query
