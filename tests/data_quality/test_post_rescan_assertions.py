@@ -132,3 +132,26 @@ def test_notice_home_assertion_counts_notices_not_edges():
     assert a.evaluate({"violations": 0})[0]
     ok, obs = a.evaluate({"violations": 2673})
     assert not ok and "2673" in obs
+
+
+def test_notice_home_assertion_skips_only_the_verified_exceptions():
+    """48 notices hang off two contracts because the buyer's own notice
+    contradicts itself; they are listed with a reason and excluded. Any
+    other notice with two homes still fails."""
+    from src.data_quality.assertions import known_exceptions as ke  # pylint: disable=import-outside-toplevel
+    a = by_id()["grain.notice_belongs_to_one_contract"]
+    assert len(ke.NOTICE_ON_TWO_CONTRACTS) == 48
+    assert set(ke.NOTICE_ON_TWO_CONTRACTS.values()) == {
+        ke.SAME_BUYER_TWO_IDS, ke.CROSS_PROCEDURE_BACK_LINK}
+    assert "AND NOT x.ted_notice_id IN [" in a.query
+    for nid in ke.NOTICE_ON_TWO_CONTRACTS:
+        assert f"'{nid}'" in a.query
+    assert not a.evaluate({"violations": 1})[0]
+
+
+def test_known_exception_ids_are_refused_unless_they_look_like_ids():
+    from src.data_quality.assertions.known_exceptions import cypher_list  # pylint: disable=import-outside-toplevel
+    assert cypher_list(["b", "a-1"]) == "['a-1', 'b']"
+    assert cypher_list(["2022/S 081-217109"]) == "['2022/S 081-217109']"
+    with pytest.raises(ValueError):
+        cypher_list(["x' OR 1=1 //"])

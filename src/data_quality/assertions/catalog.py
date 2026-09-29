@@ -23,6 +23,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from src.data_quality.assertions.known_exceptions import (
+    NOTICE_ON_TWO_CONTRACTS, cypher_list,
+)
+
 BLOCK = "block"
 WARN = "warn"
 
@@ -554,6 +558,11 @@ ASSERTIONS: list[Assertion] = [
         # data, so exempt them. coalesce keeps a null-flag contract that is
         # genuinely missing its winner as a violation.
         "AND coalesce(c.value_quality_flag, '') <> 'no_awarded_value' "
+        # The cleaning stage withholds a "winner" whose name is not a name
+        # (notice text, a URL, "see the annex"): the contract keeps its value
+        # and names no awardee, by design. All 726 prod violations on
+        # 2026-09-29 were exactly that.
+        "AND coalesce(c.suppliers_withheld_count, 0) = 0 "
         "RETURN count(*) AS violations",
         zero_violations("awarded contracts not awarded to a company or fund"),
         "The awardee may be relabeled :InvestmentFund once GLEIF confirms "
@@ -561,7 +570,9 @@ ASSERTIONS: list[Assertion] = [
         "both labels are valid targets. Guarding only :Company made the "
         "gate fail the moment a fund awardee was relabeled (#270). "
         "no_awarded_value contracts (no published winner) are exempt: they "
-        "carry no awardee by design and are out of every value aggregate.",
+        "carry no awardee by design and are out of every value aggregate. "
+        "So are contracts whose every winner the cleaning stage withheld "
+        "(suppliers_withheld_count > 0): the name was not a name.",
     ),
     Assertion(
         "refs.financialyear_has_company", REFS,
@@ -1170,7 +1181,9 @@ ASSERTIONS: list[Assertion] = [
         "grain.notice_belongs_to_one_contract", GRAIN,
         "Every :Notice hangs off exactly one :Contract", BLOCK, "cypher",
         "MATCH (x:Notice)-[r:NOTICE_OF]->() WITH x, count(r) AS k "
-        "WHERE k > 1 RETURN count(*) AS violations",
+        "WHERE k > 1 "
+        f"AND NOT x.ted_notice_id IN {cypher_list(NOTICE_ON_TWO_CONTRACTS)} "
+        "RETURN count(*) AS violations",
         zero_violations("notices attached to more than one contract"),
         "A notice describes one contract, so NOTICE_OF is its one home. "
         "2,673 notices carry two edges on 2026-09-24, and every one of "
@@ -1182,7 +1195,9 @@ ASSERTIONS: list[Assertion] = [
         "contracts). Nothing removes the edge it left behind. The rollup "
         "then lets BOTH entities claim that notice as canonical, which "
         "is where duplicate contracts come from: 123 pairs today, with "
-        "the remaining 2,550 able to surface as their chains grow.",
+        "the remaining 2,550 able to surface as their chains grow. The "
+        "notices in known_exceptions.NOTICE_ON_TWO_CONTRACTS are verified "
+        "source contradictions and are not counted.",
     ),
     Assertion(
         "values.company_name_is_not_a_placeholder_family", VALUES,

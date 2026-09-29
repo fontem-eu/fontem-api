@@ -949,3 +949,12 @@ def test_contract_cleaning_rules_present_is_a_warn_coverage_bar():
     ok, obs = a.evaluate({"total": 100, "covered": 50})
     assert not ok and "50/100" in obs
     assert a.evaluate({"total": 0, "covered": 0})[0]
+
+
+def test_contract_awardee_assertion_exempts_withheld_winners():
+    """The cleaning stage withholds a winner whose name is not a name
+    (notice text, a URL, "see the annex"); the contract keeps its value and
+    names no awardee by design. All 726 prod violations on 2026-09-29 were
+    that."""
+    a = by_id()["refs.contract_has_company"]
+    assert "coalesce(c.suppliers_withheld_count, 0) = 0" in a.query
