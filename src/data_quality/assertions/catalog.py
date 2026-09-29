@@ -303,7 +303,11 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "keys.company_gmr_id_present", KEYS,
         "Every Company has a gmr_id", BLOCK, "cypher",
-        "MATCH (c:Company) RETURN count(*) AS total, count(*) - count(c.gmr_id) AS violations",
+        # The label count comes from the count store and the present count
+        # from company_gmr_id: 6 s on prod instead of a 90 s timeout.
+        "CALL () { MATCH (c:Company) RETURN count(c) AS total } "
+        "CALL () { MATCH (c:Company) WHERE c.gmr_id IS NOT NULL RETURN count(c) AS have } "
+        "RETURN total, total - have AS violations",
         zero_violations("companies missing gmr_id", "total"),
         "gmr_id is the canonical join key; a null one orphans the node.",
     ),
@@ -340,8 +344,10 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "grain.no_contract_is_a_modification", GRAIN,
         "No :Contract node is a modification notice", BLOCK, "cypher",
-        "MATCH (c:Contract) RETURN count(*) AS total, "
-        "count(CASE WHEN c.notice_type = 'can-modif' THEN 1 END) AS violations",
+        # Count store + contract_notice_type seek: 0.0 s instead of 44 s.
+        "CALL () { MATCH (c:Contract) RETURN count(c) AS total } "
+        "CALL () { MATCH (c:Contract) WHERE c.notice_type = 'can-modif' "
+        "RETURN count(c) AS violations } RETURN total, violations",
         zero_violations("modification notices mislabelled :Contract", "total"),
         "A :Contract must be a real contract entity, not a can-modif notice. "
         "Non-zero => the projection regressed and totals double-count.",
@@ -349,8 +355,10 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "grain.contract_has_key", GRAIN,
         "Every :Contract has a contract_key", BLOCK, "cypher",
-        "MATCH (c:Contract) RETURN count(*) AS total, "
-        "count(*) - count(c.contract_key) AS violations",
+        # Count store + the contract_key constraint's index: 3 s, not 35 s.
+        "CALL () { MATCH (c:Contract) RETURN count(c) AS total } "
+        "CALL () { MATCH (c:Contract) WHERE c.contract_key IS NOT NULL "
+        "RETURN count(c) AS have } RETURN total, total - have AS violations",
         zero_violations("contracts missing contract_key", "total"),
         "contract_key is the entity identity the notices group under; a null "
         "one means an unprojected notice leaked into the :Contract label.",
@@ -376,8 +384,10 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "keys.contract_id_present", KEYS,
         "Every Contract has a ted_notice_id", BLOCK, "cypher",
-        "MATCH (c:Contract) "
-        "RETURN count(*) AS total, count(*) - count(c.ted_notice_id) AS violations",
+        # Count store + contract_ted_notice_id: 8 s instead of 44 s.
+        "CALL () { MATCH (c:Contract) RETURN count(c) AS total } "
+        "CALL () { MATCH (c:Contract) WHERE c.ted_notice_id IS NOT NULL "
+        "RETURN count(c) AS have } RETURN total, total - have AS violations",
         zero_violations("contracts missing ted_notice_id", "total"),
         "ted_notice_id is the merge key; a contract without one can never be updated and "
         "duplicates on re-ingest.",
@@ -604,8 +614,12 @@ ASSERTIONS: list[Assertion] = [
     Assertion(
         "refs.sameas_confidence_range", REFS,
         "SAME_AS.confidence is within [0,1]", BLOCK, "cypher",
-        "MATCH ()-[r:SAME_AS|SAME_AS_CANDIDATE]->() WHERE r.confidence IS NOT NULL "
-        "AND (r.confidence < 0 OR r.confidence > 1) RETURN count(*) AS violations",
+        # One range index per relationship type (an index cannot span two),
+        # so the two halves seek separately.
+        "CALL () { MATCH ()-[r:SAME_AS]->() WHERE r.confidence < 0 OR r.confidence > 1 "
+        "RETURN count(r) AS a } "
+        "CALL () { MATCH ()-[r:SAME_AS_CANDIDATE]->() WHERE r.confidence < 0 "
+        "OR r.confidence > 1 RETURN count(r) AS b } RETURN a + b AS violations",
         zero_violations("out-of-range SAME_AS confidences"),
         "Consolidator confidences are probabilities; out-of-range values mean a broken rule, not "
         "a strong match. Both relationship types carry the confidence: proposals are where a "

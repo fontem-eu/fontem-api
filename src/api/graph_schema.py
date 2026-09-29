@@ -64,6 +64,29 @@ LOBBYIST_DISCLOSURE_ID = "lobbyist_disclosure_id"
 #: them the label scan this index removes.
 AUTHORITY_ID = "authority_authority_id"
 
+#: Indexes the data-quality assertions seek on (2026-09-29).
+#:
+#: The assertion monitor ran every check as a scan of the whole label:
+#: 4.87M :Contract, 5M :Company and every AWARDED_TO / SAME_AS edge, one
+#: 40-90 s scan per assertion, until the run no longer fit its 20-minute
+#: deadline and stopped persisting results at all (from 2026-09-26). These
+#: give the value, quarantine, bidder-count, fund and match checks a range
+#: to seek; the checks that count "all minus present" read the count store
+#: and an existing index instead (see the catalog).
+DQ_INDEXES = (
+    ("contract_value_eur", "(c:Contract) ON (c.value_eur)"),
+    ("contract_value_quality_flag", "(c:Contract) ON (c.value_quality_flag)"),
+    ("contract_value_confidence", "(c:Contract) ON (c.value_confidence)"),
+    ("contract_value_quarantined", "(c:Contract) ON (c.value_quarantined)"),
+    ("contract_tenders_received", "(c:Contract) ON (c.tenders_received)"),
+    ("notice_value_quarantined", "(n:Notice) ON (n.value_quarantined)"),
+    ("company_entity_kind", "(c:Company) ON (c.entity_kind)"),
+    ("awarded_to_match_tier", "()-[r:AWARDED_TO]-() ON (r.match_tier)"),
+    ("awarded_to_match_confidence", "()-[r:AWARDED_TO]-() ON (r.match_confidence)"),
+    ("same_as_confidence", "()-[r:SAME_AS]-() ON (r.confidence)"),
+    ("same_as_candidate_confidence", "()-[r:SAME_AS_CANDIDATE]-() ON (r.confidence)"),
+)
+
 _STATEMENTS = (
     f"CREATE FULLTEXT INDEX {COMPANY_NAME_FULLTEXT} IF NOT EXISTS "
     "FOR (c:Company) ON EACH [c.name]",
@@ -75,6 +98,7 @@ _STATEMENTS = (
     "FOR (l:Lobbyist) ON (l.disclosure_id)",
     f"CREATE INDEX {AUTHORITY_ID} IF NOT EXISTS "
     "FOR (a:Authority) ON (a.authority_id)",
+    *(f"CREATE INDEX {name} IF NOT EXISTS FOR {target}" for name, target in DQ_INDEXES),
 )
 
 

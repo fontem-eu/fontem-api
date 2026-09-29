@@ -958,3 +958,16 @@ def test_contract_awardee_assertion_exempts_withheld_winners():
     that."""
     a = by_id()["refs.contract_has_company"]
     assert "coalesce(c.suppliers_withheld_count, 0) = 0" in a.query
+
+
+def test_present_counts_read_the_count_store_not_the_label():
+    """"All minus present" used to scan every node (44-90 s on prod); the
+    label count comes from the count store and the present count from an
+    index."""
+    for aid in ("keys.contract_id_present", "grain.contract_has_key",
+                "keys.company_gmr_id_present", "grain.no_contract_is_a_modification"):
+        q = by_id()[aid].query
+        assert q.startswith("CALL () { MATCH (c:") and "RETURN count(c) AS total }" in q, aid
+        assert "count(*) - count(" not in q, aid
+    q = by_id()["refs.sameas_confidence_range"].query
+    assert "[r:SAME_AS]" in q and "[r:SAME_AS_CANDIDATE]" in q and "|" not in q
