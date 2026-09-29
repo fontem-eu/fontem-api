@@ -1,12 +1,12 @@
 """Resolve a request IP → country alpha-3 code.
 
-Backed by an optional MaxMind/DB-IP `.mmdb` file at runtime. The
-file isn't bundled in the image — instead an init-container in the
-deployment downloads the free DB-IP Country Lite database (CC BY
-4.0) into an `emptyDir` shared with the main container. If the
-file isn't present (init container failed, or it's a local dev
-run), `lookup` returns `None` and callers fall back to a country
-picker.
+Backed by the free DB-IP Country Lite database (CC BY 4.0), vendored in
+the repository (vendor/geoip/, refreshed by hand from DB-IP's monthly
+release) and copied into the image. It used to be downloaded at every
+pod start by an init container; a file fetched at runtime is data no
+SBOM or signature covers, and the image carries it anyway. If the file
+isn't present (a local dev run), `lookup` returns `None` and callers
+fall back to a country picker.
 """
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ from src.services.location_service import LocationService
 
 logger = logging.getLogger(__name__)
 
-# Default path the init container writes to. Overridable for tests.
+# Where the Dockerfile puts the vendored database. Overridable for tests.
 DEFAULT_DB_PATH = os.environ.get(
-    "GEOIP_COUNTRY_DB_PATH", "/app/geoip/dbip-country-lite.mmdb",
+    "GEOIP_COUNTRY_DB_PATH", "/app/vendor/geoip/dbip-country-lite.mmdb",
 )
 
 
