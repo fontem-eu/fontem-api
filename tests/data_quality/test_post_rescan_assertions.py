@@ -140,7 +140,7 @@ def test_notice_home_assertion_skips_only_the_verified_exceptions():
     other notice with two homes still fails."""
     from src.data_quality.assertions import known_exceptions as ke  # pylint: disable=import-outside-toplevel
     a = by_id()["grain.notice_belongs_to_one_contract"]
-    assert len(ke.NOTICE_ON_TWO_CONTRACTS) == 48
+    assert len(ke.NOTICE_ON_TWO_CONTRACTS) == 40
     assert set(ke.NOTICE_ON_TWO_CONTRACTS.values()) == {
         ke.SAME_BUYER_TWO_IDS, ke.CROSS_PROCEDURE_BACK_LINK}
     assert "AND NOT x.ted_notice_id IN [" in a.query
