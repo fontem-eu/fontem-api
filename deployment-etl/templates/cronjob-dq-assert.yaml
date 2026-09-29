@@ -1,3 +1,11 @@
+{{- /*
+dq-assert-monitor persists its results only when the whole catalog has
+run. At 1200 s it stopped persisting from 2026-09-26: 98 cypher checks
+took 36.5 min, 31 of them full-label scans over 30 s. The indexes and
+rewrites in graph_schema.DQ_INDEXES / the catalog take most of that out;
+the deadline keeps an hour of headroom so a slow night records a slow
+run instead of none.
+*/ -}}
 {{- $extra := list }}
 {{- if .Values.virtuoso.enabled }}
 {{- $extra = append $extra (dict "name" "VIRTUOSO_SPARQL_URL" "value" .Values.virtuoso.sparqlEndpoint) }}
@@ -7,7 +15,7 @@
       "schedule"        "15 */4 * * *"
       "module"          "src.data_quality.assertions.__main__"
       "args"            (list "--persist" "--exit-zero")
-      "deadlineSeconds" 1200
+      "deadlineSeconds" 3600
       "cpuRequest"      "100m"
       "cpuLimit"        "500m"
       "memRequest"      "256Mi"
