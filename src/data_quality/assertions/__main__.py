@@ -23,6 +23,8 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
+from neo4j import Query
+
 from src.atlas_api.config import load as load_settings
 from src.data.graph.neo4j_client import Neo4jClient
 from src.data_quality.assertions.catalog import ASSERTIONS
@@ -45,10 +47,18 @@ def _normalise_dsn(dsn: str | None) -> str | None:
     return dsn
 
 
+# The server's db.transaction.timeout (90 s on prod) is sized for the API's
+# interactive queries. A check over every contract reads a few million nodes:
+# 20-40 s on a warm page cache, past 90 s on a cold one, and the stub count
+# scans the whole graph (~8 min, 2026-09-29). The monitor is a batch job with
+# its own deadline, so each check gets a budget of its own.
+CYPHER_TIMEOUT_S = 900.0
+
+
 def _build_cypher_runner(client: Neo4jClient):
     def _run(query: str) -> Mapping[str, Any]:
         with client.session() as session:
-            rec = session.run(query).single()
+            rec = session.run(Query(query, timeout=CYPHER_TIMEOUT_S)).single()
             return dict(rec) if rec else {}
     return _run
 
