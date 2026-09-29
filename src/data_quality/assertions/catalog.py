@@ -1702,11 +1702,10 @@ ASSERTIONS: list[Assertion] = [
         "index actually done' signal during and after backfills.",
     ),
     # ── Linguistics enrichment (translations + embeddings) ────────────
-    # Verified live 2026-07-18 (prod): 165,397 :Authority, ZERO with a
-    # name_embedding and ZERO with name_<lang> translations — the
-    # consolidator rule translation_enrichment_authority has never run.
-    # These are WARN, not BLOCK: they would stay red for weeks and are
-    # the metric that drives the enrichment fix, not a deploy gate.
+    # The name embedding is the consolidator's (authority_name_embedding,
+    # a matching feature); name translations are fontem-translator's,
+    # published as TranslateAuthorityName and written by the neo4j-sink.
+    # These are WARN, not BLOCK: coverage metrics, not deploy gates.
     Assertion(
         "linguistics.authority_embedding_coverage", LINGUISTICS,
         "Authorities carry a 768-d name_embedding", WARN, "cypher",
@@ -1717,10 +1716,9 @@ ASSERTIONS: list[Assertion] = [
         "The consolidator's embedding_cosine_authority dedup rule only "
         "considers authorities whose name_embedding is 768-d (LaBSE) "
         "AND whose encoder is on its allowlist — a vector of any other "
-        "shape is dead weight. Coverage is currently 0 of 165,397: the "
-        "translation_enrichment_authority rule has never run. WARN "
-        "severity on purpose — this is the progress metric for turning "
-        "the enrichment pipeline on, not a gate.",
+        "shape is dead weight. The consolidator's authority_name_embedding "
+        "rule writes it. WARN severity on purpose — a coverage metric, "
+        "not a gate.",
     ),
     Assertion(
         "linguistics.authority_translation_coverage", LINGUISTICS,
@@ -1729,13 +1727,12 @@ ASSERTIONS: list[Assertion] = [
         "count(CASE WHEN size([p IN " + _NAME_LANG_LIST_CYPHER + " "
         "WHERE p IS NOT NULL]) >= 20 THEN 1 END) AS covered",
         min_coverage(0.90, "authorities with >=20 EU-language names"),
-        "translation_enrichment_authority fills name_<lang> for the 24 "
-        "EU official languages (list mirrored from fontem-consolidator's "
-        "EU_OFFICIAL_LANGS). The source language is never translated to "
-        "itself, so 23 is the natural-full count; >=20 tolerates a few "
-        "per-language failures without hiding a broken pipeline. "
-        "Currently 0 of 165,397 — the rule has never run; WARN drives "
-        "the fix rather than gating deploys.",
+        "fontem-translator translates authority names as they appear in "
+        "the event log and publishes TranslateAuthorityName; the neo4j-sink "
+        "writes name_<lang> for the 24 EU official languages. The source "
+        "language is never translated to itself, so 23 is the natural-full "
+        "count; >=20 tolerates a few per-language failures without hiding a "
+        "broken pipeline. WARN drives coverage rather than gating deploys.",
     ),
     Assertion(
         "linguistics.search_embedding_company_floor", LINGUISTICS,
