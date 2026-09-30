@@ -32,7 +32,7 @@ RUN core="$(python -c 'import importlib.util as u; print(u.find_spec("edgar").su
 RUN pip uninstall -y pip
 
 # ── runtime: distroless; app runs from /app via `python -m src.api.run` ───────
-FROM cgr.void42.internal/chainguard/python:latest@sha256:a1775c7276078865461ee5714954284f12809f333433d856d720b249c65c11b2
+FROM cgr.void42.internal/chainguard/python:latest@sha256:38ba1cbf71702bacc5f5be22ea41e3d4ad1bfb2565413b0caf4bafde38e831f2
 WORKDIR /app
 COPY --from=build /venv /venv
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
