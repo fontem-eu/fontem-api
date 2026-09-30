@@ -56,7 +56,7 @@ eventsStore:
 # routers/search.py queries. Same postgres image the events bootstrap uses,
 # so psql and the server are the same build.
 searchMigrate:
-  image: contribute.void42.internal/fontem/postgres-fontem:16.13-pgv0.8.1
+  image: contribute.void42.internal/fontem/postgres-fontem:16.15-pgv0.8.1-r1
 
 # Consolidator the admin review proxy forwards to. Empty means
 # namespace-relative (`http://fontem-consolidator:8000`), which is
