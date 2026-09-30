@@ -51,6 +51,12 @@ tedRaw:
   accessKeyKey: MINIO_ROOT_USER
   secretKeyKey: MINIO_ROOT_PASSWORD
 
+# Base URL of the fontem-currency service the TED loader (cronjob and
+# backfill Jobs) converts contract values with. Empty → the loader's
+# default, the currency-service namespace (prod's instance); fontem-shared
+# points at its own.
+currencyServiceUrl: ""
+
 # Per-cronjob tuning. Today only the OpenFIGI loader exposes a runtime
 # knob (its --limit caps how many IDs each scheduled run consumes).
 # Default empty → loader uses its own internal default (10000/mode).

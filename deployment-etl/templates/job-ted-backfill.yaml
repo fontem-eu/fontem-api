@@ -106,6 +106,10 @@ spec:
                   key: {{ .secretKeyKey }}
             {{- end }}
             {{- end }}
+            {{- with $.Values.currencyServiceUrl }}
+            - name: CURRENCY_SERVICE_URL
+              value: {{ . | quote }}
+            {{- end }}
             - name: NEO4J_URI
               valueFrom:
                 secretKeyRef:
