@@ -17,6 +17,9 @@ literal token `$(date +%Y)` and aborted every run with
 {{- $extra = append $extra (dict "name" "TED_RAW_SECRET_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .credentialsSecret "key" .secretKeyKey))) }}
 {{- end }}
 {{- end }}
+{{- with .Values.currencyServiceUrl }}
+{{- $extra = append $extra (dict "name" "CURRENCY_SERVICE_URL" "value" .) }}
+{{- end }}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-ted-contracts"
       "schedule"        "0 5 * * *"
