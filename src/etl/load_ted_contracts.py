@@ -1356,18 +1356,15 @@ def _emit_notice(  # pylint: disable=too-many-locals,too-many-arguments,too-many
         country=buyer_country,
         # Tender-integrity fields (eForms) — inputs to the SMSB
         # single-bidder / non-open indicators + the CRI red flags.
-        # tenders_received stays the notice's published bidder COUNT;
-        # parties[] (the named subset) must never redefine it. A COUNT is
-        # >= 1 by definition; a 0/negative is corrupt parsing (some
-        # non-eForms notices carry it), so withhold it rather than emit a
-        # bidder count the graph must then reject
-        # (values.contract_bidder_count_positive).
+        # tenders_received is the lot's bidder COUNT as the cleaning
+        # stage reads it: the published one, or — when that is 999 or
+        # impossible (money typed into the field) — the lot's next usable
+        # total, else withheld; tenders_received_raw keeps what was
+        # published. parties[] (the named subset) never redefines it, and
+        # a 0/negative never reaches it (values.contract_bidder_count_positive).
         procedure_type=notice.procedure_type,
-        tenders_received=(
-            context_award.tenders_received
-            if (context_award.tenders_received or 0) > 0
-            else None
-        ),
+        tenders_received=cleaning.tenders_received,
+        tenders_received_raw=facts.bidder_totals[0] if facts.bidder_totals else None,
         award_criterion_type=notice.award_criterion_type,
         submission_deadline=notice.submission_deadline,
         # `is_framework` says the notice belongs to a framework
@@ -1571,6 +1568,63 @@ def load_contracts_incremental(  # pylint: disable=too-many-locals,too-many-argu
     return totals
 
 
+# TED serves any notice's XML by publication number, eForms or legacy.
+_TED_XML_URL = "https://ted.europa.eu/en/notice/{}/xml"
+
+
+def read_publication_numbers(spec: str) -> list[str]:
+    """``--notices``: a file with one publication number per line (blank
+    lines and ``#`` comments ignored) or a comma-separated list."""
+    path = Path(spec)
+    body = path.read_text(encoding="utf-8") if path.is_file() else spec.replace(",", "\n")
+    numbers = [line.split("#", 1)[0].strip() for line in body.splitlines()]
+    return list(dict.fromkeys(n for n in numbers if n))
+
+
+def load_notices(  # pylint: disable=too-many-arguments
+    driver, log: EventLog, publication_numbers: list[str],
+    currency_svc: CurrencyClient | None = None,
+    *,
+    lookups: Lookups | None = None,
+    report: CleaningReport | None = None,
+    dry_run: bool = False,
+    emit_frameworks: bool = False,
+):
+    """Re-ingest the named notices only, each through :func:`ingest_notice`
+    with the already-loaded skip bypassed.
+
+    For a targeted repair: when a cleaning rule changes what some
+    notices yield (gitops#480: ~1,500 bidder counts of 999 spread over
+    2016-2026), re-scanning every month they fall in would re-read most
+    of the corpus. Each XML comes from the raw store when it holds it,
+    else from TED. No watermark moves."""
+    totals = {"emitted": 0, "errors": 0}
+    raw_store = TedRawStore.from_env()
+    http = httpx.Client(timeout=ted_search.SEARCH_TIMEOUT)
+    try:
+        with driver.session() as session:
+            ctx = IngestContext(
+                matcher=TedMatcher(session), currency_svc=currency_svc,
+                rescore=True, lookups=lookups, report=report,
+                dry_run=dry_run, emit_frameworks=emit_frameworks,
+            )
+            for pub in publication_numbers:
+                try:
+                    xml_bytes = raw_store.get(pub) if raw_store is not None else None
+                    if xml_bytes is None:
+                        xml_bytes = ted_search.fetch_xml(_TED_XML_URL.format(pub), client=http)
+                    ingest_notice(parse_notice_xml(xml_bytes), session, log, ctx)
+                    totals["emitted"] += 1
+                except Exception:  # pylint: disable=broad-except
+                    totals["errors"] += 1
+                    logger.exception("FAILED notice %s", pub)
+    finally:
+        http.close()
+    logger.info("Notices done: %d emitted, %d errors of %d",
+                totals["emitted"], totals["errors"], len(publication_numbers))
+    return totals
+
+
 def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-many-branches
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -1583,6 +1637,13 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
                         help="Bulk reprocess start month YYYY-MM (walks to --to)")
     parser.add_argument("--to", dest="to_month",
                         help="Bulk reprocess end month YYYY-MM (default: --from)")
+    parser.add_argument(
+        "--notices",
+        help="Re-ingest only these notices: a file of TED publication "
+             "numbers (one per line, e.g. 148462-2026) or a comma-separated "
+             "list. Implies --rescore; no watermark moves. For targeted "
+             "repairs after a cleaning rule changes what notices yield.",
+    )
     parser.add_argument(
         "--rescore", action="store_true",
         help="Re-ingest notices already in the graph (bypass the "
@@ -1686,7 +1747,12 @@ def main(argv=None):  # pylint: disable=too-many-statements,too-many-locals,too-
             from .load_cpv import load_cpv  # pylint: disable=import-outside-toplevel
             load_cpv(log, lang="en")
 
-        if args.file or args.year or args.month or args.from_month:
+        if args.notices:
+            outcomes.append(load_notices(
+                driver, log, read_publication_numbers(args.notices),
+                currency_svc=currency_svc, **stage,
+            ))
+        elif args.file or args.year or args.month or args.from_month:
             # Bulk path: a local archive, a single monthly package, or a
             # month range (historical reprocess). TED only publishes a
             # month's package after the month ends. Downloaded packages

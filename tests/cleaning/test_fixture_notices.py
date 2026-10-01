@@ -94,3 +94,41 @@ class TestUdine184512:
 
     def test_the_legacy_notice_carries_a_two_letter_language(self, facts_):
         assert facts_.notice_language == "IT"
+
+
+class TestBidderCounts:
+    """gitops#480: the published count, as the stage reads it, on the
+    real notices behind the prod outliers (and one genuine large count)."""
+
+    @staticmethod
+    def _read(name):
+        notice = _notice(name)
+        award = next((a for a in notice.awards if a.is_winner), notice.awards[0])
+        result = run_stage(facts_from_notice(notice, value=ValueFacts(), context_award=award))
+        return result.tenders_received, result.rules_fired
+
+    def test_money_in_the_count_is_withheld(self):
+        # 148462-2026 (IRL): "tenders" 2,416,436 and nothing else.
+        count, fired = self._read("148462-2026.xml")
+        assert count is None
+        assert "generic.bidder_count_impossible" in fired
+
+    def test_the_lots_second_total_replaces_the_first(self):
+        # 154038-2026 (FRA): t-esubm 325,350, then t-esubm 3.
+        assert self._read("154038-2026.xml")[0] == 3
+
+    def test_the_lots_own_electronic_count_contradicts_the_total(self):
+        # 776313-2025 (SVN): tenders 67,494, t-esubm 1.
+        assert self._read("776313-2025.xml")[0] == 1
+
+    def test_the_999_filler_is_withheld(self):
+        count, fired = self._read("556267-2024.xml")
+        assert count is None
+        assert "generic.bidder_count_placeholder" in fired
+
+    def test_a_genuine_dynamic_purchasing_system_keeps_its_count(self):
+        # 381964-2026 (SVN state forests): 1,617 = 1,103 unverified + 514
+        # inadequate; nothing fires.
+        count, fired = self._read("381964-2026.xml")
+        assert count == 1617
+        assert not [r for r in fired if "bidder" in r]

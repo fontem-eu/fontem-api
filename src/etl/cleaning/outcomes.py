@@ -93,6 +93,19 @@ class DatePlaceholder(Outcome):
                 "decision": "placeholder dropped from typed field"}
 
 
+@dataclass(frozen=True)
+class BidderCountRejected(Outcome):
+    """A published bidder count that is not one. ``kept`` is the lot's
+    next usable total, or None when the count is withheld."""
+
+    raw: int
+    kept: int | None
+
+    def example(self) -> dict:
+        decision = "withheld" if self.kept is None else f"use {self.kept}"
+        return {"field": self.subject, "raw": self.raw, "decision": decision}
+
+
 # ── the folded value decision ──────────────────────────────────────
 
 

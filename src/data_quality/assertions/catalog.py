@@ -1866,6 +1866,18 @@ ASSERTIONS: list[Assertion] = [
         "indicators and any average-competition analysis.",
     ),
     Assertion(
+        "coverage.bidder_count_not_placeholder", COVERAGE,
+        "No contract carries the 999 / 9,999 placeholder as its bidder count",
+        WARN, "cypher",
+        "MATCH (c:Contract) USING INDEX c:Contract(tenders_received) "
+        "WHERE c.tenders_received IN [999, 9999] RETURN count(*) AS violations",
+        zero_violations("contracts with a placeholder bidder count"),
+        "999 is a filler for 'many' or 'not counted', not a count: 1,498 notices carry it "
+        "against 2 on 998 (prod, 2026-10-01). The cleaning stage withholds it "
+        "(generic.bidder_count_placeholder); non-zero means notices loaded before that rule "
+        "or a path around the stage, and every average of competition is inflated by it.",
+    ),
+    Assertion(
         "coverage.bidder_mean_not_outlier_inflated", COVERAGE,
         "No month's mean bidder count is >3x its median (outlier-inflated)",
         WARN, "cypher",

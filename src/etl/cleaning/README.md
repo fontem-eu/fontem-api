@@ -35,6 +35,8 @@ Country- and gateway-specific rules are wanted.
 | `pt.value_scale_country_prior` | C4 scale | `scale_normalization` tier B unchanged: all fields consistent but >= EUR 1B on a PRT notice | rescale /1000, `value_scale_corrected = "country_prior"` | existing `tests/test_scale_normalization.py` cases |
 | `generic.value_peer_outlier` | C4 scale | With injected peer stats for (buyer country, cpv4) and n >= 30: if the chosen value > K × p90 (K = 50; K = 20 when a gateway placeholder is present — `tender_result_award_date_raw` starts `2000-01-01` or `tender_reference == "0.0"`) then QUARANTINE with reason `ambiguous_scale_x100_or_x1000` when value/100 or value/1000 lands in [p10, p99], else `implausible_vs_peers`. Never rescales. Inactive (logged once) when `dq.peer_value_stats` is absent | value withheld exactly like the scorer's quarantines; candidates in the review-queue note | Beja 646890-2026 — EUR 24,474,133 integer, CPV 32420000, PRT: /100 lands on the PT 3242* median |
 | `generic.date_placeholder` | C5 dates | `2000-01-01` / `1900-01-01` in `award_date_raw`, `tender_result_award_date_raw`, `publication_date`, `issue_date`. Behaviour unchanged — `_as_day` keeps dropping them from the typed fields; the rule counts them | counted; raw kept on the event | the PT gateway watermark (unit strings) |
+| `generic.bidder_count_impossible` | counts | The lot's published received-tenders total is above 10,000: money, a reference or a keyboard run typed into the count (2,416,436 on 148462-2026; 93,040 beside a VALUE of 96,040 on 120673-2011; 12,345). The genuine large counts are DPS and transport frameworks whose breakdowns add up (6,827, 1,617, 1,164), so the line sits above them | the lot's next usable total (eforms-parser `submission_totals`), else withheld; `tenders_received_raw` keeps the published figure | `154038-2026` (t-esubm 325,350 then 3 -> 3), `776313-2025` (tenders 67,494, t-esubm 1 -> 1), `148462-2026` (withheld) |
+| `generic.bidder_count_placeholder` | counts | The count is exactly 999 or 9,999: a filler for "many" or "not counted" (999 on 1,498 notices against 2 on 998; mostly DEU 2016-2026). 99 and the 940 a Greek agency printed on its childcare-voucher awards are NOT here: plausible counts, undecidable from the notice | as above | `556267-2024`, `112422-2024` (999 on every lot) |
 
 Outcomes for a notice: `withheld` (org id → rule id), `identifiers` (org id →
 canonical VAT or None, for every organisation), `value` (`Keep` | `Rescale` |
@@ -75,7 +77,7 @@ milli-euro tiers.
 
 ## What the loader emits
 
-On `UpsertContract`: `cleaning_rules`, `suppliers_withheld` (each `{name_raw,
+On `UpsertContract`: `cleaning_rules`, `tenders_received_raw` (the bidder count as published, beside the cleaned `tenders_received`), `suppliers_withheld` (each `{name_raw,
 reason, role, org_id}`; absent from `parties[]` and never `company_gmr_id`, so
 the neo4j sink cannot stub a company for it), `value_raw`, `award_date_raw`,
 `tender_result_award_date_raw`, `tender_reference`, `notice_language`,

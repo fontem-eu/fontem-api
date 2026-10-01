@@ -34,6 +34,18 @@ def integer(value) -> int | None:
     return value
 
 
+def bidder_totals(award) -> tuple[int, ...]:
+    """The award's lot totals, the parser's choice first. eforms-parser
+    0.15 hands over every one (``submission_totals``); an older wheel
+    only the chosen ``tenders_received``. Non-positive figures are not
+    counts and are dropped."""
+    totals = getattr(award, "submission_totals", None)
+    if isinstance(totals, tuple) and totals:
+        return tuple(n for n in totals if integer(n))
+    first = integer(getattr(award, "tenders_received", None))
+    return (first,) if first else ()
+
+
 def org_facts(org, org_id: str, role: str) -> OrgFacts:
     legal = getattr(org, "legal_id", None)
     return OrgFacts(
@@ -83,4 +95,5 @@ def facts_from_notice(notice, *, value: ValueFacts, context_award=None) -> Notic
         tender_reference=text(getattr(context_award, "tender_reference", None)),
         publication_date_raw=text(getattr(notice, "publication_date", None)),
         issue_date_raw=text(getattr(notice, "issue_date", None)),
+        bidder_totals=bidder_totals(context_award) if context_award is not None else (),
     )

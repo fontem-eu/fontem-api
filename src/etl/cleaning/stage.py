@@ -13,10 +13,10 @@ from dataclasses import dataclass, field
 from .facts import NoticeFacts
 from .lookups import Lookups
 from .outcomes import (
-    IdentifierNormalised, Keep, Outcome, Quarantine, Rescale,
-    SupplierWithheld, ValueDecision, ValueQuarantined, ValueRescaled,
+    BidderCountRejected, IdentifierNormalised, Keep, Outcome, Quarantine,
+    Rescale, SupplierWithheld, ValueDecision, ValueQuarantined, ValueRescaled,
 )
-from .rules import DATE_RULES, IDENTIFIER_RULES, NAME_RULES, VALUE_RULES
+from .rules import COUNT_RULES, DATE_RULES, IDENTIFIER_RULES, NAME_RULES, VALUE_RULES
 from .rules.identifiers import base_identifier
 
 
@@ -30,6 +30,9 @@ class CleaningResult:
     # notice, buyer included; the matcher reads this instead of the raw id
     identifiers: dict[str, str | None] = field(default_factory=dict)
     value: ValueDecision = field(default_factory=Keep)
+    # The lot's bidder count the platform stands behind: the published
+    # one, the lot's next usable total, or None when withheld.
+    tenders_received: int | None = None
     # every rule id that fired, in firing order, each once
     rules_fired: tuple[str, ...] = ()
     # rule id -> number of outcomes (a rule that hit two suppliers counts 2)
@@ -76,9 +79,11 @@ def run_stage(facts: NoticeFacts, lookups: Lookups | None = None) -> CleaningRes
     outcomes = _run(NAME_RULES, facts, lookups)
     outcomes += _run(IDENTIFIER_RULES, facts, lookups)
     outcomes += _run(DATE_RULES, facts, lookups)
+    outcomes += _run(COUNT_RULES, facts, lookups)
     value_outcomes, decision = _run_value_rules(facts, lookups)
     outcomes += value_outcomes
 
+    tenders = facts.bidder_totals[0] if facts.bidder_totals else None
     withheld: dict[str, str] = {}
     identifiers = {o.org_id: base_identifier(o) for o in facts.organizations}
     for outcome in outcomes:
@@ -86,6 +91,8 @@ def run_stage(facts: NoticeFacts, lookups: Lookups | None = None) -> CleaningRes
             withheld.setdefault(outcome.subject, outcome.rule_id)
         elif isinstance(outcome, IdentifierNormalised):
             identifiers[outcome.subject] = outcome.canonical
+        elif isinstance(outcome, BidderCountRejected):
+            tenders = outcome.kept
 
     fired: list[str] = []
     for outcome in outcomes:
@@ -93,6 +100,7 @@ def run_stage(facts: NoticeFacts, lookups: Lookups | None = None) -> CleaningRes
             fired.append(outcome.rule_id)
     return CleaningResult(
         withheld=withheld, identifiers=identifiers, value=decision,
+        tenders_received=tenders,
         rules_fired=tuple(fired),
         counters=dict(Counter(o.rule_id for o in outcomes)),
         outcomes=tuple(outcomes),
