@@ -18,6 +18,7 @@ from typing import Protocol, Sequence, runtime_checkable
 from ..facts import NoticeFacts
 from ..lookups import Lookups
 from ..outcomes import Outcome
+from .counts import ImpossibleBidderCountRule, PlaceholderBidderCountRule
 from .dates import DatePlaceholderRule
 from .identifiers import NationalIdCountryPrefixedRule
 from .names import (
@@ -64,6 +65,12 @@ DATE_RULES: tuple[Rule, ...] = (
     DatePlaceholderRule(),
 )
 
+# At most one fires: a first total is either impossible or a placeholder.
+COUNT_RULES: tuple[Rule, ...] = (
+    ImpossibleBidderCountRule(),
+    PlaceholderBidderCountRule(),
+)
+
 # Sequential: the peer test sees the value AFTER the milli-euro tiers.
 VALUE_RULES: tuple[Rule, ...] = (
     MilliEuroSiblingRatioRule(),
@@ -72,10 +79,10 @@ VALUE_RULES: tuple[Rule, ...] = (
 )
 
 ALL_RULES: tuple[Rule, ...] = (
-    NAME_RULES + IDENTIFIER_RULES + DATE_RULES + VALUE_RULES
+    NAME_RULES + IDENTIFIER_RULES + DATE_RULES + COUNT_RULES + VALUE_RULES
 )
 
 __all__ = [
-    "Rule", "NAME_RULES", "IDENTIFIER_RULES", "DATE_RULES", "VALUE_RULES",
-    "ALL_RULES",
+    "Rule", "NAME_RULES", "IDENTIFIER_RULES", "DATE_RULES", "COUNT_RULES",
+    "VALUE_RULES", "ALL_RULES",
 ]

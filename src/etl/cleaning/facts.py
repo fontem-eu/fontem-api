@@ -79,6 +79,12 @@ class NoticeFacts:  # pylint: disable=too-many-instance-attributes
     tender_reference: str | None = None
     publication_date_raw: str | None = None
     issue_date_raw: str | None = None
+    # The context award's lot totals as published, the parser's choice
+    # first: each "tenders" statistic, then each "t-esubm"
+    # (eforms-parser Award.submission_totals). The count rules reject a
+    # first total that is a placeholder or impossible and fall back to
+    # the next usable one.
+    bidder_totals: tuple[int, ...] = ()
 
     @property
     def suppliers(self) -> tuple[OrgFacts, ...]:

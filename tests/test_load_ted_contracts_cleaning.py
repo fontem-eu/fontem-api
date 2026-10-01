@@ -181,6 +181,37 @@ class TestRawSignalsOnThePayload:
         assert "generic.date_placeholder" in contract["cleaning_rules"]
 
 
+class TestBidderCount:
+    """gitops#480: the event carries the cleaned count and the published
+    one; a withheld count is absent, so the sink clears what was stored."""
+
+    def _contract(self, *totals):
+        award = _stub_award()
+        award.submission_totals = tuple(totals)
+        award.tenders_received = totals[0] if totals else None
+        notice = _stub_notice(awards=[award], organizations={"O1": _org("Alfa S.p.A.")})
+        _, emit, _ = _run(notice)
+        [contract] = _payloads(emit, "UpsertContract")
+        return contract
+
+    def test_an_impossible_count_is_withheld_and_kept_as_published(self):
+        contract = self._contract(2_416_436)
+        assert "tenders_received" not in contract
+        assert contract["tenders_received_raw"] == 2_416_436
+        assert "generic.bidder_count_impossible" in contract["cleaning_rules"]
+
+    def test_the_lots_other_total_is_used(self):
+        contract = self._contract(325_350, 3)
+        assert contract["tenders_received"] == 3
+        assert contract["tenders_received_raw"] == 325_350
+
+    def test_a_plain_count_travels_unchanged(self):
+        contract = self._contract(4)
+        assert contract["tenders_received"] == 4
+        assert contract["tenders_received_raw"] == 4
+        assert not [r for r in contract["cleaning_rules"] if "bidder" in r]
+
+
 class TestValueQuarantine:
     def _notice(self, value):
         buyer = MagicMock()
