@@ -13,7 +13,7 @@ from itertools import zip_longest
 from fontem_event_schemas.integrity import contract_red_flags
 
 from ...analysis.contract_data_source import ContractDataSource
-from ...api.lang import authority_name_expr, contract_title_expr
+from ...api.lang import authority_name_expr, contract_title_expr, title_original_expr
 from ...services.ted_lookup import detail_url_for
 from .identity import identity_class
 from ._value_quality import (
@@ -136,7 +136,9 @@ class GraphContractSource(ContractDataSource):
                 # straight to TED. May be null on rows ingested before
                 # the publication-number capture landed (see backfill).
                 "  ct.ted_publication_number AS publication_number, "
-                f"  {title_expr} AS title, ct.value_eur AS value_eur, "
+                f"  {title_expr} AS title, "
+                f"  {title_original_expr('ct', lang)} AS title_original, "
+                "  ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
                 "  ct.value_low_confidence AS value_low_confidence, "
                 "  ct.value_quality_flag AS value_quality_flag, "
@@ -197,6 +199,8 @@ class GraphContractSource(ContractDataSource):
                 "ted_notice_id": r["notice_id"],
                 "ted_publication_number": r.get("publication_number"),
                 "title": r["title"],
+                # The original, when `title` is a translation (else None).
+                "title_original": r.get("title_original"),
                 "value_eur": r["value_eur"],
                 "estimated_value_eur": r.get("estimated_value_eur"),
                 "notice_type": r.get("notice_type"),
@@ -292,7 +296,9 @@ class GraphContractSource(ContractDataSource):
                 "WITH ct, cpv, winners, head(winners) AS c "
                 "RETURN ct.ted_notice_id AS notice_id, "
                 "  ct.ted_publication_number AS publication_number, "
-                f"  {title_expr} AS title, ct.value_eur AS value_eur, "
+                f"  {title_expr} AS title, "
+                f"  {title_original_expr('ct', lang)} AS title_original, "
+                "  ct.value_eur AS value_eur, "
                 "  ct.publication_date AS award_date, ct.cpv AS cpv, "
                 "  ct.value_low_confidence AS value_low_confidence, "
                 "  ct.value_quality_flag AS value_quality_flag, "
@@ -349,6 +355,8 @@ class GraphContractSource(ContractDataSource):
                 "ted_notice_id": r["notice_id"],
                 "ted_publication_number": r.get("publication_number"),
                 "title": r["title"],
+                # The original, when `title` is a translation (else None).
+                "title_original": r.get("title_original"),
                 "value_eur": r["value_eur"],
                 "estimated_value_eur": r.get("estimated_value_eur"),
                 "notice_type": r.get("notice_type"),
@@ -396,7 +404,7 @@ class GraphContractSource(ContractDataSource):
         }
 
     def get_company_cohesion_grants(
-        self, gmr_id: str, limit: int = 50,
+        self, gmr_id: str, limit: int = 50, lang: str | None = None,
     ) -> dict:
         """EU cohesion (Kohesio) grants attained by a company — the
         eu-cohesion disclosures FILED_BY it, with the EU contribution, fund,
@@ -414,7 +422,8 @@ class GraphContractSource(ContractDataSource):
             rows = session.run(
                 "MATCH (:Company {gmr_id: $gid})<-[:FILED_BY]-"
                 "(d:Disclosure {system:'eu-cohesion'}) "
-                "RETURN d.title AS title, "
+                f"RETURN {contract_title_expr('d', lang)} AS title, "
+                f"  {title_original_expr('d', lang)} AS title_original, "
                 "  d.detail_eu_contribution AS eu_contribution, "
                 "  d.detail_total_budget AS total_budget, "
                 "  d.detail_fund AS fund, d.detail_programme AS programme, "
@@ -438,6 +447,54 @@ class GraphContractSource(ContractDataSource):
             "grant_count": summary["grant_count"],
             "total_eu_contribution": summary["total_eu"],
         }
+
+    # Translations are looked up by the property's name, bound as a
+    # parameter (``ct[$prop]``), so no language code is ever spliced into
+    # the query text. Every lookup is an index seek on the key.
+    _TITLES_BY_CONTRACT_KEY = (
+        "UNWIND $keys AS k MATCH (ct:Contract {contract_key: k}) "
+        "WHERE ct[$prop] IS NOT NULL "
+        "RETURN k AS key, ct[$prop] AS title, ct.title AS original"
+    )
+    # A notice id may be the contract's current notice or an older one
+    # of its chain (a search index or a link made before a modification
+    # arrived), resolved exactly as get_contract_detail resolves it.
+    _TITLES_BY_NOTICE_ID = (
+        "UNWIND $ids AS id "
+        "CALL (id) { "
+        "  MATCH (ct:Contract {ted_notice_id: id}) RETURN ct "
+        "  UNION "
+        "  MATCH (:Notice {ted_notice_id: id})-[:NOTICE_OF]->(ct:Contract) RETURN ct "
+        "} "
+        "WITH id, head(collect(ct)) AS ct WHERE ct[$prop] IS NOT NULL "
+        "RETURN id AS key, ct[$prop] AS title, ct.title AS original"
+    )
+    _TITLES_BY_DISCLOSURE_ID = (
+        "UNWIND $ids AS id MATCH (d:Disclosure {disclosure_id: id}) "
+        "WHERE d.system = 'eu-cohesion' AND d[$prop] IS NOT NULL "
+        "RETURN id AS key, d[$prop] AS title, d.title AS original"
+    )
+
+    def get_title_translations(
+        self, lang: str, *, contract_keys: list[str] | None = None,
+        notice_ids: list[str] | None = None,
+        cohesion_ids: list[str] | None = None,
+    ) -> dict:
+        out: dict = {"contracts": {}, "notices": {}, "cohesion": {}}
+        prop = f"title_{lang}"
+        lookups = (
+            ("contracts", self._TITLES_BY_CONTRACT_KEY, "keys", contract_keys),
+            ("notices", self._TITLES_BY_NOTICE_ID, "ids", notice_ids),
+            ("cohesion", self._TITLES_BY_DISCLOSURE_ID, "ids", cohesion_ids),
+        )
+        with self._neo4j.session() as session:
+            for bucket, query, param, values in lookups:
+                wanted = sorted({v for v in values or () if v})
+                if not wanted:
+                    continue
+                for r in session.run(query, prop=prop, **{param: wanted}).data():
+                    out[bucket][r["key"]] = {"title": r["title"], "original": r["original"]}
+        return out
 
     def get_contract_detail(
         self, notice_id: str, lang: str | None = None,
@@ -497,9 +554,8 @@ class GraphContractSource(ContractDataSource):
         auth_name = (
             auth_node.get(f"name_{lang}") if lang else None
         ) or auth_node["name"]
-        title = (
-            ct.get(f"title_{lang}") if lang else None
-        ) or ct.get("title")
+        translated = ct.get(f"title_{lang}") if lang else None
+        title = translated or ct.get("title")
         # API output keys are kept stable for the frontend; the source
         # property names are the storage ones (see render_upsert_contract
         # in fontem-neo4j-sink). Notes:
@@ -513,6 +569,11 @@ class GraphContractSource(ContractDataSource):
             "ted_publication_number": ct.get("ted_publication_number"),
             "ted_url": ct.get("ted_url"),
             "title": title,
+            # What the buyer published, when `title` is a machine
+            # translation of it; and the language it was published in
+            # (stated by the source, else detected by the translator).
+            "title_original": ct.get("title") if translated else None,
+            "title_lang": ct.get("title_lang") or ct.get("title_lang_detected"),
             "description": None,
             "value_eur": ct.get("value_eur"),
             "cpv_main": ct.get("cpv"),

@@ -42,6 +42,8 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 import pycountry
 
+from src.analysis.contract_data_source import ContractDataSource
+from src.api.lang import safe_lang
 from src.data.linguistics.client import LinguisticsClient
 
 # ISO alpha-2 → alpha-3 lookup for the NUTS-0 country fallback below.
@@ -203,6 +205,44 @@ def _shape_row(row: dict) -> dict:
     }
 
 
+#: Result types whose title is a contract's or a cohesion grant's, and the
+#: bucket of get_title_translations their id is looked up in. A contract
+#: result's id is a TED notice id; a grant's is its Kohesio disclosure id.
+_TRANSLATABLE = {"contract": "notices", "eu_cohesion": "cohesion", "cohesion": "cohesion"}
+
+
+def _localise_titles(results: list[dict], lang: str | None,
+                     source: ContractDataSource) -> None:
+    """Show contract and grant titles in the reader's language, in place.
+
+    The search index holds one text per entity, the original. Where the
+    graph has a translation in ``lang``, the card shows it and keeps the
+    original as ``title_original``; everything else is left as it is. A
+    failure here costs the translations, never the results.
+    """
+    if not lang:
+        return
+    wanted: dict[str, list[str]] = {"notices": [], "cohesion": []}
+    for r in results:
+        bucket = _TRANSLATABLE.get(r["type"])
+        if bucket:
+            wanted[bucket].append(r["id"])
+    if not any(wanted.values()):
+        return
+    try:
+        found = source.get_title_translations(
+            lang, notice_ids=wanted["notices"], cohesion_ids=wanted["cohesion"])
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("search: title translations unavailable (lang=%s)", lang, exc_info=True)
+        return
+    for r in results:
+        bucket = _TRANSLATABLE.get(r["type"])
+        hit = found.get(bucket, {}).get(r["id"]) if bucket else None
+        if hit:
+            r["title_original"] = r["title"]
+            r["title"] = hit["title"]
+
+
 @router.get(
     "/results",
     responses={
@@ -233,8 +273,10 @@ def search_results(
     backend: Annotated[
         str, Query(pattern=r"^(minilm-local|labse-local|mistral-embed)$"),
     ] = "minilm-local",
+    lang: Annotated[str | None, Query(max_length=8)] = None,
     *,
     linguistics: FromDishka[LinguisticsClient | None],
+    contracts: FromDishka[ContractDataSource],
 ) -> dict[str, Any]:
     """Faceted hybrid search across every entity type in one page.
 
@@ -311,9 +353,11 @@ def search_results(
         t = r["entity_type"]
         counts[t] = counts.get(t, 0) + 1
 
+    results = [_shape_row(r) for r in dict_rows]
+    _localise_titles(results, safe_lang(lang), contracts)
     return {
         "query": q,
-        "results": [_shape_row(r) for r in dict_rows],
+        "results": results,
         "counts": counts,
         "has_more": has_more,
         "mode": mode,
