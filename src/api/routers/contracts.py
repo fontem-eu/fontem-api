@@ -82,7 +82,7 @@ def company_contracts(  # pylint: disable=too-many-arguments,too-many-positional
 def company_cohesion_grants(
     gmr_id: str,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    lang: str | None = Query(None),
+    lang: Annotated[str | None, Query()] = None,
     *,
     source: FromDishka[ContractDataSource],
 ):
