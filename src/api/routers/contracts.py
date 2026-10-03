@@ -13,6 +13,7 @@ import httpx
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 
 from src.analysis.contract_data_source import ContractDataSource
 from src.data.graph._value_quality import canonical_count
@@ -81,12 +82,51 @@ def company_contracts(  # pylint: disable=too-many-arguments,too-many-positional
 def company_cohesion_grants(
     gmr_id: str,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    lang: Annotated[str | None, Query()] = None,
     *,
     source: FromDishka[ContractDataSource],
 ):
     """EU cohesion (Kohesio) grants attained by a company — amount, fund,
-    programme, dates — mirroring the contracts panel on the funding side."""
-    return source.get_company_cohesion_grants(gmr_id, limit=limit)
+    programme, dates — mirroring the contracts panel on the funding side.
+    Titles in `lang` where translated, with `title_original` beside them."""
+    return source.get_company_cohesion_grants(gmr_id, limit=limit, lang=safe_lang(lang))
+
+
+#: Per list, per request. A briefing page holds a few hundred items at most.
+MAX_TRANSLATION_KEYS = 500
+
+
+class TitleTranslationsRequest(BaseModel):
+    """Which titles to translate. ``lang`` outside the 24 EU codes gives an
+    empty answer rather than an error: the caller simply keeps its text."""
+
+    lang: str
+    contract_keys: list[str] = Field(default_factory=list, max_length=MAX_TRANSLATION_KEYS)
+    notice_ids: list[str] = Field(default_factory=list, max_length=MAX_TRANSLATION_KEYS)
+    cohesion_ids: list[str] = Field(default_factory=list, max_length=MAX_TRANSLATION_KEYS)
+
+
+@router.post("/translations/titles")
+@inject
+def title_translations(
+    body: TitleTranslationsRequest,
+    *,
+    source: FromDishka[ContractDataSource],
+):
+    """Translated titles of contracts and cohesion grants, by key.
+
+    For the surfaces that keep their own copy of a title — briefing items
+    (fontem-community-api), which read it when the item is shown. Read-only.
+    Each value is ``{"title": translation, "original": stored title}``; a key
+    without a translation in ``lang`` is absent, and the caller keeps its text.
+    """
+    lang = safe_lang(body.lang)
+    if lang is None:
+        return {"lang": None, "contracts": {}, "notices": {}, "cohesion": {}}
+    return {"lang": lang, **source.get_title_translations(
+        lang, contract_keys=body.contract_keys, notice_ids=body.notice_ids,
+        cohesion_ids=body.cohesion_ids,
+    )}
 
 
 @router.get("/companies/{gmr_id}")

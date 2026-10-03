@@ -64,14 +64,30 @@ def authority_name_expr(alias: str, lang: str | None) -> str:
 
 
 def contract_title_expr(alias: str, lang: str | None) -> str:
-    """Cypher fragment selecting a Contract's title in the requested
-    language with a fallback to the stored original.
+    """Cypher fragment selecting a title in the requested language with a
+    fallback to the stored original.
 
     Mirrors ``authority_name_expr`` — same safety contract: ``lang`` must
     have passed ``safe_lang`` (whitelisted two-letter code or None).
-    Contract titles are written by gmr-consolidator's
-    TranslationEnrichmentContract rule as ``title_<lang>``.
+    :Contract and :Disclosure (cohesion grant) titles carry their
+    translations as ``title_<lang>``, written by the neo4j sink from
+    fontem-translator's TranslateContractTitle / TranslateDisclosureTitle
+    events. The source language itself is never among them, so asking for
+    it falls through to the original.
     """
     if not lang:
         return f"{alias}.title"
     return f"coalesce({alias}.title_{lang}, {alias}.title)"
+
+
+def title_original_expr(alias: str, lang: str | None) -> str:
+    """Cypher fragment for the stored original title, but only when
+    ``contract_title_expr`` would show a translation; null otherwise.
+
+    A machine translation is shown in place of what the buyer published,
+    so the reader must be able to see the original: the UI offers it
+    wherever this is not null. Same safety contract as above.
+    """
+    if not lang:
+        return "null"
+    return f"CASE WHEN {alias}.title_{lang} IS NOT NULL THEN {alias}.title END"
