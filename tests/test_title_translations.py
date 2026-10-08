@@ -126,7 +126,8 @@ def test_lookup_binds_the_property_name_and_buckets_by_key():
         "en", contract_keys=["k1", "k1", ""], cohesion_ids=["Q1"])
     assert out == {"contracts": {"k1": {"title": "Bypass", "original": "Obchvat"}},
                    "notices": {},
-                   "cohesion": {"Q1": {"title": "Port", "original": "Luka"}}}
+                   "cohesion": {"Q1": {"title": "Port", "original": "Luka"}},
+                   "authorities": {}}
     first, second = session.run.call_args_list
     # The language is a bound property name, never part of the text.
     assert first.kwargs == {"prop": "title_en", "keys": ["k1"]}
@@ -134,10 +135,22 @@ def test_lookup_binds_the_property_name_and_buckets_by_key():
     assert second.kwargs == {"prop": "title_en", "ids": ["Q1"]}
 
 
+def test_an_authority_name_is_looked_up_by_its_name_property():
+    session = MagicMock()
+    session.run.return_value.data.return_value = [
+        {"key": "a1", "title": "Straßen- und Autobahndirektion", "original": "Ředitelství"}]
+    out = _source_with_session(session).get_title_translations("de", authority_ids=["a1"])
+    assert out["authorities"] == {"a1": {"title": "Straßen- und Autobahndirektion",
+                                         "original": "Ředitelství"}}
+    call = session.run.call_args
+    assert call.kwargs == {"prop": "name_de", "ids": ["a1"]}
+    assert "MATCH (a:Authority {authority_id: id})" in call.args[0]
+
+
 def test_lookup_with_nothing_to_look_up_runs_nothing():
     session = MagicMock()
     out = _source_with_session(session).get_title_translations("en")
-    assert out == {"contracts": {}, "notices": {}, "cohesion": {}}
+    assert out == {"contracts": {}, "notices": {}, "cohesion": {}, "authorities": {}}
     session.run.assert_not_called()
 
 
@@ -154,7 +167,8 @@ def test_translations_endpoint():
     cleanup_dishka()
     assert ok.json()["contracts"]["k1"]["title"] == "Bypass"
     assert source.get_title_translations.call_args.args == ("en",)
-    assert unknown.json() == {"lang": None, "contracts": {}, "notices": {}, "cohesion": {}}
+    assert unknown.json() == {"lang": None, "contracts": {}, "notices": {}, "cohesion": {},
+                              "authorities": {}}
     assert source.get_title_translations.call_count == 1
     assert too_many.status_code == 422
 
@@ -167,6 +181,7 @@ def _results():
         {"type": "eu_cohesion", "id": "Q1", "title": "Upgrading of the port"},
         {"type": "company", "id": "g1", "title": "Skanska"},
         {"type": "contract", "id": "n2", "title": "Untranslated"},
+        {"type": "authority", "id": "a1", "title": "Ředitelství silnic a dálnic"},
     ]
 
 
@@ -174,15 +189,19 @@ def test_search_cards_show_translations_and_keep_the_original():
     source = MagicMock()
     source.get_title_translations.return_value = {
         "notices": {"n1": {"title": "Klatovy bypass", "original": "Obchvat Klatov"}},
-        "cohesion": {"Q1": {"title": "Ausbau des Hafens", "original": "Upgrading of the port"}}}
+        "cohesion": {"Q1": {"title": "Ausbau des Hafens", "original": "Upgrading of the port"}},
+        "authorities": {"a1": {"title": "Straßen- und Autobahndirektion",
+                               "original": "Ředitelství silnic a dálnic"}}}
     results = _results()
     _localise_titles(results, "de", source)
     assert [r["title"] for r in results] == [
-        "Klatovy bypass", "Ausbau des Hafens", "Skanska", "Untranslated"]
+        "Klatovy bypass", "Ausbau des Hafens", "Skanska", "Untranslated",
+        "Straßen- und Autobahndirektion"]
     assert results[0]["title_original"] == "Obchvat Klatov"
+    assert results[4]["title_original"] == "Ředitelství silnic a dálnic"
     assert "title_original" not in results[2] and "title_original" not in results[3]
     assert source.get_title_translations.call_args.kwargs == {
-        "notice_ids": ["n1", "n2"], "cohesion_ids": ["Q1"]}
+        "notice_ids": ["n1", "n2"], "cohesion_ids": ["Q1"], "authority_ids": ["a1"]}
 
 
 def test_search_without_a_language_looks_nothing_up():
