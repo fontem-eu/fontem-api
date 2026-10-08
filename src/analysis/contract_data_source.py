@@ -58,11 +58,14 @@ class ContractDataSource(ABC):
         self, lang: str, *, contract_keys: list[str] | None = None,
         notice_ids: list[str] | None = None,
         cohesion_ids: list[str] | None = None,
+        authority_ids: list[str] | None = None,
     ) -> dict:
         """Translated titles, in `lang`, of the contracts and cohesion
-        grants named: ``{"contracts": {contract_key: {...}}, "notices":
-        {ted_notice_id: {...}}, "cohesion": {disclosure_id: {...}}}``, each
-        value ``{"title": <translation>, "original": <stored title>}``.
+        grants named, and translated names of the authorities named:
+        ``{"contracts": {contract_key: {...}}, "notices": {ted_notice_id:
+        {...}}, "cohesion": {disclosure_id: {...}}, "authorities":
+        {authority_id: {...}}}``, each value ``{"title": <translation>,
+        "original": <stored title or name>}``.
         Only what has a translation in `lang` is returned; for everything
         else the caller keeps the text it already holds. For surfaces whose
         text is stored elsewhere (briefing items, the search index)."""

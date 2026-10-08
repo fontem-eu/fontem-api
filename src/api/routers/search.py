@@ -205,15 +205,18 @@ def _shape_row(row: dict) -> dict:
     }
 
 
-#: Result types whose title is a contract's or a cohesion grant's, and the
-#: bucket of get_title_translations their id is looked up in. A contract
-#: result's id is a TED notice id; a grant's is its Kohesio disclosure id.
-_TRANSLATABLE = {"contract": "notices", "eu_cohesion": "cohesion", "cohesion": "cohesion"}
+#: Result types whose title can be shown translated, and the bucket of
+#: get_title_translations their id is looked up in. A contract result's id
+#: is a TED notice id, a grant's its Kohesio disclosure id, an authority's
+#: its authority_id (its card's title is its name).
+_TRANSLATABLE = {"contract": "notices", "eu_cohesion": "cohesion", "cohesion": "cohesion",
+                 "authority": "authorities"}
 
 
 def _localise_titles(results: list[dict], lang: str | None,
                      source: ContractDataSource) -> None:
-    """Show contract and grant titles in the reader's language, in place.
+    """Show contract and grant titles, and authority names, in the reader's
+    language, in place.
 
     The search index holds one text per entity, the original. Where the
     graph has a translation in ``lang``, the card shows it and keeps the
@@ -222,7 +225,7 @@ def _localise_titles(results: list[dict], lang: str | None,
     """
     if not lang:
         return
-    wanted: dict[str, list[str]] = {"notices": [], "cohesion": []}
+    wanted: dict[str, list[str]] = {"notices": [], "cohesion": [], "authorities": []}
     for r in results:
         bucket = _TRANSLATABLE.get(r["type"])
         if bucket:
@@ -231,7 +234,8 @@ def _localise_titles(results: list[dict], lang: str | None,
         return
     try:
         found = source.get_title_translations(
-            lang, notice_ids=wanted["notices"], cohesion_ids=wanted["cohesion"])
+            lang, notice_ids=wanted["notices"], cohesion_ids=wanted["cohesion"],
+            authority_ids=wanted["authorities"])
     except Exception:  # pylint: disable=broad-except
         logger.warning("search: title translations unavailable (lang=%s)", lang, exc_info=True)
         return

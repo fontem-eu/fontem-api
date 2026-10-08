@@ -475,24 +475,37 @@ class GraphContractSource(ContractDataSource):
         "RETURN id AS key, d[$prop] AS title, d.title AS original"
     )
 
+    # An authority's NAME is what is translated (name_<lang>), not a title.
+    _NAMES_BY_AUTHORITY_ID = (
+        "UNWIND $ids AS id MATCH (a:Authority {authority_id: id}) "
+        "WHERE a[$prop] IS NOT NULL "
+        "RETURN id AS key, a[$prop] AS title, a.name AS original"
+    )
+
+    #: bucket -> (query, its list parameter, the property translated). The
+    #: translation of a title is title_<lang>; of an authority, name_<lang>.
+    _LOOKUPS = (
+        ("contracts", _TITLES_BY_CONTRACT_KEY, "keys", "title"),
+        ("notices", _TITLES_BY_NOTICE_ID, "ids", "title"),
+        ("cohesion", _TITLES_BY_DISCLOSURE_ID, "ids", "title"),
+        ("authorities", _NAMES_BY_AUTHORITY_ID, "ids", "name"),
+    )
+
     def get_title_translations(
         self, lang: str, *, contract_keys: list[str] | None = None,
         notice_ids: list[str] | None = None,
         cohesion_ids: list[str] | None = None,
+        authority_ids: list[str] | None = None,
     ) -> dict:
-        out: dict = {"contracts": {}, "notices": {}, "cohesion": {}}
-        prop = f"title_{lang}"
-        lookups = (
-            ("contracts", self._TITLES_BY_CONTRACT_KEY, "keys", contract_keys),
-            ("notices", self._TITLES_BY_NOTICE_ID, "ids", notice_ids),
-            ("cohesion", self._TITLES_BY_DISCLOSURE_ID, "ids", cohesion_ids),
-        )
+        asked = {"contracts": contract_keys, "notices": notice_ids,
+                 "cohesion": cohesion_ids, "authorities": authority_ids}
+        out: dict = {bucket: {} for bucket in asked}
         with self._neo4j.session() as session:
-            for bucket, query, param, values in lookups:
-                wanted = sorted({v for v in values or () if v})
+            for bucket, query, param, field in self._LOOKUPS:
+                wanted = sorted({v for v in asked[bucket] or () if v})
                 if not wanted:
                     continue
-                for r in session.run(query, prop=prop, **{param: wanted}).data():
+                for r in session.run(query, prop=f"{field}_{lang}", **{param: wanted}).data():
                     out[bucket][r["key"]] = {"title": r["title"], "original": r["original"]}
         return out
 
