@@ -23,8 +23,8 @@ import pytest
 
 from src.etl import load_eu_lobbying
 from src.etl.load_eu_lobbying import (
-    _COUNTRY_MAP,
     _parse_entity,
+    country_alpha3,
     emit_deregistrations,
     emit_lobbyist_disclosures,
     resolve_lobbyist_companies,
@@ -59,11 +59,15 @@ def test_no_inline_match_company_cypher():
 # ── country normalization ───────────────────────────────────
 
 @pytest.mark.parametrize("full,iso", [
-    ("UNITED STATES", "US"), ("GERMANY", "DEU"), ("FRANCE", "FRA"),
-    ("PORTUGAL", "PRT"), ("CZECH REPUBLIC", "CZE"),
+    ("UNITED STATES", "USA"), ("UNITED KINGDOM", "GBR"), ("GERMANY", "DEU"),
+    ("FRANCE", "FRA"), ("PORTUGAL", "PRT"), ("CZECH REPUBLIC", "CZE"),
+    ("TURKEY", "TUR"), ("KOSOVO (*)", "XKX"), ("BOSNIA-HERZEGOVINA", "BIH"),
+    ("COTE D'IVOIRE", "CIV"),
 ])
-def test_country_map_covers_top_eu_jurisdictions(full, iso):
-    assert _COUNTRY_MAP[full] == iso
+def test_every_register_country_resolves_to_the_alpha3_company_nodes_use(full, iso):
+    """One table: the US and the UK used to come out ISO-2, 818 registrants
+    as their raw country name."""
+    assert country_alpha3(full) == iso
 
 
 # ── parser ──────────────────────────────────────────────────
@@ -106,11 +110,10 @@ def test_parser_populates_country_iso():
     assert parsed["cost_max"] == 200000
 
 
-def test_parser_falls_back_to_full_name_for_unknown_country():
+def test_an_unknown_country_has_no_code_and_keeps_its_name():
     import xml.etree.ElementTree as ET  # pylint: disable=import-outside-toplevel
     parsed = _parse_entity(ET.fromstring(_entity_xml("ATLANTIS")))
-    # Unknown country falls back to the upper-cased full name.
-    assert parsed["country_iso"] == "ATLANTIS"
+    assert parsed["country_iso"] is None and parsed["country"] == "ATLANTIS"
 
 
 # ── disclosure emit ─────────────────────────────────────────
@@ -140,23 +143,20 @@ def test_emit_disclosure_omits_company_gmr_id():
     assert payload["details"]["interests"] == ["topic1"]
 
 
-def test_emit_disclosure_skips_zero_cost_fields():
-    """cost_min=0 / members_fte=0.0 are 'unset' artefacts of the
-    parser — they don't belong in details."""
+def test_emit_disclosure_leaves_out_what_is_not_stated_and_keeps_zeros():
+    """None, '' and [] are absences; 0 is a stated count and must reach
+    the sink, or a count that drops to 0 keeps its old value there."""
     log, emit = _mock_log()
     entities = [{
-        "tr_id": "x", "name": "Y", "country": "X", "country_iso": "X",
-        "city": "", "category": "", "entity_form": "", "website": "",
-        "goals": "", "ep_passes": 0, "members_fte": 0.0,
-        "cost_min": 0, "cost_max": 0, "interests": [],
-        "acronym": "", "registration_date": "", "last_updated": "",
+        "tr_id": "x", "name": "Y", "country": "X", "country_iso": None,
+        "city": "", "category": None, "website": None, "goals": None,
+        "ep_passes": 0, "members_fte": 0.0, "interests": [],
     }]
     emit_lobbyist_disclosures(log, entities)
-    payload = emit.upsert.call_args.kwargs["payload"]
-    details = payload.get("details") or {}
-    assert "cost_min" not in details
-    assert "ep_passes" not in details
-    assert "members_fte" not in details
+    details = emit.upsert.call_args.kwargs["payload"]["details"]
+    assert details["ep_passes"] == 0 and details["members_fte"] == 0.0
+    for absent in ("country_iso", "city", "category", "website", "goals", "interests"):
+        assert absent not in details
 
 
 # ── relationship emit ───────────────────────────────────────
@@ -224,9 +224,11 @@ def test_main_accepts_argv(monkeypatch):
         load_eu_lobbying.EventLog, "from_env",
         classmethod(lambda cls: MagicMock()),
     )
+    monkeypatch.setattr(load_eu_lobbying, "download_register", lambda: b"<xml/>")
+    monkeypatch.setattr(load_eu_lobbying, "write_artifact", lambda _xml, _dir: "/tmp/x")
     monkeypatch.setattr(
         load_eu_lobbying, "load_eu_lobbying",
-        lambda _log: {"emitted": 0, "represents": {"confident": 0}},
+        lambda _log, _xml: {"emitted": 0, "represents": {"confident": 0}},
     )
     load_eu_lobbying.main([])
 
@@ -392,11 +394,8 @@ def test_emit_sends_both_cost_bounds_when_bracket_shrinks():
     assert details["cost_max"] == 10000
 
 
-def test_emit_omits_cost_when_both_bounds_absent():
+def test_emit_omits_cost_when_no_band_is_stated():
     log, emit = _mock_log()
-    emit_lobbyist_disclosures(log, [{
-        "tr_id": "10", "name": "No Cost Co",
-        "cost_min": 0, "cost_max": 0, "interests": [],
-    }])
+    emit_lobbyist_disclosures(log, [{"tr_id": "10", "name": "No Cost Co", "interests": []}])
     details = emit.upsert.call_args.kwargs["payload"]["details"]
     assert "cost_min" not in details and "cost_max" not in details

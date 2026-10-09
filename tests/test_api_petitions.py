@@ -44,10 +44,10 @@ LIST_ROWMAP = {
         {"status": None, "n": 1},
     ],
     "ORDER BY coalesce(p.total_supporters, 0) DESC": [
-        {"system": "eu-eci", "petition_id": "ECI(2024)000007",
-         "title": "Stop Destroying Videogames", "status": "ANSWERED",
-         "total_supporters": 1294188, "registration_date": "2024-06-19",
-         "answered_date": "2026-06-16", "latest_update": "2026-06-16"},
+        {"p": {"system": "eu-eci", "petition_id": "ECI(2024)000007",
+               "title": "Stop Destroying Videogames", "status": "ANSWERED",
+               "total_supporters": 1294188, "registration_date": "2024-06-19",
+               "answered_date": "2026-06-16", "latest_update": "2026-06-16"}},
     ],
 }
 
@@ -110,24 +110,24 @@ MULTI_ROWMAP = {
         {"status": "ANSWERED", "n": 14}, {"status": "SUBMITTED", "n": 3},
     ],
     "WHERE p.status IN $statuses": [
-        {"system": "eu-eci", "petition_id": "ECI(2024)000007",
+        {"p": {"system": "eu-eci", "petition_id": "ECI(2024)000007",
          "title": "Stop Destroying Videogames", "status": "ANSWERED",
          "total_supporters": 1294188, "registration_date": "2024-06-19",
-         "answered_date": "2026-06-16", "latest_update": "2026-06-16"},
+         "answered_date": "2026-06-16", "latest_update": "2026-06-16"}},
     ],
 }
 
 RECENT_ROWMAP = {
     "count(*) AS n": [{"status": "SUBMITTED", "n": 2}],
     "ORDER BY coalesce(p.registration_date, '') DESC": [
-        {"system": "eu-eci", "petition_id": "ECI(2025)000010",
+        {"p": {"system": "eu-eci", "petition_id": "ECI(2025)000010",
          "title": "Newer", "status": "SUBMITTED",
          "total_supporters": 1000000, "registration_date": "2025-05-01",
-         "answered_date": None, "latest_update": "2025-05-02"},
-        {"system": "eu-eci", "petition_id": "ECI(2024)000007",
+         "answered_date": None, "latest_update": "2025-05-02"}},
+        {"p": {"system": "eu-eci", "petition_id": "ECI(2024)000007",
          "title": "Older", "status": "ANSWERED",
          "total_supporters": 1294188, "registration_date": "2024-06-19",
-         "answered_date": "2026-06-16", "latest_update": "2026-06-16"},
+         "answered_date": "2026-06-16", "latest_update": "2026-06-16"}},
     ],
 }
 
@@ -168,3 +168,70 @@ def test_list_defaults_supporters_order_unchanged():
     assert body["counts"] == {"ANSWERED": 14, "REGISTERED": 40}
     assert body["total"] == 54
     cleanup_dishka()
+
+
+OBJECTIVES = "Require publishers that sell videogames to leave them playable."
+VIDEOGAMES = {
+    "system": "eu-eci", "petition_id": "ECI(2024)000007", "status": "ANSWERED",
+    "title": "Stop Destroying Videogames", "title_lang": "en", "objectives": OBJECTIVES,
+    "title_en": "Stop Destroying Videogames", "objectives_en": OBJECTIVES,
+    "title_fr": "Stop à la destruction des jeux vidéo",
+    "objectives_fr": "Obliger les éditeurs à laisser les jeux vidéo jouables.",
+    "title_de": "Stoppt die Zerstörung von Videospielen",
+    "objectives_summarized_from": OBJECTIVES,
+    "objectives_summary_en": "Asks the EU to keep sold games playable.",
+    "objectives_summary_fr": "Demande à l'UE de garder jouables les jeux vendus.",
+    "total_supporters": 1294188,
+}
+
+
+def _client(node, anchor="OPTIONAL MATCH (p)-[r:REGISTERED_BY|ANSWERED_BY|LED_TO]"):
+    rows = [{"petition": node, "acts": []}] if "OPTIONAL" in anchor else [{"p": node}]
+    return make_test_client(neo4j_client=_Neo4j({anchor: rows, "count(*) AS n": []}))
+
+
+def test_a_reader_gets_the_official_version_in_their_language_and_its_summary():
+    client = _client(VIDEOGAMES)
+    try:
+        p = client.get("/petitions/detail?petition_id=ECI(2024)000007&lang=fr").json()["petition"]
+        assert p["title"] == "Stop à la destruction des jeux vidéo"
+        assert p["objectives"] == "Obliger les éditeurs à laisser les jeux vidéo jouables."
+        assert p["title_original"] == "Stop Destroying Videogames"
+        assert p["summary"] == "Demande à l'UE de garder jouables les jeux vendus."
+        assert p["language_shown"] == "fr" and p["languages"] == ["de", "en", "fr"]
+        assert "objectives_fr" not in p and "objectives_summary_en" not in p
+    finally:
+        cleanup_dishka()
+
+
+def test_a_language_without_an_official_version_falls_back_to_english():
+    client = _client(VIDEOGAMES)
+    try:
+        p = client.get("/petitions/detail?petition_id=ECI(2024)000007&lang=pl").json()["petition"]
+        assert p["title"] == "Stop Destroying Videogames" and p["language_shown"] == "en"
+        assert p["summary"] == "Asks the EU to keep sold games playable."
+        de = client.get("/petitions/detail?petition_id=ECI(2024)000007&lang=de").json()["petition"]
+        assert de["title"].startswith("Stoppt") and de["objectives"] == OBJECTIVES
+    finally:
+        cleanup_dishka()
+
+
+def test_a_summary_of_objectives_since_changed_is_not_shown():
+    changed = {**VIDEOGAMES, "objectives": "The objectives as they read now."}
+    client = _client(changed)
+    try:
+        p = client.get("/petitions/detail?petition_id=ECI(2024)000007&lang=fr").json()["petition"]
+        assert p["summary"] is None
+    finally:
+        cleanup_dishka()
+
+
+def test_the_list_shows_titles_and_summaries_in_the_readers_language():
+    client = _client(VIDEOGAMES, anchor="ORDER BY coalesce(p.total_supporters, 0) DESC")
+    try:
+        (row,) = client.get("/petitions?lang=fr").json()["results"]
+        assert row["title"] == "Stop à la destruction des jeux vidéo"
+        assert row["summary"] == "Demande à l'UE de garder jouables les jeux vendus."
+        assert row["total_supporters"] == 1294188 and "objectives" not in row
+    finally:
+        cleanup_dishka()

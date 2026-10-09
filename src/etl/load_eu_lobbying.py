@@ -26,8 +26,17 @@ requests reach Fontem at **gdpr@fontem.eu**. When a registrant drops
 off the upstream daily dump the disclosure IRI is tombstoned; the
 sink does not retain "last seen" entries.
 
+What a registrant declares travels in full (2026-10-09 source review):
+every free-text field without a cut, the financial block of each kind of
+registrant (own interests: spend band and intermediaries; NGOs: budget,
+funding sources, contributors; consultancies: revenue band and clients),
+grants, staff, offices. Artifact-first, like the ECI loader: the day's XML
+is snapshotted to the NFS share before any event is emitted, and a snapshot
+can be replayed with --file. E-mail addresses inside free text are removed.
+
 Usage:
-    python -m src.etl.load_eu_lobbying
+    python -m src.etl.load_eu_lobbying              # download, snapshot, emit
+    python -m src.etl.load_eu_lobbying --file X     # replay a snapshot
 """
 
 from __future__ import annotations
@@ -35,14 +44,20 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
+import gzip
+import hashlib
+import json
 import logging
 import os
+import re
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Any
 
 import httpx
 import psycopg
+import pycountry
 from fontem_event_schemas import builders
 from fontem_events import EventLog
 
@@ -63,7 +78,7 @@ DESCRIPTION = DataDescription(
         "mandatory, and figures are as declared, not audited."
     ),
     upstream="EU Transparency Register",
-    update_freq="daily",
+    update_freq="weekly",
     answers=(
         "Who lobbies Brussels on a given interest, and what they declare spending",
         "Whether a company that wins public contracts also lobbies",
@@ -81,19 +96,59 @@ EMIT_CHUNK = 500
 # the kept history carries no personal data (GDPR).
 _REDACTED = "[deregistered]"
 
-# Country name normalization (TR uses full names, Company nodes use ISO).
-_COUNTRY_MAP = {
-    "UNITED STATES": "US", "UNITED KINGDOM": "GB", "GERMANY": "DEU",
-    "FRANCE": "FRA", "SPAIN": "ESP", "ITALY": "ITA", "NETHERLANDS": "NLD",
-    "BELGIUM": "BEL", "SWEDEN": "SWE", "AUSTRIA": "AUT", "DENMARK": "DNK",
-    "FINLAND": "FIN", "IRELAND": "IRL", "POLAND": "POL", "PORTUGAL": "PRT",
-    "CZECH REPUBLIC": "CZE", "ROMANIA": "ROU", "HUNGARY": "HUN",
-    "GREECE": "GRC", "LUXEMBOURG": "LUX", "CROATIA": "HRV", "BULGARIA": "BGR",
-    "SLOVAKIA": "SVK", "SLOVENIA": "SVN", "LITHUANIA": "LTU", "LATVIA": "LVA",
-    "ESTONIA": "EST", "MALTA": "MLT", "CYPRUS": "CYP", "SWITZERLAND": "CHE",
-    "NORWAY": "NOR", "JAPAN": "JPN", "CANADA": "CAN", "AUSTRALIA": "AUS",
-    "CHINA": "CHN", "INDIA": "IND", "BRAZIL": "BRA",
+#: The register's page for one registrant. The XML carries no link of its
+#: own; `webSiteURL` is the organisation's site.
+REGISTER_PAGE = ("https://transparency-register.europa.eu/search-register-or-update/"
+                 "organisation-detail_en?id={tr_id}")
+
+#: Register spellings pycountry does not resolve (2026-10-09: 7 of the 139
+#: head-office countries). Kosovo takes the code EU bodies use.
+_COUNTRY_OVERRIDES = {
+    "TURKEY": "TUR", "PALESTINE (*)": "PSE", "BOSNIA-HERZEGOVINA": "BIH",
+    "CONGO, DEMOCRATIC REPUBLIC OF": "COD", "LAOS, PEOPLE'S DEMOCRATIC REPUBLIC": "LAO",
+    "KOSOVO (*)": "XKX", "RUSSIA, FEDERATION OF": "RUS",
 }
+
+
+@functools.lru_cache(maxsize=None)
+def country_alpha3(name: str) -> str | None:
+    """ISO 3166-1 alpha-3 for a register country name, as Company nodes
+    carry it; None for a name nothing resolves. One table for every
+    registrant: it used to be ISO-3 for most, ISO-2 for the US and the UK,
+    and the raw name for 818."""
+    key = (name or "").strip().upper()
+    if not key:
+        return None
+    if key in _COUNTRY_OVERRIDES:
+        return _COUNTRY_OVERRIDES[key]
+    try:
+        return pycountry.countries.lookup(key.title()).alpha_3
+    except LookupError:
+        try:
+            return pycountry.countries.search_fuzzy(key.title())[0].alpha_3
+        except LookupError:
+            return None
+
+
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _free_text(text: str) -> str | None:
+    """A registrant's free text as it reads, without e-mail addresses (a
+    person's contact details have no business in a public profile)."""
+    text = (text or "").strip()
+    if not text or text.upper() in ("N/A", "NA", "-", "NOT APPLICABLE"):
+        return None
+    return _EMAIL.sub("[e-mail removed]", text)
+
+
+def _website(url: str) -> str | None:
+    """The organisation's site as a link: 'www.example.org' resolved against
+    fontem.eu as a relative path."""
+    url = (url or "").strip()
+    if not url:
+        return None
+    return url if re.match(r"^[a-z][a-z0-9+.-]*://", url, re.I) else f"https://{url}"
 
 
 def _text(elem: ET.Element | None, path: str) -> str:
@@ -104,101 +159,196 @@ def _text(elem: ET.Element | None, path: str) -> str:
     return (child.text or "").strip() if child is not None else ""
 
 
-# One local per XML field extracted from the lobbying record. The fields
-# are documented inline next to where each one is read — collapsing them
-# into a kwargs dict would erase the column headers.
-def _parse_cost_band(elem: ET.Element) -> tuple[int, int]:
-    """Closed-year lobbying spend band as ``(cost_min, cost_max)``.
-
-    The EU register doesn't validate the self-reported range, so
-    registrants occasionally transpose the bounds (min > max). Keep the
-    band well-ordered when both ends are present rather than returning an
-    inverted cost_max < cost_min. A missing bound stays 0 (dropped at
-    emit time).
-    """
-    cost_min = 0
-    cost_max = 0
-    fin = elem.find("financialData")
-    closed = fin.find("closedYear") if fin is not None else None
-    costs = closed.find("costs") if closed is not None else None
-    range_el = costs.find("range") if costs is not None else None
-    if range_el is not None:
-        try:
-            cost_max = int(_text(range_el, "max") or "0")
-        except ValueError:
-            pass
-        try:
-            cost_min = int(_text(range_el, "min") or "0")
-        except ValueError:
-            pass
-    if cost_min and cost_max:
-        cost_min, cost_max = min(cost_min, cost_max), max(cost_min, cost_max)
-    elif cost_min:
-        # Open-top bracket (e.g. ">= 10,000,000"): the register reports a
-        # lower bound and no upper one. Mirror it as [min, min] so the band
-        # is never inverted (cost_max=0 would read as cost_max < cost_min);
-        # the lower bound carries the signal.
-        cost_max = cost_min
-    return cost_min, cost_max
-
-
-def _parse_entity(elem: ET.Element) -> dict[str, Any]:  # pylint: disable=too-many-locals
-    """Parse an interestRepresentative XML element into a flat dict."""
-    tr_id = _text(elem, "identificationCode")
-    name_el = elem.find("name")
-    name = _text(name_el, "originalName") if name_el is not None else ""
-
-    head_office = elem.find("headOffice")
-    country = _text(head_office, "country") if head_office is not None else ""
-    city = _text(head_office, "city") if head_office is not None else ""
-
-    cost_min, cost_max = _parse_cost_band(elem)
-
-    ep_passes = 0
+def _num(elem: ET.Element | None, path: str, kind=float):
+    """A number at ``path``, or None where the register states none."""
+    raw = _text(elem, path)
+    if not raw:
+        return None
     try:
-        ep_passes = int(_text(elem, "EPAccreditedNumber") or "0")
+        return kind(float(raw))
     except ValueError:
-        pass
+        return None
 
-    members_fte = 0.0
-    members_el = elem.find("members")
-    if members_el is not None:
-        try:
-            members_fte = float(_text(members_el, "membersFTE") or "0")
-        except ValueError:
-            pass
 
-    interests = []
-    interests_el = elem.find("interests")
-    if interests_el is not None:
-        for interest in interests_el.findall("interest"):
-            interest_name = _text(interest, "name")
-            if interest_name:
-                interests.append(interest_name)
+def _band(elem: ET.Element | None) -> tuple[int | None, int | None]:
+    """A CostRange's (min, max), well-ordered when both are present.
 
-    return {
+    The register doesn't validate self-reported ranges: registrants
+    transpose the bounds now and then, so a transposed pair is put back in
+    order. An open-top bracket (">= 10,000,000") has a min and no max:
+    it is mirrored as [min, min], never read as max < min.
+    """
+    range_el = elem.find("range") if elem is not None else None
+    low, high = _num(range_el, "min", int), _num(range_el, "max", int)
+    if low and high:
+        return min(low, high), max(low, high)
+    if low:
+        return low, low
+    return low, high
+
+
+def _absolute(elem: ET.Element | None) -> float | None:
+    return _num(elem, "absoluteCost") if elem is not None else None
+
+
+#: closedYear/@type -> what kind of registrant files it.
+_FINANCIAL_TYPES = {
+    "ClosedYearIntermediaryFinancialInformation": "own_interests",
+    "ClosedYearNGOFinancialInformation": "ngo",
+    "ClosedYearClientFinancialInformation": "consultancy",
+}
+
+
+def _financial(fin: ET.Element | None) -> dict[str, Any]:  # pylint: disable=too-many-locals
+    """The financial block, whichever kind of registrant filed it, as
+    scalars and parallel lists. Amounts are as declared: some are
+    implausible (a €736bn budget) and are kept, not corrected."""
+    out: dict[str, Any] = {}
+    if fin is None:
+        return out
+    if (new := _text(fin, "newOrganisation")):
+        out["new_organisation"] = new == "true"
+    out["financial_complementary_info"] = _free_text(_text(fin, "complementaryInformation"))
+    closed, current = fin.find("closedYear"), fin.find("currentYear")
+    if closed is not None:
+        out["financial_type"] = _FINANCIAL_TYPES.get(closed.get("type") or "")
+        out["financial_year_start"] = _text(closed, "startDate")[:10] or None
+        out["financial_year_end"] = _text(closed, "endDate")[:10] or None
+        # Both ends of a band travel whenever either is stated, so a band
+        # that loses its lower end overwrites the stale one in the sink.
+        for field, tag in (("cost", "costs"), ("revenue", "totalAnnualRevenue")):
+            low, high = _band(closed.find(tag))
+            if low is not None or high is not None:
+                out[f"{field}_min"], out[f"{field}_max"] = low or 0, high or 0
+        out["total_budget_eur"] = _absolute(closed.find("totalBudget"))
+        out["other_source_info"] = _free_text(_text(closed, "otherSourceInfo"))
+        out["funding_sources"] = [_text(f, "source")
+                                  for f in closed.findall("fundingSources/fundingSource")
+                                  if _text(f, "source")]
+        contributors = closed.findall("contributions/contributor")
+        out["contributor_names"] = [_text(c, "name") for c in contributors]
+        out["contributor_amounts_eur"] = [_absolute(c.find("amount")) or 0.0 for c in contributors]
+        clients = closed.findall("clients/client")
+        out["client_names"] = [_text(c, "name") for c in clients]
+        out["client_proposals"] = [_free_text(_text(c, "proposal")) or "" for c in clients]
+        bands = [_band(c.find("revenue")) for c in clients]
+        out["client_revenue_min"] = [b[0] or 0 for b in bands]
+        out["client_revenue_max"] = [b[1] or 0 for b in bands]
+        intermediaries = closed.findall("intermediaries/intermediary")
+        out["intermediary_names"] = [_text(i, "name") for i in intermediaries]
+        costs = [_band(i.find("representationCosts")) for i in intermediaries]
+        out["intermediary_cost_min"] = [c[0] or 0 for c in costs]
+        out["intermediary_cost_max"] = [c[1] or 0 for c in costs]
+        grants = closed.findall("grants/grant")
+        out["grant_sources"] = [_text(g, "source") for g in grants]
+        out["grant_amounts_eur"] = [_absolute(g.find("amount")) or 0.0 for g in grants]
+    if current is not None:
+        out["client_names_current"] = [_text(c, "name") for c in current.findall("clients/client")]
+        out["intermediary_names_current"] = [
+            _text(i, "name") for i in current.findall("intermediaries/intermediary")]
+        grants = current.findall("grants/grant")
+        out["grant_sources_current"] = [_text(g, "source") for g in grants]
+        out["grant_amounts_eur_current"] = [_absolute(g.find("amount")) or 0.0 for g in grants]
+    return out
+
+
+#: A registrant who is a person, not an organisation: no postal details kept.
+_INDIVIDUAL = "self-employed"
+
+
+def _parse_entity(elem: ET.Element) -> dict[str, Any]:
+    """One interestRepresentative as a flat dict: scalars and lists, None
+    where the register states nothing, 0 where it states zero."""
+    tr_id = _text(elem, "identificationCode")
+    name_el, head, eu_office = elem.find("name"), elem.find("headOffice"), elem.find("EUOffice")
+    members, structure = elem.find("members"), elem.find("structure")
+    category = _text(elem, "registrationCategory")
+    person = _INDIVIDUAL in category.lower()
+    country = _text(head, "country")
+    groupings = _free_text(_text(elem, "interOrUnofficalGroupings"))
+    ent: dict[str, Any] = {
         "tr_id": tr_id,
-        "name": name,
-        "acronym": _text(elem, "acronym"),
-        "country": country,
-        "country_iso": _COUNTRY_MAP.get(country.upper(), country),
-        "city": city,
-        "category": _text(elem, "registrationCategory"),
-        "entity_form": _text(elem, "entityForm"),
-        "website": _text(elem, "webSiteURL"),
-        "goals": (_text(elem, "goals") or "")[:500],
-        "ep_passes": ep_passes,
-        "members_fte": members_fte,
-        "cost_min": cost_min,
-        "cost_max": cost_max,
-        "registration_date": _text(elem, "registrationDate")[:10],
-        "last_updated": _text(elem, "lastUpdateDate")[:10],
-        "interests": interests,
+        "name": _text(name_el, "originalName"),
+        "name_latin": _text(name_el, "nameInLatinAlphabet") or None,
+        "acronym": _text(elem, "acronym") or None,
+        "category": category or None,
+        "entity_form": _text(elem, "entityForm") or None,
+        "interest_represented": _text(elem, "interestRepresented") or None,
+        "website": _website(_text(elem, "webSiteURL")),
+        "country": country or None,
+        "country_iso": country_alpha3(country),
+        "city": _text(head, "city") or None,
+        "postcode": None if person else (_text(head, "postCode") or None),
+        "eu_office_city": _text(eu_office, "city") or None,
+        "eu_office_country": _text(eu_office, "country") or None,
+        "eu_office_postcode": None if person else (_text(eu_office, "postCode") or None),
+        "registration_date": _text(elem, "registrationDate")[:10] or None,
+        "last_updated": _text(elem, "lastUpdateDate")[:10] or None,
+        "goals": _free_text(_text(elem, "goals")),
+        "eu_legislative_proposals": _free_text(_text(elem, "EULegislativeProposals")),
+        "communication_activities": _free_text(_text(elem, "communicationActivities")),
+        "eu_forums_platforms": _free_text(_text(elem, "EUSupportedForumsAndPlatforms")),
+        "ep_intergroups": [g.strip() for g in (groupings or "").split(",") if g.strip()],
+        "member_of": _free_text(_text(structure, "isMemberOf")),
+        "organisation_members": _free_text(_text(structure, "organisationMembers")),
+        "members_info": _free_text(_text(members, "infoMembers")),
+        "levels_of_interest": [_text(level, "levelOfInterest") for level in
+                               elem.findall("levelsOfInterest/levelOfInterest")
+                               if _text(level, "levelOfInterest")],
+        "interests": [_text(i, "name") for i in elem.findall("interests/interest")
+                      if _text(i, "name")],
+        "ep_passes": _num(elem, "EPAccreditedNumber", int),
+        "persons_involved": _num(members, "members", int),
+        "members_fte": (round(fte, 2) if (fte := _num(members, "membersFTE")) is not None
+                        else None),
     }
+    for share in (10, 25, 50, 75, 100):
+        ent[f"persons_{share}pct"] = _num(members, f"members{share}Percent", int)
+    ent.update(_financial(elem.find("financialData")))
+    return ent
+
+
+def parse_register(xml_bytes: bytes) -> tuple[dict, list[dict]]:
+    """(export metadata, one dict per registrant) from the register's XML.
+    It is XML 1.1 with control-character references the parser refuses."""
+    xml_text = xml_bytes.decode("utf-8", errors="replace")
+    xml_text = re.sub(r"&#x[0-9a-fA-F]{1,2};", " ", xml_text)
+    xml_text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", xml_text)
+    xml_text = re.sub(r"^<\?xml version=['\"]1\.1['\"]", "<?xml version='1.0'", xml_text)
+    root = ET.fromstring(xml_text.encode("utf-8"))
+    for elem in root.iter():
+        elem.tag = elem.tag.split("}")[-1]
+    meta = root.find("metaData")
+    info = {"export_date": _text(meta, "exportDate"), "registrants": _text(meta, "numberOfIR")}
+    result_list = root.find("resultList")
+    entities = [] if result_list is None else [
+        e for e in (_parse_entity(x) for x in result_list if x.tag == "interestRepresentative")
+        if e["tr_id"]]
+    return info, entities
 
 
 def _disclosure_iri(tr_id: str) -> str:
     return f"http://data.fontem.eu/id/EuLobbyingDisclosure/{tr_id}"
+
+
+#: Lists that name people or organisations by name: blanked when a
+#: registrant leaves the register, like its own name.
+_NAMED_LISTS = ("contributor_names", "client_names", "client_names_current",
+                "intermediary_names", "intermediary_names_current")
+
+
+def _details(ent: dict, match: tuple[str, str, float] | None) -> dict[str, object]:
+    """What the disclosure carries: every stated value (0 and False are
+    stated values), every non-empty list."""
+    details: dict[str, object] = {
+        k: v for k, v in ent.items()
+        if k != "tr_id" and v is not None and v != "" and v != []
+    }
+    details["active"] = True
+    if match is not None:
+        details["registrant_match_tier"] = match[1]
+        details["registrant_match_confidence"] = float(match[2])
+    return details
 
 
 def emit_lobbyist_disclosures(
@@ -213,42 +363,17 @@ def emit_lobbyist_disclosures(
     with the disclosure's full composite key, so unlike a typed REPRESENTS
     relationship (which can't address a composite-keyed :Disclosure and so
     100%-dropped at the sink) it actually attaches.
+
+    The disclosure's ``url`` is its page on the register; the
+    organisation's own site is ``details.website``.
     """
     matches = matches or {}
     emitted = 0
-    chunk: list[dict] = []
-
-    def _flush(buf: list[dict]) -> int:
-        if not buf:
-            return 0
-        n = 0
+    todo = [e for e in entities if e.get("tr_id")]
+    for start in range(0, len(todo), EMIT_CHUNK):
         with log.batch(uuid.uuid4(), producer="load_eu_lobbying") as emit:
-            for ent in buf:
-                details: dict[str, object] = {}
-                for k in (
-                    "name", "acronym", "country", "country_iso",
-                    "city", "category", "entity_form", "website",
-                    "goals", "ep_passes", "members_fte",
-                    "registration_date", "last_updated",
-                ):
-                    v = ent.get(k)
-                    if v not in (None, "", 0, 0.0):
-                        details[k] = v
-                # Always emit both cost bounds together when either is present,
-                # so a shrunk bracket (the lower bound drops out across loads)
-                # overwrites a stale cost_min in the sink rather than leaving an
-                # inverted cost_max < cost_min. _parse_cost_band already orders
-                # a transposed pair; this closes the stale-lower-bound case.
-                if ent.get("cost_min") or ent.get("cost_max"):
-                    details["cost_min"] = ent.get("cost_min", 0)
-                    details["cost_max"] = ent.get("cost_max", 0)
-                if ent.get("interests"):
-                    details["interests"] = ent["interests"]
-                details["active"] = True
+            for ent in todo[start:start + EMIT_CHUNK]:
                 match = matches.get(ent["tr_id"])
-                if match is not None:
-                    details["registrant_match_tier"] = match[1]
-                    details["registrant_match_confidence"] = float(match[2])
                 emit.upsert(
                     "UpsertDisclosure",
                     iri=_disclosure_iri(ent["tr_id"]),
@@ -259,21 +384,11 @@ def emit_lobbyist_disclosures(
                         company_gmr_id=match[0] if match is not None else None,
                         disclosure_type="lobbyist-registration",
                         title=ent["name"][:200] or None,
-                        url=ent.get("website") or None,
-                        details=details or None,
+                        url=REGISTER_PAGE.format(tr_id=ent["tr_id"]),
+                        details=_details(ent, match),
                     ),
                 )
-                n += 1
-        return n
-
-    for ent in entities:
-        if not ent.get("tr_id"):
-            continue
-        chunk.append(ent)
-        if len(chunk) >= EMIT_CHUNK:
-            emitted += _flush(chunk)
-            chunk = []
-    emitted += _flush(chunk)
+                emitted += 1
     return emitted
 
 
@@ -361,7 +476,7 @@ def emit_deregistrations(
     upstream lawful basis we retain trends, not identities (GDPR).
     The eu-lobbying upsert still carries the :Lobbyist label via the
     sink, and the partial SET leaves detail_interests/category/etc.
-    untouched.
+    untouched. Lists that name people or organisations are blanked too.
     """
     if not dropped_ids:
         return 0
@@ -380,6 +495,13 @@ def emit_deregistrations(
                     details={
                         "name": _REDACTED,
                         "acronym": _REDACTED,
+                        "name_latin": _REDACTED,
+                        "postcode": _REDACTED,
+                        "eu_office_postcode": _REDACTED,
+                        "members_info": _REDACTED,
+                        # A list overwrites the old one only when it is not
+                        # empty (the sink drops empty lists).
+                        **{k: [_REDACTED] for k in _NAMED_LISTS},
                         "active": False,
                         "deregistered_at": deregistered_at,
                     },
@@ -389,43 +511,36 @@ def emit_deregistrations(
     return n
 
 
-def load_eu_lobbying(log: EventLog) -> dict:  # pylint: disable=too-many-locals
-    """Download TR XML and emit Lobbyist/REPRESENTS events."""
+def download_register() -> bytes:
     logger.info("Downloading EU Transparency Register XML from %s ...", TR_XML_URL)
-    with httpx.Client(timeout=120.0, follow_redirects=True,
-                      headers=HTTP_HEADERS) as client:
+    with httpx.Client(timeout=300.0, follow_redirects=True, headers=HTTP_HEADERS) as client:
         resp = client.get(TR_XML_URL)
         resp.raise_for_status()
-    xml_bytes = resp.content
-    logger.info("Downloaded %d MB", len(xml_bytes) // (1024 * 1024))
+    logger.info("Downloaded %d MB", len(resp.content) // (1024 * 1024))
+    return resp.content
 
-    # Clean invalid XML character references before parsing.
-    import re  # pylint: disable=import-outside-toplevel
-    xml_text = xml_bytes.decode("utf-8", errors="replace")
-    xml_text = re.sub(r"&#x[0-9a-fA-F]{1,2};", "", xml_text)
-    xml_text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", xml_text)
 
-    root = ET.fromstring(xml_text)
-    meta = root.find("metaData")
-    if meta is not None:
-        logger.info("Export date: %s, entities: %s",
-                    _text(meta, "exportDate"), _text(meta, "numberOfIR"))
+def write_artifact(xml_bytes: bytes, data_dir: str) -> str:
+    """The day's register, gzipped, with a sha256 manifest next to it."""
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, f"tr-{datetime.date.today().isoformat()}.xml.gz")
+    with gzip.open(path, "wb") as fh:
+        fh.write(xml_bytes)
+    with open(path, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()
+    with open(path.replace(".xml.gz", ".manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump({"file": os.path.basename(path), "sha256": digest,
+                   "bytes": len(xml_bytes)}, fh)
+    return path
 
-    result_list = root.find("resultList")
-    if result_list is None:
-        logger.error("No resultList found in XML")
-        return {"emitted": 0, "represents": {}}
 
-    entities: list[dict] = []
-    for elem in result_list:
-        tag = elem.tag.split("}")[-1]
-        if tag != "interestRepresentative":
-            continue
-        parsed = _parse_entity(elem)
-        if parsed["tr_id"]:
-            entities.append(parsed)
-
-    logger.info("Parsed %d lobbyist entities", len(entities))
+def load_eu_lobbying(log: EventLog, xml_bytes: bytes) -> dict:
+    """Emit the register: one UpsertDisclosure per registrant, linked to a
+    company where the resolver is confident, and a tombstone for each one
+    that has left it."""
+    info, entities = parse_register(xml_bytes)
+    logger.info("Export date: %s; %d registrants parsed (%s announced)",
+                info["export_date"], len(entities), info["registrants"])
 
     matches, rep_summary = resolve_lobbyist_companies(entities)
     emitted = emit_lobbyist_disclosures(log, entities, matches)
@@ -463,10 +578,19 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
         description="Emit EU Transparency Register events into the event log",
     )
-    parser.parse_args(argv)
+    parser.add_argument("--file", help="Replay a snapshot (tr-YYYY-MM-DD.xml.gz)")
+    args = parser.parse_args(argv)
+    if args.file:
+        with gzip.open(args.file, "rb") as fh:
+            xml_bytes = fh.read()
+        logger.info("Replaying snapshot %s", args.file)
+    else:
+        xml_bytes = download_register()
+        data_dir = os.environ.get("LOBBYING_DATA_DIR", "/edgar-data/lobbying")
+        logger.info("Snapshot written: %s", write_artifact(xml_bytes, data_dir))
     log = EventLog.from_env()
     try:
-        load_eu_lobbying(log)
+        load_eu_lobbying(log, xml_bytes)
     finally:
         log.close()
 
