@@ -127,7 +127,7 @@ def test_lookup_binds_the_property_name_and_buckets_by_key():
     assert out == {"contracts": {"k1": {"title": "Bypass", "original": "Obchvat"}},
                    "notices": {},
                    "cohesion": {"Q1": {"title": "Port", "original": "Luka"}},
-                   "authorities": {}}
+                   "authorities": {}, "buyers": {}}
     first, second = session.run.call_args_list
     # The language is a bound property name, never part of the text.
     assert first.kwargs == {"prop": "title_en", "keys": ["k1"]}
@@ -147,10 +147,41 @@ def test_an_authority_name_is_looked_up_by_its_name_property():
     assert "MATCH (a:Authority {authority_id: id})" in call.args[0]
 
 
+def test_a_briefing_buyer_is_looked_up_by_contract_key():
+    # A briefing card holds its buyer only as a name, and its contract key.
+    # The buyer is found from the key, picked as the public-contracts query
+    # picks it (the first by name among the current contract's buyers), and
+    # "original" is that name, so the caller can match it to the card's.
+    session = MagicMock()
+    session.run.return_value.data.return_value = [
+        {"key": "k1", "title": "Straßen- und Autobahndirektion",
+         "original": "Ředitelství silnic a dálnic s. p."}]
+    out = _source_with_session(session).get_title_translations(
+        "de", buyer_contract_keys=["k1", "k1"])
+    assert out["buyers"] == {"k1": {"title": "Straßen- und Autobahndirektion",
+                                    "original": "Ředitelství silnic a dálnic s. p."}}
+    call = session.run.call_args
+    assert call.kwargs == {"prop": "name_de", "keys": ["k1"]}
+    cypher = call.args[0]
+    assert "MATCH (a:Authority)-[:AWARDED]->(c:Contract {contract_key: key})" in cypher
+    assert "c.is_current = true" in cypher
+    assert "ORDER BY a.name" in cypher and "collect(DISTINCT a)[0]" in cypher
+
+
+def test_translations_endpoint_passes_the_buyer_keys():
+    source = MagicMock()
+    source.get_title_translations.return_value = {"buyers": {}}
+    client = make_test_client(contract_source=source)
+    client.post("/translations/titles", json={"lang": "de", "buyer_contract_keys": ["k1"]})
+    cleanup_dishka()
+    assert source.get_title_translations.call_args.kwargs["buyer_contract_keys"] == ["k1"]
+
+
 def test_lookup_with_nothing_to_look_up_runs_nothing():
     session = MagicMock()
     out = _source_with_session(session).get_title_translations("en")
-    assert out == {"contracts": {}, "notices": {}, "cohesion": {}, "authorities": {}}
+    assert out == {"contracts": {}, "notices": {}, "cohesion": {}, "authorities": {},
+                   "buyers": {}}
     session.run.assert_not_called()
 
 
@@ -168,7 +199,7 @@ def test_translations_endpoint():
     assert ok.json()["contracts"]["k1"]["title"] == "Bypass"
     assert source.get_title_translations.call_args.args == ("en",)
     assert unknown.json() == {"lang": None, "contracts": {}, "notices": {}, "cohesion": {},
-                              "authorities": {}}
+                              "authorities": {}, "buyers": {}}
     assert source.get_title_translations.call_count == 1
     assert too_many.status_code == 422
 

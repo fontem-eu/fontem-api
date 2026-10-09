@@ -54,18 +54,18 @@ class ContractDataSource(ABC):
         exists, else the original (and `title_original` when translated)."""
 
     @abstractmethod
-    def get_title_translations(
-        self, lang: str, *, contract_keys: list[str] | None = None,
-        notice_ids: list[str] | None = None,
-        cohesion_ids: list[str] | None = None,
-        authority_ids: list[str] | None = None,
-    ) -> dict:
-        """Translated titles, in `lang`, of the contracts and cohesion
+    def get_title_translations(self, lang: str, **asked: list[str] | None) -> dict:
+        """Asked by keyword: ``contract_keys``, ``notice_ids``,
+        ``cohesion_ids``, ``authority_ids``, ``buyer_contract_keys``.
+
+        Translated titles, in `lang`, of the contracts and cohesion
         grants named, and translated names of the authorities named:
         ``{"contracts": {contract_key: {...}}, "notices": {ted_notice_id:
         {...}}, "cohesion": {disclosure_id: {...}}, "authorities":
-        {authority_id: {...}}}``, each value ``{"title": <translation>,
-        "original": <stored title or name>}``.
+        {authority_id: {...}}, "buyers": {contract_key: {...}}}``, each
+        value ``{"title": <translation>, "original": <stored title or
+        name>}``. ``buyers`` is the buyer a briefing card names for that
+        contract: the first by name among its buyers.
         Only what has a translation in `lang` is returned; for everything
         else the caller keeps the text it already holds. For surfaces whose
         text is stored elsewhere (briefing items, the search index)."""

@@ -105,6 +105,8 @@ class TitleTranslationsRequest(BaseModel):
     notice_ids: list[str] = Field(default_factory=list, max_length=MAX_TRANSLATION_KEYS)
     cohesion_ids: list[str] = Field(default_factory=list, max_length=MAX_TRANSLATION_KEYS)
     authority_ids: list[str] = Field(default_factory=list, max_length=MAX_TRANSLATION_KEYS)
+    #: Contract keys whose buyer name a briefing card shows.
+    buyer_contract_keys: list[str] = Field(default_factory=list, max_length=MAX_TRANSLATION_KEYS)
 
 
 @router.post("/translations/titles")
@@ -123,10 +125,12 @@ def title_translations(
     """
     lang = safe_lang(body.lang)
     if lang is None:
-        return {"lang": None, "contracts": {}, "notices": {}, "cohesion": {}, "authorities": {}}
+        return {"lang": None, "contracts": {}, "notices": {}, "cohesion": {}, "authorities": {},
+                "buyers": {}}
     return {"lang": lang, **source.get_title_translations(
         lang, contract_keys=body.contract_keys, notice_ids=body.notice_ids,
         cohesion_ids=body.cohesion_ids, authority_ids=body.authority_ids,
+        buyer_contract_keys=body.buyer_contract_keys,
     )}
 
 
