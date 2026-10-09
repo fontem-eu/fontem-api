@@ -7,6 +7,10 @@ manual-review queue (Lobbying tab in EntityResolutionView).
 Weekly cadence — lobbyist registrations and updates trickle in
 slowly; daily would be wasteful.
 */}}
+{{- /* Artifact-first: the day's register XML is snapshotted to the share
+       before any event is emitted (replay with --file). */}}
+{{- $extra := list }}
+{{- $extra = append $extra (dict "name" "LOBBYING_DATA_DIR" "value" "/edgar-data/lobbying") }}
 {{- include "edgar-gmr-etl.cronjob" (dict
       "name"            "etl-eu-lobbying"
       "schedule"        "0 5 * * 1"
@@ -17,6 +21,7 @@ slowly; daily would be wasteful.
       "cpuLimit"        "1"
       "memRequest"      "512Mi"
       "memLimit"        "2Gi"
-      "extraEnv"        (list)
+      "extraEnv"        $extra
+      "needsEdgarDataRW" true
       "Values"          .Values
       "Release"         .Release) -}}

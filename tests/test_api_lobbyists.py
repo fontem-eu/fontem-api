@@ -171,12 +171,82 @@ def test_unknown_disclosure_id_is_404():
         cleanup_dishka()
 
 
-def test_register_url_is_kept_apart_from_the_org_website():
-    # They happen to coincide for some registrants; they are different
-    # claims and the page presents them differently.
+def test_the_register_link_opens_the_registrants_register_entry():
+    """Regression: the link read the stored `url`, which held the
+    organisation's own website for all 17,398 registrants that had one, so
+    "EU Transparency Register entry" opened janestreet.com."""
     client = make_test_client(neo4j_client=_Neo4j(JANE_STREET))
     try:
         d = client.get("/lobbyists/763743132433-49").json()
-        assert "register_url" in d and "website" in d
+        assert d["register_url"] == (
+            "https://transparency-register.europa.eu/search-register-or-update/"
+            "organisation-detail_en?id=763743132433-49")
+        assert d["website"] == "http://www.janestreet.com/"
     finally:
         cleanup_dishka()
+
+
+BRAUER = {
+    "disclosure_id": "9218245390-27",
+    "detail_name": "Beispiel Brauer-Bund e.V.",
+    "detail_goals": "Die Interessen der deutschen Brauwirtschaft vertreten.",
+    "detail_goals_lang": "de", "detail_goals_lang_origin": "detected",
+    "detail_goals_translated_from": "Die Interessen der deutschen Brauwirtschaft vertreten.",
+    "detail_goals_en": "Representing the interests of the German brewing industry.",
+    "detail_goals_fr": "Représenter les intérêts de la brasserie allemande.",
+    "detail_goals_summarized_from": "Die Interessen der deutschen Brauwirtschaft vertreten.",
+    "detail_goals_summary_de": "Vertritt die deutsche Brauwirtschaft.",
+    "detail_goals_summary_en": "Represents the German brewing industry.",
+    "detail_financial_type": "ngo", "detail_total_budget_eur": 1260031,
+    "detail_funding_sources": ["Member's contributions", "EU funding"],
+    "detail_contributor_names": ["Member breweries", "Foundation Example"],
+    "detail_contributor_amounts_eur": [820000, 0],
+    "detail_grant_sources": ["EU LIFE"], "detail_grant_amounts_eur": [82484],
+}
+
+
+def _get(node, path):
+    client = make_test_client(neo4j_client=_Neo4j(node))
+    try:
+        return client.get(path).json()
+    finally:
+        cleanup_dishka()
+
+
+def test_a_reader_gets_the_goals_and_their_summary_in_their_language():
+    d = _get(BRAUER, "/lobbyists/9218245390-27?lang=fr")
+    assert d["goals"] == "Représenter les intérêts de la brasserie allemande."
+    assert d["goals_original"].startswith("Die Interessen") and d["goals_lang"] == "de"
+    assert d["goals_translated"] is True
+    # No French summary yet: the one in the goals' own language stands in.
+    assert d["goals_summary"] == "Vertritt die deutsche Brauwirtschaft."
+    en = _get(BRAUER, "/lobbyists/9218245390-27?lang=en")
+    assert en["goals_summary"] == "Represents the German brewing industry."
+
+
+def test_a_reader_of_the_goals_own_language_gets_them_as_written():
+    d = _get(BRAUER, "/lobbyists/9218245390-27?lang=de")
+    assert d["goals"] == BRAUER["detail_goals"] and d["goals_translated"] is False
+    assert _get(BRAUER, "/lobbyists/9218245390-27")["goals"] == BRAUER["detail_goals"]
+
+
+def test_a_translation_of_goals_since_rewritten_is_not_shown():
+    rewritten = {**BRAUER, "detail_goals": "Wir vertreten heute auch alkoholfreie Getränke."}
+    d = _get(rewritten, "/lobbyists/9218245390-27?lang=en")
+    assert d["goals"] == "Wir vertreten heute auch alkoholfreie Getränke."
+    assert d["goals_translated"] is False and d["goals_summary"] is None
+
+
+def test_an_unknown_language_is_ignored():
+    d = _get(BRAUER, "/lobbyists/9218245390-27?lang=xx;drop")
+    assert d["goals"] == BRAUER["detail_goals"]
+
+
+def test_an_ngos_declared_finances_are_shown_as_declared():
+    f = _get(BRAUER, "/lobbyists/9218245390-27")["finances"]
+    assert f["type"] == "ngo" and f["total_budget_eur"] == 1260031
+    assert f["funding_sources"] == ["Member's contributions", "EU funding"]
+    assert f["contributors"] == [{"name": "Member breweries", "amount_eur": 820000},
+                                 {"name": "Foundation Example", "amount_eur": 0}]
+    assert f["grants"] == [{"source": "EU LIFE", "amount_eur": 82484}]
+    assert f["clients"] == [] and f["revenue"] is None

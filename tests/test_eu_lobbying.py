@@ -1,113 +1,146 @@
-"""Unit tests for the EU Lobbying Register parser."""
-import xml.etree.ElementTree as ET
+"""What the EU Transparency Register loader publishes, run as the cronjob
+runs it: a register file in, the events the platform receives out.
 
-from src.etl.load_eu_lobbying import _parse_entity, _text
+The fixture is the register's real shape (XML 1.1, namespaced, control
+characters escaped) with synthetic registrants: a company with its own
+interests, an NGO, a consultancy and a self-employed individual.
+"""
+from __future__ import annotations
 
+import gzip
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-SAMPLE_XML = """<interestRepresentative>
-  <identificationCode>12345678-90</identificationCode>
-  <registrationDate>2020-03-15T10:00:00.000+00:00</registrationDate>
-  <lastUpdateDate>2025-11-01T14:30:00.000+00:00</lastUpdateDate>
-  <name><originalName>Test Lobbyist Corp</originalName></name>
-  <acronym>TLC</acronym>
-  <entityForm>Company</entityForm>
-  <webSiteURL>https://example.com</webSiteURL>
-  <registrationCategory>In-house lobbyists</registrationCategory>
-  <headOffice>
-    <address>123 Rue de la Loi</address>
-    <postCode>1000</postCode>
-    <city>Brussels</city>
-    <country>BELGIUM</country>
-    <phone><indicPhone>32</indicPhone><phoneNumber>123456</phoneNumber></phone>
-  </headOffice>
-  <goals>Promoting transparency in EU legislation</goals>
-  <EPAccreditedNumber>3</EPAccreditedNumber>
-  <members><membersFTE>12.5</membersFTE></members>
-  <interests>
-    <interest><name>Digital economy and society</name></interest>
-    <interest><name>Research and innovation</name></interest>
-  </interests>
-  <financialData>
-    <closedYear>
-      <startDate>2024-01-01</startDate>
-      <endDate>2024-12-31</endDate>
-      <costs><range><min>100000</min><max>200000</max></range></costs>
-    </closedYear>
-  </financialData>
-</interestRepresentative>"""
+import pytest
+
+from src.etl import load_eu_lobbying
+
+REGISTER = (Path(__file__).parent / "fixtures" / "eu_lobbying" / "register.xml").read_bytes()
 
 
-def test_parse_entity_basic_fields():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert result["tr_id"] == "12345678-90"
-    assert result["name"] == "Test Lobbyist Corp"
-    assert result["acronym"] == "TLC"
-    assert result["country"] == "BELGIUM"
-    assert result["city"] == "Brussels"
-    assert result["category"] == "In-house lobbyists"
-    assert result["website"] == "https://example.com"
+def _publish(xml: bytes = REGISTER) -> dict[str, dict]:
+    """Run the loader on ``xml``; the UpsertDisclosure payloads by registrant."""
+    log, emit = MagicMock(), MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    with patch.object(load_eu_lobbying, "resolve_entity", return_value=None):
+        load_eu_lobbying.load_eu_lobbying(log, xml)
+    return {c.kwargs["payload"]["disclosure_id"]: c.kwargs["payload"]
+            for c in emit.upsert.call_args_list}
 
 
-def test_parse_entity_dates():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert result["registration_date"] == "2020-03-15"
-    assert result["last_updated"] == "2025-11-01"
+@pytest.fixture(name="published", scope="module")
+def _published():
+    return _publish()
 
 
-def test_parse_entity_ep_passes():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert result["ep_passes"] == 3
+def test_every_registrant_in_the_file_is_published(published):
+    assert set(published) == {"763743132433-49", "9218245390-27", "32689998126-75",
+                              "111222333444-55"}
+    assert all(p["system"] == "eu-lobbying" for p in published.values())
 
 
-def test_parse_entity_members_fte():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert result["members_fte"] == 12.5
+def test_a_registrants_link_opens_its_register_entry_not_its_website(published):
+    """Regression: `url` held the organisation's own site, so the page's
+    "EU Transparency Register entry" link opened that site instead."""
+    p = published["763743132433-49"]
+    assert p["url"] == ("https://transparency-register.europa.eu/search-register-or-update/"
+                        "organisation-detail_en?id=763743132433-49")
+    assert p["details"]["website"] == "https://www.example-trading.test"
 
 
-def test_parse_entity_financial_data():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert result["cost_min"] == 100000
-    assert result["cost_max"] == 200000
+def test_goals_arrive_in_full(published):
+    """They were cut at 500 characters: 65% of registrants lost the rest."""
+    goals = published["9218245390-27"]["details"]["goals"]
+    assert len(goals) > 1000 and goals.endswith("Steuerpolitik.")
 
 
-def test_parse_entity_interests():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert len(result["interests"]) == 2
-    assert "Digital economy and society" in result["interests"]
-    assert "Research and innovation" in result["interests"]
+def test_an_email_address_in_free_text_is_removed(published):
+    assert published["763743132433-49"]["details"]["goals"] == (
+        "A global trading firm. Questions: [e-mail removed].")
 
 
-def test_parse_entity_goals_truncated():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert len(result["goals"]) <= 500
+def test_a_count_of_zero_is_published_as_zero(published):
+    """A registrant whose accredited persons drop to 0 must not keep the old
+    count: zeros used to be left out, and the sink kept what it had."""
+    details = published["763743132433-49"]["details"]
+    assert details["ep_passes"] == 0
+    assert details["members_fte"] == 0.3            # float noise rounded
+    assert details["persons_involved"] == 3 and details["persons_10pct"] == 3
 
 
-def test_text_helper_missing_path():
-    elem = ET.fromstring("<root><child>value</child></root>")
-    assert _text(elem, "nonexistent") == ""
-    assert _text(elem, "child") == "value"
+def test_countries_come_as_alpha3_like_company_nodes(published):
+    by = {k: p["details"]["country_iso"] for k, p in published.items()}
+    assert by == {"763743132433-49": "USA", "9218245390-27": "DEU",
+                  "32689998126-75": "TUR", "111222333444-55": "BEL"}
 
 
-def test_text_helper_none_element():
-    assert _text(None, "anything") == ""
+def test_a_companys_spend_band_and_intermediaries_are_kept(published):
+    d = published["763743132433-49"]["details"]
+    assert (d["financial_type"], d["cost_min"], d["cost_max"]) == ("own_interests", 10000, 24999)
+    assert (d["financial_year_start"], d["financial_year_end"]) == ("2025-01-01", "2025-12-01")
+    assert d["intermediary_names"] == ["Example Advisers"]
+    assert (d["intermediary_cost_min"], d["intermediary_cost_max"]) == ([10000], [24999])
+    assert d["intermediary_names_current"] == ["Example Advisers"]
+    assert d["eu_legislative_proposals"].startswith("Financial services regulation")
+    assert d["levels_of_interest"] == ["european", "global"]
+    assert d["eu_office_city"] == "London" and d["eu_office_country"] == "UNITED KINGDOM"
+    assert "ep_intergroups" not in d                 # "N/A" is no grouping
 
 
-def test_parse_entity_country_iso():
-    elem = ET.fromstring(SAMPLE_XML)
-    result = _parse_entity(elem)
-    assert result["country_iso"] == "BEL"
+def test_an_ngos_budget_funding_and_grants_are_kept(published):
+    """32% of registrants that declare money do it here, and none of it
+    reached the platform."""
+    d = published["9218245390-27"]["details"]
+    assert d["financial_type"] == "ngo" and d["total_budget_eur"] == 1260031
+    assert d["funding_sources"] == ["Member's contributions", "EU funding"]
+    assert d["contributor_names"] == ["Member breweries", "Foundation Example"]
+    assert d["contributor_amounts_eur"] == [820000, 0]
+    assert (d["grant_sources"], d["grant_amounts_eur"]) == (["EU LIFE"], [82484])
+    assert (d["grant_sources_current"], d["grant_amounts_eur_current"]) == (["EU LIFE"], [62000])
+    assert d["ep_intergroups"] == ["Beer Club", "SME Intergroup"]
+    assert d["member_of"] == "The Brewers of Europe"
+    assert d["communication_activities"] == "Positionspapiere  und Konsultationsbeiträge."
+    assert d["financial_complementary_info"] == "Wir sind gemeinnützig."
 
 
-def test_parse_entity_country_iso_unknown():
-    """Unknown country keeps the original name."""
-    xml = SAMPLE_XML.replace("BELGIUM", "MORDOR")
-    elem = ET.fromstring(xml)
-    result = _parse_entity(elem)
-    assert result["country_iso"] == "MORDOR"
+def test_a_consultancys_revenue_and_clients_are_kept(published):
+    d = published["32689998126-75"]["details"]
+    assert (d["financial_type"], d["revenue_min"], d["revenue_max"]) == (
+        "consultancy", 1000000, 1249999)
+    assert d["client_names"] == ["Example Retail Holding", "Example Foods"]
+    assert d["client_proposals"] == ["Packaging and Packaging Waste Regulation", "Novel foods"]
+    assert (d["client_revenue_min"], d["client_revenue_max"]) == ([0, 10000], [10000, 24999])
+    assert d["client_names_current"] == ["Example Retail Holding"]
+    assert "cost_min" not in d                        # a consultancy declares no spend band
+
+
+def test_a_self_employed_individual_keeps_no_postal_details(published):
+    d = published["111222333444-55"]["details"]
+    assert d["city"] == "Brussels" and "postcode" not in d
+    assert d["goals"] == "Independent adviser on rural development."
+
+
+def test_a_registrant_who_leaves_has_its_names_blanked_and_its_record_kept():
+    log, emit = MagicMock(), MagicMock()
+    log.batch.return_value.__enter__ = MagicMock(return_value=emit)
+    log.batch.return_value.__exit__ = MagicMock(return_value=False)
+    load_eu_lobbying.emit_deregistrations(log, {"9218245390-27"}, "2026-10-09")
+    d = emit.upsert.call_args.kwargs["payload"]["details"]
+    assert d["active"] is False and d["name"] == "[deregistered]"
+    for named in ("contributor_names", "client_names", "intermediary_names"):
+        assert d[named] == ["[deregistered]"]
+    assert "goals" not in d and "interests" not in d          # the record stays
+
+
+def test_a_snapshot_replays_to_the_same_events(tmp_path, monkeypatch):
+    """Artifact first: the day's file is kept, and --file replays it."""
+    path = load_eu_lobbying.write_artifact(REGISTER, str(tmp_path))
+    assert Path(path).name.startswith("tr-") and Path(path).with_suffix("").exists() is False
+    assert (tmp_path / Path(path).name.replace(".xml.gz", ".manifest.json")).exists()
+    seen = {}
+    monkeypatch.setattr(load_eu_lobbying.EventLog, "from_env", classmethod(lambda cls: MagicMock()))
+    monkeypatch.setattr(load_eu_lobbying, "load_eu_lobbying",
+                        lambda _log, xml: seen.setdefault("xml", xml))
+    load_eu_lobbying.main(["--file", path])
+    assert seen["xml"] == REGISTER == gzip.decompress(Path(path).read_bytes())

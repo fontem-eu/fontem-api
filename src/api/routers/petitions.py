@@ -10,23 +10,48 @@ endpoint takes query params rather than path segments.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Annotated, Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
+from src.api.lang import EU_LANGS, safe_lang
 from src.data.graph.neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/petitions", tags=["petitions"])
 
-_LIST_FIELDS = (
-    "p.system AS system, p.petition_id AS petition_id, p.title AS title, "
-    "p.status AS status, p.total_supporters AS total_supporters, "
-    "p.registration_date AS registration_date, "
-    "p.answered_date AS answered_date, p.latest_update AS latest_update"
-)
+#: The list's columns, besides the texts _localised picks.
+_LIST_COLUMNS = ("system", "petition_id", "status", "total_supporters",
+                 "registration_date", "answered_date", "latest_update")
+
+#: Per-language properties: read through _localised, not returned raw.
+_PER_LANGUAGE = re.compile(r"^(?:title|objectives|annex_text|objectives_summary)_[a-z]{2}$")
+
+
+def _localised(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
+    """The petition's texts in the reader's language, beside the original.
+
+    Title, objectives and annex come from the register's official
+    versions (title_<lang>, ...); the summary is machine-written, from the
+    English objectives, and shown only while it summarises them as they
+    read now. Without a version in ``lang``, the English one stands."""
+    out = {k: v for k, v in node.items() if not _PER_LANGUAGE.match(k)}
+    shown = lang if lang and node.get(f"title_{lang}") else None
+    original = node.get("title_lang")
+    for field in ("title", "objectives", "annex_text"):
+        if shown and node.get(f"{field}_{shown}"):
+            out[field] = node[f"{field}_{shown}"]
+        out[f"{field}_original"] = (node.get(f"{field}_{original}") if original else None) \
+            or node.get(field)
+    fresh = node.get("objectives_summarized_from") == node.get("objectives")
+    out["summary"] = ((node.get(f"objectives_summary_{lang}") if lang else None)
+                      or node.get("objectives_summary_en")) if fresh else None
+    out["language_shown"] = shown or "en"
+    out["languages"] = sorted(code for code in EU_LANGS if node.get(f"title_{code}"))
+    return out
 
 # Ordering variants. ``supporters`` (the default) keeps the original clause
 # verbatim; ``recent`` surfaces the most recently registered petition first,
@@ -66,15 +91,17 @@ def _parse_statuses(raw: str | None) -> list[str] | None:
 @router.get("")
 @inject
 def list_petitions(  # pylint: disable=too-many-arguments
+    *,
     status: Annotated[str | None, Query(max_length=_MAX_STATUS_LEN)] = None,
     statuses: Annotated[str | None, Query(max_length=500)] = None,
     sort: Annotated[str, Query(pattern="^(supporters|recent)$")] = "supporters",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
-    *,
+    lang: Annotated[str | None, Query(max_length=10)] = None,
     neo4j: FromDishka[Neo4jClient],
 ) -> dict[str, Any]:
-    """Petitions with per-status counts for the filter chips.
+    """Petitions with per-status counts for the filter chips; each with its
+    title and summary in the reader's ``lang`` where there is one.
 
     ``statuses`` (comma-separated, exact register vocabulary) filters on a set
     and takes precedence over the single ``status``; ``sort`` picks the order
@@ -98,7 +125,7 @@ def list_petitions(  # pylint: disable=too-many-arguments
         rows = session.run(
             "MATCH (p:Petition) "
             f"{where} "
-            f"RETURN {_LIST_FIELDS} "
+            "RETURN properties(p) AS p "
             f"{order} "
             "SKIP $offset LIMIT $limit",
             offset=offset, limit=limit, **params,
@@ -106,8 +133,16 @@ def list_petitions(  # pylint: disable=too-many-arguments
     return {
         "counts": counts,
         "total": sum(counts.values()),
-        "results": rows,
+        "results": [_list_row(row["p"], safe_lang(lang)) for row in rows],
     }
+
+
+def _list_row(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
+    """One petition as the list shows it, title and summary localised."""
+    local = _localised(node, lang)
+    return {**{k: local.get(k) for k in _LIST_COLUMNS},
+            "title": local.get("title"), "title_original": local.get("title_original"),
+            "summary": local.get("summary"), "language_shown": local.get("language_shown")}
 
 
 @router.get(
@@ -118,10 +153,12 @@ def list_petitions(  # pylint: disable=too-many-arguments
 def petition_detail(
     petition_id: Annotated[str, Query(min_length=3, max_length=60)],
     system: Annotated[str, Query(max_length=40)] = "eu-eci",
+    lang: Annotated[str | None, Query(max_length=10)] = None,
     *,
     neo4j: FromDishka[Neo4jClient],
 ) -> dict[str, Any]:
-    """One petition with its linked legislation.
+    """One petition with its linked legislation, its texts in the reader's
+    ``lang`` where the register publishes that version.
 
     Legislation buckets: REGISTERED_BY (the registration decision),
     ANSWERED_BY (the Commission's answer document) and LED_TO
@@ -141,7 +178,7 @@ def petition_detail(
         ).data()
     if not rows:
         raise HTTPException(status_code=404, detail="petition not found")
-    petition = dict(rows[0]["petition"])
+    petition = _localised(dict(rows[0]["petition"]), safe_lang(lang))
     acts = [a for a in rows[0]["acts"] if a.get("celex")]
     for a in acts:
         a["eurlex_url"] = (

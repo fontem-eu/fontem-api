@@ -1,0 +1,91 @@
+<?xml version='1.1' encoding='UTF-8'?>
+<ListOfIRPublicDetail xmlns="http://intragate.ec.europa.eu/transparencyregister/odp">
+  <metaData xmlns="">
+    <exportDate>2026-10-08T20:00:00.072+00:00</exportDate>
+    <numberOfIR>4</numberOfIR>
+  </metaData>
+  <resultList xmlns="">
+    <interestRepresentative>
+      <identificationCode>763743132433-49</identificationCode>
+      <registrationDate>2018-08-28T19:04:15.695+00:00</registrationDate>
+      <lastUpdateDate>2026-09-02T09:24:24.315+00:00</lastUpdateDate>
+      <name><originalName>Example Trading Group</originalName></name>
+      <acronym>ETG</acronym>
+      <entityForm>Limited liability company</entityForm>
+      <webSiteURL>www.example-trading.test</webSiteURL>
+      <registrationCategory>Companies &amp; groups</registrationCategory>
+      <headOffice><address>250 Example Street</address><postCode>10281</postCode><city>New York</city><country>UNITED STATES</country><phone><indicPhone>1</indicPhone><phoneNumber>5550100</phoneNumber></phone></headOffice>
+      <EUOffice><address>2 Example Square</address><postCode>EC2M 4UJ</postCode><city>London</city><country>UNITED KINGDOM</country></EUOffice>
+      <goals>A global trading firm. Questions: policy@example-trading.test.</goals>
+      <levelsOfInterest><levelOfInterest><levelOfInterest>european</levelOfInterest></levelOfInterest><levelOfInterest><levelOfInterest>global</levelOfInterest></levelOfInterest></levelsOfInterest>
+      <EULegislativeProposals>Financial services regulation, MiFID II review.</EULegislativeProposals>
+      <interOrUnofficalGroupings>N/A</interOrUnofficalGroupings>
+      <members><members10Percent>3</members10Percent><members>3.0</members><membersFTE>0.30000001192092896</membersFTE><infoMembers>Two full time employees.</infoMembers></members>
+      <EPAccreditedNumber>0</EPAccreditedNumber>
+      <interests><interest><name>Banking and financial services</name></interest></interests>
+      <structure type="Structure"><isMemberOf>Not applicable</isMemberOf><organisationMembers>Example Traders Association</organisationMembers></structure>
+      <interestRepresented>Promotes their own interests or the collective interests of their members</interestRepresented>
+      <financialData><newOrganisation>false</newOrganisation>
+        <closedYear type="ClosedYearIntermediaryFinancialInformation"><startDate>2025-01-01</startDate><endDate>2025-12-01</endDate>
+          <intermediaries><intermediary><name>Example Advisers</name><representationCosts type="CostRange" currency="€"><range><min>10000</min><max>24999</max></range></representationCosts></intermediary></intermediaries>
+          <costs type="CostRange" currency="€"><range><min>24999</min><max>10000</max></range></costs><grants/></closedYear>
+        <currentYear type="CurrentYearIntermediaryFinancialInformation"><intermediaries><intermediary><name>Example Advisers</name></intermediary></intermediaries><grants/></currentYear>
+      </financialData>
+    </interestRepresentative>
+    <interestRepresentative>
+      <identificationCode>9218245390-27</identificationCode>
+      <registrationDate>2012-01-10T10:00:00.000+00:00</registrationDate>
+      <lastUpdateDate>2026-10-01T08:00:00.000+00:00</lastUpdateDate>
+      <name><originalName>Beispiel Brauer-Bund e.V.</originalName></name>
+      <entityForm>eingetragener Verein</entityForm>
+      <webSiteURL>https://brauer.example.test/</webSiteURL>
+      <registrationCategory>Trade and business associations</registrationCategory>
+      <headOffice><address>Beispielstraße 1</address><postCode>10117</postCode><city>Berlin</city><country>GERMANY</country></headOffice>
+      <goals>Wir vertreten die Interessen der deutschen Brauwirtschaft gegenüber den Organen der Europäischen Union, insbesondere in der Agrar-, Umwelt-, Verbraucher- und Steuerpolitik. Wir vertreten die Interessen der deutschen Brauwirtschaft gegenüber den Organen der Europäischen Union, insbesondere in der Agrar-, Umwelt-, Verbraucher- und Steuerpolitik. Wir vertreten die Interessen der deutschen Brauwirtschaft gegenüber den Organen der Europäischen Union, insbesondere in der Agrar-, Umwelt-, Verbraucher- und Steuerpolitik. Wir vertreten die Interessen der deutschen Brauwirtschaft gegenüber den Organen der Europäischen Union, insbesondere in der Agrar-, Umwelt-, Verbraucher- und Steuerpolitik. Wir vertreten die Interessen der deutschen Brauwirtschaft gegenüber den Organen der Europäischen Union, insbesondere in der Agrar-, Umwelt-, Verbraucher- und Steuerpolitik. Wir vertreten die Interessen der deutschen Brauwirtschaft gegenüber den Organen der Europäischen Union, insbesondere in der Agrar-, Umwelt-, Verbraucher- und Steuerpolitik. </goals>
+      <communicationActivities>Positionspapiere&#x2; und Konsultationsbeiträge.</communicationActivities>
+      <interOrUnofficalGroupings>Beer Club, SME Intergroup</interOrUnofficalGroupings>
+      <members><members25Percent>2</members25Percent><members>2.0</members><membersFTE>0.5</membersFTE></members>
+      <EPAccreditedNumber>2</EPAccreditedNumber>
+      <interests><interest><name>Agriculture and rural development</name></interest><interest><name>Taxation</name></interest></interests>
+      <structure type="Structure"><isMemberOf>The Brewers of Europe</isMemberOf></structure>
+      <interestRepresented>Does not represent commercial interests</interestRepresented>
+      <financialData><newOrganisation>false</newOrganisation>
+        <closedYear type="ClosedYearNGOFinancialInformation"><startDate>2024-01-01</startDate><endDate>2024-12-01</endDate>
+          <fundingSources><fundingSource><source>Member's contributions</source></fundingSource><fundingSource><source>EU funding</source></fundingSource></fundingSources>
+          <contributions><contributor><name>Member breweries</name><amount type="AbsoluteCost" currency="€"><absoluteCost>820000</absoluteCost></amount></contributor><contributor><name>Foundation Example</name><amount type="AbsoluteCost" currency="€"><absoluteCost>0</absoluteCost></amount></contributor></contributions>
+          <totalBudget type="AbsoluteCost" currency="€"><absoluteCost>1260031</absoluteCost></totalBudget>
+          <grants><grant><source>EU LIFE</source><amount type="AbsoluteCost" currency="€"><absoluteCost>82484</absoluteCost></amount></grant></grants></closedYear>
+        <currentYear type="CurrentYearNGOFinancialInformation"><grants><grant><source>EU LIFE</source><amount type="AbsoluteCost" currency="€"><absoluteCost>62000</absoluteCost></amount></grant></grants></currentYear>
+        <complementaryInformation>Wir sind gemeinnützig.</complementaryInformation>
+      </financialData>
+    </interestRepresentative>
+    <interestRepresentative>
+      <identificationCode>32689998126-75</identificationCode>
+      <registrationDate>2012-02-21T17:16:48.352+00:00</registrationDate>
+      <lastUpdateDate>2026-10-06T09:12:47.524+00:00</lastUpdateDate>
+      <name><originalName>Example Public Policy</originalName></name>
+      <entityForm>SRL</entityForm>
+      <webSiteURL>example-policy.test</webSiteURL>
+      <registrationCategory>Professional consultancies</registrationCategory>
+      <headOffice><city>Ankara</city><country>TURKEY</country></headOffice>
+      <goals>Shaping change for our clients.</goals>
+      <EPAccreditedNumber>1</EPAccreditedNumber>
+      <interestRepresented>Advances interests of their clients</interestRepresented>
+      <financialData><newOrganisation>false</newOrganisation>
+        <closedYear type="ClosedYearClientFinancialInformation"><startDate>2024-01-01</startDate><endDate>2024-12-01</endDate>
+          <clients><client><name>Example Retail Holding</name><revenue type="CostRange" currency="€"><range><max>10000</max></range></revenue><proposal>Packaging and Packaging Waste Regulation</proposal></client><client><name>Example Foods</name><revenue type="CostRange" currency="€"><range><min>10000</min><max>24999</max></range></revenue><proposal>Novel foods</proposal></client></clients>
+          <totalAnnualRevenue type="CostRange" currency="€"><range><min>1000000</min><max>1249999</max></range></totalAnnualRevenue></closedYear>
+        <currentYear type="CurrentYearClientFinancialInformation"><clients><client><name>Example Retail Holding</name></client></clients></currentYear>
+      </financialData>
+    </interestRepresentative>
+    <interestRepresentative>
+      <identificationCode>111222333444-55</identificationCode>
+      <registrationDate>2025-03-01T10:00:00.000+00:00</registrationDate>
+      <lastUpdateDate>2025-03-01T10:00:00.000+00:00</lastUpdateDate>
+      <name><originalName>A. N. Example</originalName></name>
+      <registrationCategory>Self-employed individuals</registrationCategory>
+      <headOffice><address>Private address 7</address><postCode>1000</postCode><city>Brussels</city><country>BELGIUM</country></headOffice>
+      <goals>Independent adviser on rural development.</goals>
+    </interestRepresentative>
+  </resultList>
+</ListOfIRPublicDetail>
