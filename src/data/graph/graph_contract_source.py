@@ -481,6 +481,20 @@ class GraphContractSource(ContractDataSource):
         "WHERE a[$prop] IS NOT NULL "
         "RETURN id AS key, a[$prop] AS title, a.name AS original"
     )
+    # The buyer a briefing card names: the card keeps only the name, as
+    # text, and its contract key. Picked the way the public-contracts
+    # query picks it — the first by name among the current contract's
+    # buyers — so "original" is the name the card holds, and the caller
+    # can check that before it swaps anything.
+    _BUYER_NAMES_BY_CONTRACT_KEY = (
+        "UNWIND $keys AS key "
+        "MATCH (a:Authority)-[:AWARDED]->(c:Contract {contract_key: key}) "
+        "WHERE c.is_current = true "
+        "WITH key, a ORDER BY a.name "
+        "WITH key, collect(DISTINCT a)[0] AS a "
+        "WHERE a[$prop] IS NOT NULL "
+        "RETURN key, a[$prop] AS title, a.name AS original"
+    )
 
     #: bucket -> (query, its list parameter, the property translated). The
     #: translation of a title is title_<lang>; of an authority, name_<lang>.
@@ -489,6 +503,7 @@ class GraphContractSource(ContractDataSource):
         ("notices", _TITLES_BY_NOTICE_ID, "ids", "title"),
         ("cohesion", _TITLES_BY_DISCLOSURE_ID, "ids", "title"),
         ("authorities", _NAMES_BY_AUTHORITY_ID, "ids", "name"),
+        ("buyers", _BUYER_NAMES_BY_CONTRACT_KEY, "keys", "name"),
     )
 
     def get_title_translations(
@@ -496,9 +511,11 @@ class GraphContractSource(ContractDataSource):
         notice_ids: list[str] | None = None,
         cohesion_ids: list[str] | None = None,
         authority_ids: list[str] | None = None,
+        buyer_contract_keys: list[str] | None = None,
     ) -> dict:
         asked = {"contracts": contract_keys, "notices": notice_ids,
-                 "cohesion": cohesion_ids, "authorities": authority_ids}
+                 "cohesion": cohesion_ids, "authorities": authority_ids,
+                 "buyers": buyer_contract_keys}
         out: dict = {bucket: {} for bucket in asked}
         with self._neo4j.session() as session:
             for bucket, query, param, field in self._LOOKUPS:
