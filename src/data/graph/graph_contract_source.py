@@ -496,30 +496,25 @@ class GraphContractSource(ContractDataSource):
         "RETURN key, a[$prop] AS title, a.name AS original"
     )
 
-    #: bucket -> (query, its list parameter, the property translated). The
-    #: translation of a title is title_<lang>; of an authority, name_<lang>.
+    #: bucket -> (the keyword it is asked by, query, its list parameter, the
+    #: property translated). The translation of a title is title_<lang>; of
+    #: an authority (and of a buyer), name_<lang>.
     _LOOKUPS = (
-        ("contracts", _TITLES_BY_CONTRACT_KEY, "keys", "title"),
-        ("notices", _TITLES_BY_NOTICE_ID, "ids", "title"),
-        ("cohesion", _TITLES_BY_DISCLOSURE_ID, "ids", "title"),
-        ("authorities", _NAMES_BY_AUTHORITY_ID, "ids", "name"),
-        ("buyers", _BUYER_NAMES_BY_CONTRACT_KEY, "keys", "name"),
+        ("contracts", "contract_keys", _TITLES_BY_CONTRACT_KEY, "keys", "title"),
+        ("notices", "notice_ids", _TITLES_BY_NOTICE_ID, "ids", "title"),
+        ("cohesion", "cohesion_ids", _TITLES_BY_DISCLOSURE_ID, "ids", "title"),
+        ("authorities", "authority_ids", _NAMES_BY_AUTHORITY_ID, "ids", "name"),
+        ("buyers", "buyer_contract_keys", _BUYER_NAMES_BY_CONTRACT_KEY, "keys", "name"),
     )
 
-    def get_title_translations(
-        self, lang: str, *, contract_keys: list[str] | None = None,
-        notice_ids: list[str] | None = None,
-        cohesion_ids: list[str] | None = None,
-        authority_ids: list[str] | None = None,
-        buyer_contract_keys: list[str] | None = None,
-    ) -> dict:
-        asked = {"contracts": contract_keys, "notices": notice_ids,
-                 "cohesion": cohesion_ids, "authorities": authority_ids,
-                 "buyers": buyer_contract_keys}
-        out: dict = {bucket: {} for bucket in asked}
+    def get_title_translations(self, lang: str, **asked: list[str] | None) -> dict:
+        unknown = set(asked) - {row[1] for row in self._LOOKUPS}
+        if unknown:
+            raise TypeError(f"get_title_translations: unknown lookups {sorted(unknown)}")
+        out: dict = {row[0]: {} for row in self._LOOKUPS}
         with self._neo4j.session() as session:
-            for bucket, query, param, field in self._LOOKUPS:
-                wanted = sorted({v for v in asked[bucket] or () if v})
+            for bucket, keyword, query, param, field in self._LOOKUPS:
+                wanted = sorted({v for v in asked.get(keyword) or () if v})
                 if not wanted:
                     continue
                 for r in session.run(query, prop=f"{field}_{lang}", **{param: wanted}).data():

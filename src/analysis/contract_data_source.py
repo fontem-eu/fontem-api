@@ -54,14 +54,11 @@ class ContractDataSource(ABC):
         exists, else the original (and `title_original` when translated)."""
 
     @abstractmethod
-    def get_title_translations(
-        self, lang: str, *, contract_keys: list[str] | None = None,
-        notice_ids: list[str] | None = None,
-        cohesion_ids: list[str] | None = None,
-        authority_ids: list[str] | None = None,
-        buyer_contract_keys: list[str] | None = None,
-    ) -> dict:
-        """Translated titles, in `lang`, of the contracts and cohesion
+    def get_title_translations(self, lang: str, **asked: list[str] | None) -> dict:
+        """Asked by keyword: ``contract_keys``, ``notice_ids``,
+        ``cohesion_ids``, ``authority_ids``, ``buyer_contract_keys``.
+
+        Translated titles, in `lang`, of the contracts and cohesion
         grants named, and translated names of the authorities named:
         ``{"contracts": {contract_key: {...}}, "notices": {ted_notice_id:
         {...}}, "cohesion": {disclosure_id: {...}}, "authorities":
