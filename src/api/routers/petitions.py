@@ -46,9 +46,10 @@ def _localised(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
             out[field] = node[f"{field}_{shown}"]
         out[f"{field}_original"] = (node.get(f"{field}_{original}") if original else None) \
             or node.get(field)
-    fresh = node.get("objectives_summarized_from") == node.get("objectives")
-    out["summary"] = ((node.get(f"objectives_summary_{lang}") if lang else None)
-                      or node.get("objectives_summary_en")) if fresh else None
+    out["summary"] = None
+    if node.get("objectives_summarized_from") == node.get("objectives"):
+        in_lang = node.get(f"objectives_summary_{lang}") if lang else None
+        out["summary"] = in_lang or node.get("objectives_summary_en")
     out["language_shown"] = shown or "en"
     out["languages"] = sorted(code for code in EU_LANGS if node.get(f"title_{code}"))
     return out

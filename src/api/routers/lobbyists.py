@@ -15,7 +15,7 @@ referenced the latter two.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
@@ -161,7 +161,7 @@ def _profile(node: dict[str, Any], filed_for: list[dict],
 @inject
 def lobbyist_detail(
     disclosure_id: str,
-    lang: str | None = Query(None),
+    lang: Annotated[str | None, Query(max_length=10)] = None,
     *,
     neo4j: FromDishka[Neo4jClient],
 ) -> dict[str, Any]:
