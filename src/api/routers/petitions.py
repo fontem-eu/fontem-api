@@ -54,6 +54,36 @@ def _localised(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
     out["languages"] = sorted(code for code in EU_LANGS if node.get(f"title_{code}"))
     return out
 
+
+def petition_cards(session, ids: list[str], lang: str | None) -> dict[str, dict[str, Any]]:
+    """What a search card shows of each petition, by petition_id: its title
+    and summary as `_localised` picks them."""
+    rows = session.run("MATCH (p:Petition) WHERE p.petition_id IN $ids "
+                       "RETURN properties(p) AS p", ids=sorted(set(ids))).data()
+    cards = {}
+    for row in rows:
+        local = _localised(row["p"], lang)
+        cards[row["p"]["petition_id"]] = {
+            "title": local.get("title"), "title_original": local.get("title_original"),
+            "summary": local.get("summary")}
+    return cards
+
+
+#: EUR-Lex publishes every act in each of the EU's languages, at this page.
+EURLEX_PAGE = "https://eur-lex.europa.eu/legal-content/{lang}/TXT/?uri=CELEX:{celex}"
+
+
+def _act(rel: str | None, act: dict[str, Any], lang: str | None) -> dict[str, Any]:
+    """A linked act, titled in the reader's language where the graph holds
+    that title (EUR-Lex's English and French ones), else in English, and
+    linked to its EUR-Lex page in the reader's language either way."""
+    shown = lang if lang and act.get(f"title_{lang}") else "en"
+    return {"rel": rel, "celex": act["celex"],
+            "title": act.get(f"title_{shown}") or act.get("title_en"), "title_lang": shown,
+            "title_en": act.get("title_en"), "title_fr": act.get("title_fr"),
+            "date": act.get("date_document"), "doc_type": act.get("doc_type"),
+            "eurlex_url": EURLEX_PAGE.format(lang=(lang or "en").upper(), celex=act["celex"])}
+
 # Ordering variants. ``supporters`` (the default) keeps the original clause
 # verbatim; ``recent`` surfaces the most recently registered petition first,
 # tie-breaking on supporters so the order is deterministic.
@@ -159,7 +189,8 @@ def petition_detail(
     neo4j: FromDishka[Neo4jClient],
 ) -> dict[str, Any]:
     """One petition with its linked legislation, its texts in the reader's
-    ``lang`` where the register publishes that version.
+    ``lang`` where the register publishes that version, and each act's
+    title in it where the graph holds one (see `_act`).
 
     Legislation buckets: REGISTERED_BY (the registration decision),
     ANSWERED_BY (the Commission's answer document) and LED_TO
@@ -172,20 +203,16 @@ def petition_detail(
             "MATCH (p:Petition {system: $system, petition_id: $pid}) "
             "OPTIONAL MATCH (p)-[r:REGISTERED_BY|ANSWERED_BY|LED_TO]"
             "->(a:LegalAct) "
-            "RETURN p AS petition, collect({rel: type(r), celex: a.celex, "
-            "  title_en: a.title_en, title_fr: a.title_fr, "
-            "  date: a.date_document, doc_type: a.doc_type}) AS acts",
+            "RETURN p AS petition, "
+            "  collect({rel: type(r), act: properties(a)}) AS acts",
             system=system, pid=petition_id,
         ).data()
     if not rows:
         raise HTTPException(status_code=404, detail="petition not found")
-    petition = _localised(dict(rows[0]["petition"]), safe_lang(lang))
-    acts = [a for a in rows[0]["acts"] if a.get("celex")]
-    for a in acts:
-        a["eurlex_url"] = (
-            "https://eur-lex.europa.eu/legal-content/EN/TXT/"
-            f"?uri=CELEX:{a['celex']}"
-        )
+    lang = safe_lang(lang)
+    petition = _localised(dict(rows[0]["petition"]), lang)
+    acts = [_act(a["rel"], a["act"], lang) for a in rows[0]["acts"]
+            if a.get("act") and a["act"].get("celex")]
     linked = {a["celex"] for a in acts if a.get("rel") == "ANSWERED_BY"}
     unresolved = [
         ref for ref in (petition.get("answer_refs") or []) if ref not in linked

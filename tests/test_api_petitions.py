@@ -60,11 +60,10 @@ DETAIL_ROWMAP = {
             "answer_refs": ["C(2026)4110"],
         },
         "acts": [
-            {"rel": "REGISTERED_BY", "celex": "32024D1824",
-             "title_en": "Commission Implementing Decision ...",
-             "title_fr": None, "date": "2024-06-17", "doc_type": "Decision"},
-            {"rel": None, "celex": None, "title_en": None,
-             "title_fr": None, "date": None, "doc_type": None},
+            {"rel": "REGISTERED_BY", "act": {
+                "celex": "32024D1824", "title_en": "Commission Implementing Decision ...",
+                "date_document": "2024-06-17", "doc_type": "Decision"}},
+            {"rel": None, "act": None},
         ],
     }],
 }

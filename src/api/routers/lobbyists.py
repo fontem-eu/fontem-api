@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+import pycountry
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
@@ -56,17 +57,37 @@ def _in_language(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
     translated = None
     if lang and lang != source and node.get("detail_goals_translated_from") == goals:
         translated = node.get(f"detail_goals_{lang}")
-    summary = None
+    summary, summary_lang = None, None
     if node.get("detail_goals_summarized_from") == goals:
-        summary = node.get(f"detail_goals_summary_{lang}") if lang else None
-        summary = summary or node.get(f"detail_goals_summary_{source}")
+        for code in (lang, source):
+            if code and node.get(f"detail_goals_summary_{code}"):
+                summary, summary_lang = node[f"detail_goals_summary_{code}"], code
+                break
     return {
         "goals": translated or goals,
         "goals_original": goals,
         "goals_lang": source,
         "goals_translated": translated is not None,
         "goals_summary": summary,
+        # The reader's language, or the goals' own where none was made in it.
+        "goals_summary_lang": summary_lang,
     }
+
+
+def lobbyist_cards(session, ids: list[str], lang: str | None) -> dict[str, dict[str, Any]]:
+    """What a search card shows of each registrant, by disclosure_id: the
+    summary of its goals, as `_in_language` picks it."""
+    rows = session.run("MATCH (l:Lobbyist) WHERE l.disclosure_id IN $ids "
+                       "RETURN properties(l) AS l", ids=sorted(set(ids))).data()
+    return {row["l"]["disclosure_id"]: {"summary": _in_language(row["l"], lang)["goals_summary"]}
+            for row in rows}
+
+
+def _country_code(alpha3: str | None) -> str | None:
+    """The register's ISO 3166 alpha-3 country as alpha-2: what a browser
+    names in any language (Intl.DisplayNames)."""
+    country = pycountry.countries.get(alpha_3=alpha3) if alpha3 else None
+    return country.alpha_2 if country else None
 
 
 def _band(node: dict[str, Any], prefix: str) -> dict[str, Any] | None:
@@ -121,6 +142,7 @@ def _profile(node: dict[str, Any], filed_for: list[dict],
         "interest_represented": node.get("detail_interest_represented"),
         "country": node.get("detail_country"),
         "country_iso": node.get("detail_country_iso"),
+        "country_code": _country_code(node.get("detail_country_iso")),
         "city": node.get("detail_city"),
         "eu_office": ({"city": node.get("detail_eu_office_city"),
                        "country": node.get("detail_eu_office_country")}
