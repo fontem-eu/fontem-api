@@ -69,6 +69,20 @@ spec:
                 - daily
                 - "--datasets-file"
                 - /etc/fontem-stats/datasets.txt
+          {{- /*
+            Same placement as the weekly sync and the statefulset: on the
+            nodes prod selects, with the toleration their taint needs.
+            The daily used to pin nothing, so in prod it ran on any
+            development node with room.
+          */}}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumes:
             - name: datasets
               configMap:

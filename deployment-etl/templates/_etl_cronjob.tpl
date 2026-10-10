@@ -67,6 +67,21 @@ spec:
           restartPolicy: Never
           imagePullSecrets:
             - name: regcred
+          {{- /*
+            Prod pins the ETL to the production nodes (nodeSelector) and
+            has to tolerate the taint they carry, or the selected pod can
+            never schedule. Both rendered here, once, for every CronJob:
+            until 2026-10-10 neither was, the values claimed otherwise,
+            and prod's ETL ran on whichever development node had room.
+          */}}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           containers:
             - name: etl
               image: contribute.void42.internal/fontem/fontem-api:{{ .Values.version }}
