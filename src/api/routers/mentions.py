@@ -17,11 +17,12 @@ this endpoint is the *summary* for hover / side-panel use.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Annotated, Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
+from src.api.lang import label_in, safe_lang
 from src.data.graph.neo4j_client import Neo4jClient
 
 
@@ -71,14 +72,17 @@ def _parse_iri(iri: str) -> tuple[str, str]:
 # Each branch handles a distinct mention class (Company, Person, Authority,
 # Contract, Country, Sanction, Listing, etc.). Splitting per class would
 # scatter a single projection that the side panel reads top-to-bottom.
-def _node_to_panel(cls: str, node: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=too-many-branches
+def _node_to_panel(cls: str, node: dict[str, Any],  # pylint: disable=too-many-branches
+                   lang: str | None = None) -> dict[str, Any]:
     """Project a Neo4j node onto the side-panel response.
 
     The shape stays small on purpose: the side panel is a hover/aside
     surface, not a full profile view. Authors with deeper questions
-    follow the `links.profile` link to the full route.
+    follow the `links.profile` link to the full route. The label is the
+    entity's name or title, in the reader's ``lang`` where translated.
     """
-    label = node.get("name") or node.get("display_name") or node.get("ref") or ""
+    label, label_original = label_in(node, lang)
+    label = label or node.get("display_name") or node.get("ref") or ""
     facts: list[dict[str, str]] = []
 
     if "country" in node and node["country"]:
@@ -126,6 +130,7 @@ def _node_to_panel(cls: str, node: dict[str, Any]) -> dict[str, Any]:  # pylint:
         "iri": iri,
         "class": cls,
         "label": label,
+        "label_original": label_original,
         "facts": facts,
         "links": {"profile": f"/{_route_for_class(cls)}/{entity_id}" if entity_id else None},
     }
@@ -147,10 +152,13 @@ def _route_for_class(cls: str) -> str:
 @inject
 def resolve_mention(
     iri: str = Query(..., description="Full Fontem IRI to resolve"),
+    lang: Annotated[str | None, Query(max_length=10,
+                                      description="Reader's language, for the label")] = None,
     *,
     neo4j: FromDishka[Neo4jClient],
 ) -> dict[str, Any]:
-    """Resolve an IRI to a side-panel summary."""
+    """Resolve an IRI to a side-panel summary, labelled in the reader's
+    ``lang`` where the name or title is translated."""
     cls, uid = _parse_iri(iri)
     with neo4j.session() as session:
         # Single-node lookup keyed by `gmr_id` — the convention the
@@ -183,4 +191,4 @@ def resolve_mention(
         if not result:
             raise HTTPException(status_code=404, detail="mention target not found")
         node = dict(result["n"])
-    return _node_to_panel(cls, node)
+    return _node_to_panel(cls, node, safe_lang(lang))
