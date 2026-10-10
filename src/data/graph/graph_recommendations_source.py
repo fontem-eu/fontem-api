@@ -108,7 +108,10 @@ class GraphRecommendationsSource:
             {
                 "id": r["id"],
                 "name": r.get("translated") or r["name"],
-                "name_original": r["name"] if r.get("translated") else None,
+                # Only a translation that reads differently has an original
+                # worth offering ("ČEPRO, a.s." is that in every language).
+                "name_original": (r["name"] if r.get("translated")
+                                  and r["translated"] != r["name"] else None),
                 "total_value_eur": float(r["total_value"]),
                 "contract_count": int(r["contract_count"]),
             }
