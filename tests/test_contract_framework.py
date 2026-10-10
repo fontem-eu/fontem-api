@@ -156,7 +156,7 @@ def test_siblings_come_back_newest_first_in_the_order_the_query_gave():
     fw = src.get_contract_detail("n1")["framework"]
     assert [s["ted_notice_id"] for s in fw["siblings"]] == ["s2", "s1"]
     assert fw["siblings"][0] == {
-        "ted_notice_id": "s2", "title": "Call-off", "country": "POL",
+        "ted_notice_id": "s2", "title": "Call-off", "title_original": None, "country": "POL",
         "value_eur": 1000.0, "publication_date": "2026-03-01",
         "supplier": "Alfa S.A.",
     }

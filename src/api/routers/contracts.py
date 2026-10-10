@@ -238,6 +238,7 @@ def authority_profile(
     return {
         "authority_id": authority_id,
         "authority_name": contracts.get("authority_name"),
+        "authority_name_original": contracts.get("authority_name_original"),
         "country": contracts.get("country"),
         "contract_count": contracts.get("contract_count", 0),
         "total_spend_eur": contracts.get("total_spend_eur", 0),
@@ -574,10 +575,14 @@ def unified_search(  # pylint: disable=too-many-locals,unused-argument
             "MATCH (a:Authority) "
             "WHERE toLower(a.name) CONTAINS toLower($q) "
             "RETURN a.authority_id AS authority_id, "
-            f"  {auth_name_expr} AS name, a.country AS country "
+            f"  {auth_name_expr} AS name, a.name AS published, a.country AS country "
             "LIMIT $limit",
             q=q, limit=limit,
         ).data()
+        # The published name beside a translated one, as on contract rows.
+        for r in auth_rows:
+            published = r.pop("published", None)
+            r["name_original"] = published if published and published != r["name"] else None
 
         # 4. Persons
         person_rows = session.run(
