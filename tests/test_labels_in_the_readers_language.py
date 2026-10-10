@@ -182,3 +182,24 @@ def test_the_top_authorities_without_a_translation_keep_their_name():
     for lang in (None, "fr"):
         (top,) = _spending(lang)
         assert top["name"] == "Ředitelství silnic a dálnic" and top["name_original"] is None
+
+
+def test_a_translation_that_reads_as_the_name_brings_no_original():
+    """ČEPRO, a.s. is ČEPRO, a.s. in German too: there is nothing to offer."""
+    same = {"authority_id": "auth-cepro", "name": "ČEPRO, a.s.", "name_de": "ČEPRO, a.s."}
+
+    class _Same(_Rows):
+        def run(self, query, params=None, **kwargs):
+            result = MagicMock()
+            prop = {**(params or {}), **kwargs}.get("name_prop")
+            result.data.return_value = [{"id": "auth-cepro", "name": same["name"],
+                                         "translated": same.get(prop) if prop else None,
+                                         "total_value": 1.0e9, "contract_count": 9}]
+            return result
+    client = make_test_client(recommendations_source=GraphRecommendationsSource(_Same()))
+    try:
+        (top,) = client.get("/euro-tracker/recommendations",
+                            params={"country": "CZE", "lang": "de"}).json()["authorities"]
+        assert top["name"] == "ČEPRO, a.s." and top["name_original"] is None
+    finally:
+        cleanup_dishka()
