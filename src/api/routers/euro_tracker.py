@@ -13,6 +13,8 @@ Two endpoints, both anonymous-callable:
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Query, Request
 
@@ -65,8 +67,8 @@ def recommendations(
         description="Alpha-3 country code (PRT, DEU, FRA, …).",
     ),
     limit: int = Query(10, ge=1, le=50),
-    lang: str | None = Query(None, max_length=10,
-                             description="Reader's language, for authority names"),
+    lang: Annotated[str | None, Query(max_length=10,
+                                      description="Reader's language, for authority names")] = None,
     *,
     svc: FromDishka[GraphRecommendationsSource],
 ) -> dict:

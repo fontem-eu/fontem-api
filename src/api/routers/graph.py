@@ -6,6 +6,8 @@ between entities. Used by the Cytoscape.js graph explorer UI.
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
@@ -373,8 +375,8 @@ def graph_paths(  # pylint: disable=too-many-arguments,too-many-locals
     to_id: str = Query(..., alias="to", description="Target entity ID"),
     max_depth: int = Query(5, ge=1, le=6, description="Max path length"),
     extra: int = Query(2, ge=0, le=3, description="Extra hops beyond shortest"),
-    lang: str | None = Query(None, max_length=10,
-                             description="Reader's language, for the two ends' labels"),
+    lang: Annotated[str | None, Query(
+        max_length=10, description="Reader's language, for the two ends' labels")] = None,
     *,
     neo4j: FromDishka[Neo4jClient],
 ):
@@ -439,8 +441,8 @@ def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-ar
         None,
         description="Filter contracts to those published on or after this date (YYYY-MM-DD)",
     ),
-    lang: str | None = Query(None, max_length=10,
-                             description="Reader's language, for the nodes' labels"),
+    lang: Annotated[str | None, Query(
+        max_length=10, description="Reader's language, for the nodes' labels")] = None,
     *,
     neo4j: FromDishka[Neo4jClient],
 ):

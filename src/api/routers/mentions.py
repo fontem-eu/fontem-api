@@ -17,7 +17,7 @@ this endpoint is the *summary* for hover / side-panel use.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Annotated, Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
@@ -152,7 +152,8 @@ def _route_for_class(cls: str) -> str:
 @inject
 def resolve_mention(
     iri: str = Query(..., description="Full Fontem IRI to resolve"),
-    lang: str | None = Query(None, max_length=10, description="Reader's language, for the label"),
+    lang: Annotated[str | None, Query(max_length=10,
+                                      description="Reader's language, for the label")] = None,
     *,
     neo4j: FromDishka[Neo4jClient],
 ) -> dict[str, Any]:
