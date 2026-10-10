@@ -82,6 +82,12 @@ def contract_order_by(sort: str | None) -> str:
                               CONTRACT_SORTS[DEFAULT_CONTRACT_SORT])
 
 
+def _original(shown: str | None, published: str | None) -> str | None:
+    """What the source published, when ``shown`` is a translation of it;
+    None when they are the same, as they are without a translation."""
+    return published if published and shown != published else None
+
+
 class GraphContractSource(ContractDataSource):
     """Production contract data source backed by Neo4j."""
 
@@ -166,6 +172,7 @@ class GraphContractSource(ContractDataSource):
                 # is not "not a framework".
                 "  ct.is_framework AS is_framework, "
                 f"  {auth_name} AS authority, a.country AS authority_country, "
+                "  a.name AS authority_published, "
                 # `authority_id` lets the contracts UI link each row's
                 # authority cell back to the authority profile. Without
                 # this the panel could only render the name as plain
@@ -223,6 +230,9 @@ class GraphContractSource(ContractDataSource):
                 "procedure_type": r["procedure_type"],
                 "ted_url": r["ted_url"],
                 "authority": r["authority"],
+                # The name the buyer published, when `authority` is a
+                # translation of it (else None).
+                "authority_original": _original(r["authority"], r.get("authority_published")),
                 "authority_id": r["authority_id"],
                 "authority_country": r["authority_country"],
                 # Joint procurement: the row names one buyer of several.
@@ -249,7 +259,7 @@ class GraphContractSource(ContractDataSource):
         with self._neo4j.session() as session:
             authority = session.run(
                 "MATCH (a:Authority {authority_id: $aid}) "
-                f"RETURN {auth_name} AS name, a.country AS country",
+                f"RETURN {auth_name} AS name, a.name AS published, a.country AS country",
                 aid=authority_id,
             ).single()
             if not authority:
@@ -398,6 +408,7 @@ class GraphContractSource(ContractDataSource):
         return {
             "authority_id": authority_id,
             "authority_name": authority["name"],
+            "authority_name_original": _original(authority["name"], authority.get("published")),
             "country": authority["country"],
             "total_spend_eur": total["total"] if total else 0,
             "contract_count": total["cnt"] if total else 0,
@@ -634,6 +645,7 @@ class GraphContractSource(ContractDataSource):
                 # link to it, while the supplier beside it is clickable.
                 "authority_id": auth_node.get("authority_id"),
                 "name": auth_name,
+                "name_original": _original(auth_name, auth_node.get("name")),
                 "country": auth_node.get("country"),
             },
             "contractor": contractor,
@@ -727,7 +739,8 @@ class GraphContractSource(ContractDataSource):
             "WITH s, co ORDER BY co.name "
             "WITH s, head(collect(co.name)) AS supplier "
             "RETURN s.ted_notice_id AS ted_notice_id, "
-            f"  {title_expr} AS title, s.country AS country, "
+            f"  {title_expr} AS title, {title_original_expr('s', lang)} AS title_original, "
+            "  s.country AS country, "
             "  s.value_eur AS value_eur, "
             "  s.publication_date AS publication_date, supplier "
             "ORDER BY publication_date IS NULL, publication_date DESC, "
@@ -743,6 +756,7 @@ class GraphContractSource(ContractDataSource):
         siblings = [{
             "ted_notice_id": r["ted_notice_id"],
             "title": r.get("title"),
+            "title_original": r.get("title_original"),
             "country": r.get("country"),
             "value_eur": r.get("value_eur"),
             "publication_date": r.get("publication_date"),
