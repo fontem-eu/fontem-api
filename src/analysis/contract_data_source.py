@@ -71,6 +71,17 @@ class ContractDataSource(ABC):
         text is stored elsewhere (briefing items, the search index)."""
 
     @abstractmethod
+    def get_register_cards(
+        self, lang: str | None, petition_ids: list[str] | None = None,
+        lobbyist_ids: list[str] | None = None,
+    ) -> dict:
+        """What a search card shows of the petitions and lobbying registrants
+        named, in `lang` (src/api/register_texts):
+        ``{"petitions": {petition_id: {"title", "title_original", "summary"}},
+        "lobbyists": {disclosure_id: {"summary"}}}``. For the search index,
+        which holds one text per entity, the original."""
+
+    @abstractmethod
     def get_single_bidder_stats(
         self, country: str | None = None, cpv: str | None = None,
     ) -> dict:

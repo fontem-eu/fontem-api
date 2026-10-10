@@ -22,6 +22,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.lang import safe_lang
+from src.api.register_texts import goals_in_language
 from src.data.graph.neo4j_client import Neo4jClient
 
 
@@ -46,41 +47,6 @@ def _money(node: dict[str, Any]) -> dict[str, Any] | None:
 #: one thing that names the register entry, whatever `url` holds.
 REGISTER_PAGE = ("https://transparency-register.europa.eu/search-register-or-update/"
                  "organisation-detail_en?id={disclosure_id}")
-
-
-def _in_language(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
-    """The goals and their summary in the reader's language, where a
-    translation of the goals as they read now exists; else as written.
-    A translation or summary made from goals since rewritten is not shown."""
-    goals = node.get("detail_goals")
-    source = node.get("detail_goals_lang")
-    translated = None
-    if lang and lang != source and node.get("detail_goals_translated_from") == goals:
-        translated = node.get(f"detail_goals_{lang}")
-    summary, summary_lang = None, None
-    if node.get("detail_goals_summarized_from") == goals:
-        for code in (lang, source):
-            if code and node.get(f"detail_goals_summary_{code}"):
-                summary, summary_lang = node[f"detail_goals_summary_{code}"], code
-                break
-    return {
-        "goals": translated or goals,
-        "goals_original": goals,
-        "goals_lang": source,
-        "goals_translated": translated is not None,
-        "goals_summary": summary,
-        # The reader's language, or the goals' own where none was made in it.
-        "goals_summary_lang": summary_lang,
-    }
-
-
-def lobbyist_cards(session, ids: list[str], lang: str | None) -> dict[str, dict[str, Any]]:
-    """What a search card shows of each registrant, by disclosure_id: the
-    summary of its goals, as `_in_language` picks it."""
-    rows = session.run("MATCH (l:Lobbyist) WHERE l.disclosure_id IN $ids "
-                       "RETURN properties(l) AS l", ids=sorted(set(ids))).data()
-    return {row["l"]["disclosure_id"]: {"summary": _in_language(row["l"], lang)["goals_summary"]}
-            for row in rows}
 
 
 def _country_code(alpha3: str | None) -> str | None:
@@ -148,7 +114,7 @@ def _profile(node: dict[str, Any], filed_for: list[dict],
                        "country": node.get("detail_eu_office_country")}
                       if node.get("detail_eu_office_city") else None),
         "website": node.get("detail_website"),
-        **_in_language(node, lang),
+        **goals_in_language(node, lang),
         "interests": node.get("detail_interests"),
         "levels_of_interest": node.get("detail_levels_of_interest"),
         "eu_legislative_proposals": node.get("detail_eu_legislative_proposals"),

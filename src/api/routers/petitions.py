@@ -10,64 +10,22 @@ endpoint takes query params rather than path segments.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Annotated, Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
-from src.api.lang import EU_LANGS, safe_lang
+from src.api.lang import safe_lang
+from src.api.register_texts import petition_texts
 from src.data.graph.neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/petitions", tags=["petitions"])
 
-#: The list's columns, besides the texts _localised picks.
+#: The list's columns, besides the texts petition_texts picks.
 _LIST_COLUMNS = ("system", "petition_id", "status", "total_supporters",
                  "registration_date", "answered_date", "latest_update")
-
-#: Per-language properties: read through _localised, not returned raw.
-_PER_LANGUAGE = re.compile(r"^(?:title|objectives|annex_text|objectives_summary)_[a-z]{2}$")
-
-
-def _localised(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
-    """The petition's texts in the reader's language, beside the original.
-
-    Title, objectives and annex come from the register's official
-    versions (title_<lang>, ...); the summary is machine-written, from the
-    English objectives, and shown only while it summarises them as they
-    read now. Without a version in ``lang``, the English one stands."""
-    out = {k: v for k, v in node.items() if not _PER_LANGUAGE.match(k)}
-    shown = lang if lang and node.get(f"title_{lang}") else None
-    original = node.get("title_lang")
-    for field in ("title", "objectives", "annex_text"):
-        if shown and node.get(f"{field}_{shown}"):
-            out[field] = node[f"{field}_{shown}"]
-        out[f"{field}_original"] = (node.get(f"{field}_{original}") if original else None) \
-            or node.get(field)
-    out["summary"] = None
-    if node.get("objectives_summarized_from") == node.get("objectives"):
-        in_lang = node.get(f"objectives_summary_{lang}") if lang else None
-        out["summary"] = in_lang or node.get("objectives_summary_en")
-    out["language_shown"] = shown or "en"
-    out["languages"] = sorted(code for code in EU_LANGS if node.get(f"title_{code}"))
-    return out
-
-
-def petition_cards(session, ids: list[str], lang: str | None) -> dict[str, dict[str, Any]]:
-    """What a search card shows of each petition, by petition_id: its title
-    and summary as `_localised` picks them."""
-    rows = session.run("MATCH (p:Petition) WHERE p.petition_id IN $ids "
-                       "RETURN properties(p) AS p", ids=sorted(set(ids))).data()
-    cards = {}
-    for row in rows:
-        local = _localised(row["p"], lang)
-        cards[row["p"]["petition_id"]] = {
-            "title": local.get("title"), "title_original": local.get("title_original"),
-            "summary": local.get("summary")}
-    return cards
-
 
 #: EUR-Lex publishes every act in each of the EU's languages, at this page.
 EURLEX_PAGE = "https://eur-lex.europa.eu/legal-content/{lang}/TXT/?uri=CELEX:{celex}"
@@ -170,7 +128,7 @@ def list_petitions(  # pylint: disable=too-many-arguments
 
 def _list_row(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
     """One petition as the list shows it, title and summary localised."""
-    local = _localised(node, lang)
+    local = petition_texts(node, lang)
     return {**{k: local.get(k) for k in _LIST_COLUMNS},
             "title": local.get("title"), "title_original": local.get("title_original"),
             "summary": local.get("summary"), "language_shown": local.get("language_shown")}
@@ -210,7 +168,7 @@ def petition_detail(
     if not rows:
         raise HTTPException(status_code=404, detail="petition not found")
     lang = safe_lang(lang)
-    petition = _localised(dict(rows[0]["petition"]), lang)
+    petition = petition_texts(dict(rows[0]["petition"]), lang)
     acts = [_act(a["rel"], a["act"], lang) for a in rows[0]["acts"]
             if a.get("act") and a["act"].get("celex")]
     linked = {a["celex"] for a in acts if a.get("rel") == "ANSWERED_BY"}
