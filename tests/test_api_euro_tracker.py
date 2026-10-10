@@ -31,7 +31,7 @@ def test_recommendations_returns_company_and_authority_lists():
         assert body["authorities"] == authorities
         # Limit was forwarded.
         rec.top_companies_in_country.assert_called_once_with("PRT", limit=10)
-        rec.top_authorities_in_country.assert_called_once_with("PRT", limit=10)
+        rec.top_authorities_in_country.assert_called_once_with("PRT", limit=10, lang=None)
     finally:
         cleanup_dishka()
 

@@ -79,9 +79,12 @@ class GraphRecommendationsSource:
         ]
 
     def top_authorities_in_country(
-        self, country_alpha3: str, limit: int = 10,
+        self, country_alpha3: str, limit: int = 10, lang: str | None = None,
     ) -> list[dict]:
-        """Authorities in the country, by total contract EUR awarded."""
+        """Authorities in the country, by total contract EUR awarded; each
+        named in ``lang`` (a safe_lang code) where its name is translated,
+        the published name beside it."""
+        translated = "a[$name_prop]" if lang else "null"
         with self._neo4j.session() as session:
             rows = session.run(
                 f"""
@@ -92,17 +95,20 @@ class GraphRecommendationsSource:
                 WHERE total_value > 0
                 RETURN a.authority_id    AS id,
                        a.name            AS name,
+                       {translated}      AS translated,
                        total_value,
                        contract_count
                 ORDER BY total_value DESC
                 LIMIT $limit
                 """,
-                {"country": country_alpha3, "limit": limit},
+                {"country": country_alpha3, "limit": limit,
+                 **({"name_prop": f"name_{lang}"} if lang else {})},
             ).data()
         return [
             {
                 "id": r["id"],
-                "name": r["name"],
+                "name": r.get("translated") or r["name"],
+                "name_original": r["name"] if r.get("translated") else None,
                 "total_value_eur": float(r["total_value"]),
                 "contract_count": int(r["contract_count"]),
             }

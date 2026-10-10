@@ -9,6 +9,7 @@ from __future__ import annotations
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
+from src.api.lang import label_in, safe_lang
 from src.data.graph.identity import identity_class
 from src.data.graph.neo4j_client import Neo4jClient
 
@@ -179,6 +180,16 @@ def _node_to_graph_node(node) -> GraphNode:
         id=nid, label=display, type=label,
         properties=_clean_props(props),
     )
+
+
+def _in_language(nodes: list[GraphNode], lang: str | None) -> None:
+    """Label each node in the reader's language where the graph holds a
+    translation of its name or title (see `label_in`), in place, keeping
+    the published one as ``label_original``."""
+    for node in nodes:
+        label, original = label_in(node.properties, lang)
+        if original:
+            node.label, node.label_original = label, original
 
 
 def _edge_to_graph_edge(rel) -> GraphEdge:
@@ -355,15 +366,20 @@ def _find_extra_paths(session, endpoints, shortest_len, search_depth):
     summary="Find paths between two entities",
 )
 @inject
-def graph_paths(
+# One Query() parameter per public knob, as graph_traverse below: bundling
+# them into a model would hide them from FastAPI's generated /docs.
+def graph_paths(  # pylint: disable=too-many-arguments,too-many-locals
     from_id: str = Query(..., alias="from", description="Source entity ID"),
     to_id: str = Query(..., alias="to", description="Target entity ID"),
     max_depth: int = Query(5, ge=1, le=6, description="Max path length"),
     extra: int = Query(2, ge=0, le=3, description="Extra hops beyond shortest"),
+    lang: str | None = Query(None, max_length=10,
+                             description="Reader's language, for the two ends' labels"),
     *,
     neo4j: FromDishka[Neo4jClient],
 ):
     """Find shortest and near-shortest paths between two entities."""
+    lang = safe_lang(lang)
     with neo4j.session() as session:
         from_det = _detect_entity(session, from_id)
         to_det = _detect_entity(session, to_id)
@@ -375,6 +391,7 @@ def graph_paths(
 
         from_node = _fetch_node(session, *from_det, from_id)
         to_node = _fetch_node(session, *to_det, to_id)
+        _in_language([from_node, to_node], lang)
 
         ep = {
             "from_label": from_det[0], "from_prop": from_det[1],
@@ -422,10 +439,15 @@ def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-ar
         None,
         description="Filter contracts to those published on or after this date (YYYY-MM-DD)",
     ),
+    lang: str | None = Query(None, max_length=10,
+                             description="Reader's language, for the nodes' labels"),
     *,
     neo4j: FromDishka[Neo4jClient],
 ):
-    """Variable-depth graph traversal starting from any entity type."""
+    """Variable-depth graph traversal starting from any entity type. With
+    ``lang``, contracts, grants and authorities are labelled in that
+    language where translated, the published label beside it."""
+    lang = safe_lang(lang)
     type_filter = (
         {t.strip() for t in types.split(",") if t.strip()}
         if types
@@ -445,6 +467,7 @@ def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-ar
 
         center_label, center_id_prop = detected
         center_node = _fetch_node(session, center_label, center_id_prop, entity_id)
+        _in_language([center_node], lang)
 
         if depth == 0:
             return GraphResponse(
@@ -484,6 +507,7 @@ def graph_traverse(  # pylint: disable=too-many-arguments,too-many-positional-ar
         nodes_map, edges_list, truncated, total = _apply_filters(
             nodes_map, edges_list, type_filter, center_label,
         )
+        _in_language(list(nodes_map.values()), lang)
 
         return GraphResponse(
             center=center_node,

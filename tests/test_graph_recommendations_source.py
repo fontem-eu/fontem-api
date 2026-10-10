@@ -82,6 +82,7 @@ def test_top_authorities_shape():
         {
             "id": "auth1",
             "name": "Município X",
+            "name_original": None,
             "total_value_eur": 8_000_000.0,
             "contract_count": 240,
         },

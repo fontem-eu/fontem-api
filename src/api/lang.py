@@ -91,3 +91,19 @@ def title_original_expr(alias: str, lang: str | None) -> str:
     if not lang:
         return "null"
     return f"CASE WHEN {alias}.title_{lang} IS NOT NULL THEN {alias}.title END"
+
+
+def label_in(props: dict, lang: str | None) -> tuple[str | None, str | None]:
+    """``(label, original)`` for an entity shown by its name or title.
+
+    In ``lang``, where the graph holds a translation (an authority's
+    ``name_<lang>``, a contract's or grant's ``title_<lang>``), the label is
+    the translation and the original is what the source published; else the
+    label is what was published and the original is None. A company's name
+    is its name in every language: there is nothing to translate.
+    """
+    published = props.get("name") or props.get("title")
+    translated = (props.get(f"name_{lang}") or props.get(f"title_{lang}")) if lang else None
+    if translated and translated != published:
+        return translated, published
+    return published, None

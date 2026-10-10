@@ -12,6 +12,8 @@ class GraphNode(BaseModel):
     label: str
     type: str
     properties: dict = {}
+    #: What the source published, when ``label`` is a translation of it.
+    label_original: str | None = None
 
 
 class GraphEdge(BaseModel):
