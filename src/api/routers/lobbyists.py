@@ -17,10 +17,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+import pycountry
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.lang import safe_lang
+from src.api.register_texts import goals_in_language
 from src.data.graph.neo4j_client import Neo4jClient
 
 
@@ -47,26 +49,11 @@ REGISTER_PAGE = ("https://transparency-register.europa.eu/search-register-or-upd
                  "organisation-detail_en?id={disclosure_id}")
 
 
-def _in_language(node: dict[str, Any], lang: str | None) -> dict[str, Any]:
-    """The goals and their summary in the reader's language, where a
-    translation of the goals as they read now exists; else as written.
-    A translation or summary made from goals since rewritten is not shown."""
-    goals = node.get("detail_goals")
-    source = node.get("detail_goals_lang")
-    translated = None
-    if lang and lang != source and node.get("detail_goals_translated_from") == goals:
-        translated = node.get(f"detail_goals_{lang}")
-    summary = None
-    if node.get("detail_goals_summarized_from") == goals:
-        summary = node.get(f"detail_goals_summary_{lang}") if lang else None
-        summary = summary or node.get(f"detail_goals_summary_{source}")
-    return {
-        "goals": translated or goals,
-        "goals_original": goals,
-        "goals_lang": source,
-        "goals_translated": translated is not None,
-        "goals_summary": summary,
-    }
+def _country_code(alpha3: str | None) -> str | None:
+    """The register's ISO 3166 alpha-3 country as alpha-2: what a browser
+    names in any language (Intl.DisplayNames)."""
+    country = pycountry.countries.get(alpha_3=alpha3) if alpha3 else None
+    return country.alpha_2 if country else None
 
 
 def _band(node: dict[str, Any], prefix: str) -> dict[str, Any] | None:
@@ -121,12 +108,13 @@ def _profile(node: dict[str, Any], filed_for: list[dict],
         "interest_represented": node.get("detail_interest_represented"),
         "country": node.get("detail_country"),
         "country_iso": node.get("detail_country_iso"),
+        "country_code": _country_code(node.get("detail_country_iso")),
         "city": node.get("detail_city"),
         "eu_office": ({"city": node.get("detail_eu_office_city"),
                        "country": node.get("detail_eu_office_country")}
                       if node.get("detail_eu_office_city") else None),
         "website": node.get("detail_website"),
-        **_in_language(node, lang),
+        **goals_in_language(node, lang),
         "interests": node.get("detail_interests"),
         "levels_of_interest": node.get("detail_levels_of_interest"),
         "eu_legislative_proposals": node.get("detail_eu_legislative_proposals"),

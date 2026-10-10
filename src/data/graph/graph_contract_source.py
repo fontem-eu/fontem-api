@@ -14,6 +14,7 @@ from fontem_event_schemas.integrity import contract_red_flags
 
 from ...analysis.contract_data_source import ContractDataSource
 from ...api.lang import authority_name_expr, contract_title_expr, title_original_expr
+from ...api.register_texts import goals_in_language, petition_texts
 from ...services.ted_lookup import detail_url_for
 from .identity import identity_class
 from ._value_quality import (
@@ -519,6 +520,28 @@ class GraphContractSource(ContractDataSource):
                     continue
                 for r in session.run(query, prop=f"{field}_{lang}", **{param: wanted}).data():
                     out[bucket][r["key"]] = {"title": r["title"], "original": r["original"]}
+        return out
+
+    def get_register_cards(
+        self, lang: str | None, petition_ids: list[str] | None = None,
+        lobbyist_ids: list[str] | None = None,
+    ) -> dict:
+        out: dict = {"petitions": {}, "lobbyists": {}}
+        with self._neo4j.session() as session:
+            if petition_ids:
+                for row in session.run("MATCH (p:Petition) WHERE p.petition_id IN $ids "
+                                       "RETURN properties(p) AS p",
+                                       ids=sorted(set(petition_ids))).data():
+                    texts = petition_texts(row["p"], lang)
+                    out["petitions"][row["p"]["petition_id"]] = {
+                        "title": texts.get("title"), "title_original": texts.get("title_original"),
+                        "summary": texts.get("summary")}
+            if lobbyist_ids:
+                for row in session.run("MATCH (l:Lobbyist) WHERE l.disclosure_id IN $ids "
+                                       "RETURN properties(l) AS l",
+                                       ids=sorted(set(lobbyist_ids))).data():
+                    out["lobbyists"][row["l"]["disclosure_id"]] = {
+                        "summary": goals_in_language(row["l"], lang)["goals_summary"]}
         return out
 
     def get_contract_detail(

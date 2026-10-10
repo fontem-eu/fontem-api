@@ -247,6 +247,51 @@ def _localise_titles(results: list[dict], lang: str | None,
             r["title"] = hit["title"]
 
 
+#: Register entries whose card reads its texts from the graph, and the
+#: bucket of get_register_cards their id is looked up in. Their index row is
+#: the original — a petition's English title and objectives in full, a
+#: registrant's name and the register's tag (``eu-lobbying``) — so the card
+#: takes its title and a tweet-long summary in the reader's language from
+#: the node instead.
+_REGISTER_CARDS = {"petition": "petitions", "eu_lobbying": "lobbyists"}
+
+
+def _register_cards(results: list[dict], lang: str | None,
+                    source: ContractDataSource) -> None:
+    """Petition and lobbying cards in the reader's language, in place.
+
+    A card with a summary shows it as its subtitle (``subtitle_is_summary``,
+    machine-written) and drops the rest of the indexed text; a lobbying card
+    without one drops the register's tag. A petition's title is its
+    official version in ``lang`` where the register publishes one, the
+    published one kept as ``title_original``. Without ``lang`` the summaries
+    come in their own language. A failure here costs the texts, never the
+    results.
+    """
+    wanted: dict[str, list[str]] = {"petitions": [], "lobbyists": []}
+    for r in results:
+        if r["type"] in _REGISTER_CARDS:
+            wanted[_REGISTER_CARDS[r["type"]]].append(r["id"])
+    if not any(wanted.values()):
+        return
+    try:
+        found = source.get_register_cards(lang, petition_ids=wanted["petitions"],
+                                          lobbyist_ids=wanted["lobbyists"])
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("search: register texts unavailable (lang=%s)", lang, exc_info=True)
+        return
+    for r in results:
+        card = found.get(_REGISTER_CARDS.get(r["type"], ""), {}).get(r["id"])
+        if card is None:
+            continue
+        if card.get("title") and card["title"] != r["title"]:
+            r["title_original"], r["title"] = r["title"], card["title"]
+        if card.get("summary"):
+            r.update(subtitle=card["summary"], context="", subtitle_is_summary=True)
+        elif r["type"] == "eu_lobbying":
+            r.update(subtitle="", context="")
+
+
 @router.get(
     "/results",
     responses={
@@ -359,6 +404,7 @@ def search_results(
 
     results = [_shape_row(r) for r in dict_rows]
     _localise_titles(results, safe_lang(lang), contracts)
+    _register_cards(results, safe_lang(lang), contracts)
     return {
         "query": q,
         "results": results,
